@@ -1,9 +1,10 @@
+from dotenv import load_dotenv
+load_dotenv()
 import os
 import asyncio
 import time
 import math
 import sys
-
 # 1. Python 3.15 Windows Event Loop Setup
 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 try:
