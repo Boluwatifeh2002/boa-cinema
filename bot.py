@@ -20,12 +20,11 @@ from pyrogram import Client, filters
 
 # 3. Automatically create the 'sessions' folder if it doesn't exist yet
 os.makedirs("sessions", exist_ok=True)
-
 app = Client(
     "sessions/my_leech_bot",
-    api_id=34933546,
-    api_hash="d81232abdd5097ad64474d2b92bdb3b5",
-    bot_token="9256037824:AAFGJHuxLpTqDjX3nhuJS1TSLhuYz7shBu0"
+    api_id=int(os.environ.get("API_ID")),
+    api_hash=os.environ.get("API_HASH"),
+    bot_token=os.environ.get("BOT_TOKEN")
 )
 
 # Define your target destinations here
@@ -33,7 +32,7 @@ MAIN_CHANNEL = "@boasentertainment"
 SERIES_CHANNEL = "@boaseriesupload"
 
 # Security: Restrict bot usage exclusively to your User ID
-ADMIN_USER_ID = 2111077131
+ADMIN_USER_ID = int(os.environ.get("OWNER_ID"))
 
 # Task queue and active tasks tracking
 task_queue = asyncio.Queue()

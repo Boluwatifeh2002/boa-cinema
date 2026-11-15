@@ -4,9 +4,9 @@ import { createServer } from 'node:http';
 // 🔑 YOUR TOKENS & CONFIG:
 // ==========================================
 const CONFIG = {
-  BOT_TOKEN: "6798122379:AAHPZjCPNIPBdOy0JouiKCl-ZRZD2VBqdSw",
-  TMDB_KEY: "947814469be7759f0fa8aa9d3da8cba2",
-  OWNER_ID: "2111077131"
+    BOT_TOKEN: process.env.BOT_TOKEN,
+    TMDB_KEY: process.env.TMDB_KEY,
+    OWNER_ID: process.env.OWNER_ID
 };
 
 // Polyfill Cloudflare's 'caches' API for Node.js environments
