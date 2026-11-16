@@ -1,6 +1,36 @@
 import 'dotenv/config';
 import { createServer } from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 
+// Local file storage fallback for Cloudflare KV (BOT_USERS)
+const ADDONS_FILE = path.join(process.cwd(), 'addons.json');
+
+const mockBotUsersKV = {
+  async get(key) {
+    try {
+      if (fs.existsSync(ADDONS_FILE)) {
+        const data = fs.readFileSync(ADDONS_FILE, 'utf8');
+        const json = JSON.parse(data);
+        if (key === 'cfg:plugins' || key === 'cfg:addons') {
+          return JSON.stringify(json);
+        }
+      }
+    } catch (e) {
+      console.error("Error reading addons.json:", e);
+    }
+    return null;
+  },
+  async put(key, value) {
+    try {
+      if (key === 'cfg:plugins' || key === 'cfg:addons') {
+        fs.writeFileSync(ADDONS_FILE, value, 'utf8');
+      }
+    } catch (e) {
+      console.error("Error writing addons.json:", e);
+    }
+  }
+};
 // ==========================================
 // 🔑 YOUR TOKENS & CONFIG:
 // ==========================================
@@ -56,11 +86,12 @@ const server = createServer(async (req, res) => {
     });
 
     const env = {
-      ...process.env,
-      BOT_TOKEN: CONFIG.BOT_TOKEN,
-      TMDB_KEY: CONFIG.TMDB_KEY,
-      OWNER_ID: CONFIG.OWNER_ID,
-    };
+  ...process.env,
+  BOT_TOKEN: CONFIG.BOT_TOKEN,
+  TMDB_KEY: CONFIG.TMDB_KEY,
+  OWNER_ID: CONFIG.OWNER_ID,
+  BOT_USERS: mockBotUsersKV 
+};
     
     const ctx = {
       waitUntil: (promise) => Promise.resolve(promise).catch(console.error),
