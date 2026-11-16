@@ -1,0 +1,38 @@
+[
+  {
+    "cats": [],
+    "id": "pl_1794849162270",
+    "name": "All in one",
+    "url": "https://raw.githubusercontent.com/D3adlyRocket/All-in-One-Nuvio/refs/heads/main/manifest.json"
+  },
+  {
+    "cats": [],
+    "id": "pl_1794855378284",
+    "name": "Abinathankkv",
+    "url": "https://raw.githubusercontent.com/Abinanthankv/NuvioRepo/refs/heads/master/manifest.json"
+  },
+  {
+    "cats": [],
+    "id": "pl_1794855732662",
+    "name": "NuvioTr",
+    "url": "https://raw.githubusercontent.com/mooncrown04/nuviotr/refs/heads/main/manifest.json"
+  },
+  {
+    "cats": [],
+    "id": "pl_1794855862208",
+    "name": "Nuvio Providers",
+    "url": "https://raw.githubusercontent.com/yoruix/nuvio-providers/refs/heads/main/manifest.json"
+  },
+  {
+    "cats": [],
+    "id": "pl_1794855891395",
+    "name": "Michat 88",
+    "url": "https://raw.githubusercontent.com/michat88/nuvio-providers/refs/heads/main/manifest.json"
+  },
+  {
+    "cats": [],
+    "id": "pl_1794856020931",
+    "name": "phisher98",
+    "url": "https://raw.githubusercontent.com/phisher98/phisher-nuvio-providers/refs/heads/main/manifest.json"
+  }
+]

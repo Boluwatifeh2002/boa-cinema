@@ -1351,20 +1351,86 @@ async function getPluginsConfig(env) {
   } catch (e) {}
   return { globalEnabled: true, groupByRepo: false, repos: [] };
 }
-
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
   try {
-    const url = `https://v3-cinemeta.strem.io/stream/${mediaType}/${tmdbId}${mediaType === 'tv' ? `:${season}:${episode}` : ''}.json`;
-    console.log("Fetching streams from external API:", url);
-    
-    const res = await fetch(url, { cf: { cacheTtl: 300 } });
-    if (!res.ok) return [];
-    
-    const data = await res.json();
-    console.log("External streams received:", JSON.stringify(data.streams || []));
-    return data.streams || [];
+    const rawPlugins = (await env.BOT_USERS.get('cfg:plugins')) || (await env.BOT_USERS.get('cfg:addons'));
+    if (!rawPlugins) return [];
+
+    const parsed = JSON.parse(rawPlugins);
+    // Support both top-level array (your addons.json format) and { repos: [] }
+    const repos = Array.isArray(parsed)
+      ? parsed
+      : (parsed.repos || parsed.addons || []);
+
+    let allStreams = [];
+
+    for (const repo of repos) {
+      if (repo.enabled === false) continue;
+      const manifestUrl = repo.url || repo.transportUrl;
+      if (!manifestUrl) continue;
+
+      console.log(`Fetching Nuvio repo manifest: ${manifestUrl}`);
+
+      try {
+        const manifestRes = await fetch(manifestUrl);
+        if (!manifestRes.ok) continue;
+        const manifest = await manifestRes.json();
+
+        // Nuvio manifests list scrapers under manifest.scrapers or manifest.plugins
+        const scrapers = manifest.scrapers || manifest.plugins || [];
+
+        for (const scraper of scrapers) {
+          if (scraper.enabled === false) continue;
+// If the scraper has a filename instead of a direct url, resolve it against the manifest origin
+if (!scraper.url && scraper.filename) {
+  const repoBase = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
+  scraper.url = repoBase + scraper.filename;
+}
+if (!scraper.url) continue;
+          try {
+            console.log(`Running scraper: ${scraper.name || scraper.id}`);
+            const codeRes = await fetch(scraper.url);
+            if (!codeRes.ok) continue;
+            const scriptCode = await codeRes.text();
+
+            // Execute Nuvio-compatible JS scraper module
+            // Execute Nuvio-compatible JS scraper module
+const moduleObj = { exports: {} };
+const mockRequire = (mod) => {
+  if (mod === 'axios') return fetch;
+  return {};
+};
+const fn = new Function('module', 'exports', 'require', 'moduleObj', 'fetch', 'console', scriptCode);
+fn(moduleObj, moduleObj.exports, mockRequire, moduleObj, fetch, console);
+
+            const getstreams = moduleobj.exports.getstreams || moduleobj.exports.default?.getstreams;
+    if (typeof getstreams === 'function') {
+      try {
+        const scraperPromise = getstreams(String(tmdbId), mediaType, Number(season) || 1, Number(episode) || 1);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Scraper timeout')), 5000));
+        const streams = await Promise.race([scraperPromise, timeoutPromise]);
+        
+        if (Array.isArray(streams) && streams.length > 0) {
+          allStreams.push(...streams);
+          console.log(`Collected ${streams.length} streams from ${scraper.name || scraper.id}`);
+        }
+      } catch (err) {
+        console.log(`Skipped scraper ${scraper.name || scraper.id}: ${err.message}`);
+      }
+    }
+          } catch (scraperErr) {
+            console.error(`Scraper ${scraper.name || scraper.url} failed:`, scraperErr.message);
+          }
+        }
+      } catch (repoErr) {
+        console.error(`Failed to load repo ${manifestUrl}:`, repoErr.message);
+      }
+    }
+
+    console.log(`Total streams collected: ${allStreams.length}`);
+    return allStreams;
   } catch (err) {
-    console.error("External stream fetch failed:", err.message);
+    console.error("Plugin stream fetch failed:", err.message);
     return [];
   }
 }
@@ -1398,6 +1464,43 @@ async function handleApi(url, env) {
       console.error("Plugin fetch error:", err.message);
       return send({ error: err.message }, 500);
     }
+    }
+    if (path === "/api/providers") {
+      const raw = (await env.BOT_USERS.get("cfg:plugins")) || (await env.BOT_USERS.get("cfg:addons")) || "[]";
+      const parsed = JSON.parse(raw);
+      const savedRepos = Array.isArray(parsed) ? parsed : (parsed.repos || []);
+      const repos = [];
+      const providers = [];
+
+      for (const repo of savedRepos) {
+        try {
+          const res = await fetch(repo.url);
+          const manifest = res.ok ? await res.json() : {};
+          const items = manifest.scrapers || manifest.plugins || manifest.providers || [];
+
+          repos.push({
+            id: repo.id,
+            name: manifest.name || repo.name,
+            version: manifest.version || "1.0.0",
+            url: repo.url,
+            providerCount: items.length
+          });
+
+          for (const p of items) {
+            providers.push({
+              name: p.name,
+              description: p.description || "",
+              version: p.version || "1.0.0",
+              types: Array.isArray(p.types) ? p.types.join(" | ") : (p.type || "movie | tv"),
+              repoName: manifest.name || repo.name,
+              url: p.url || p.scriptUrl || ""
+            });
+          }
+        } catch (e) {
+          repos.push({ ...repo, version: "1.0.0", providerCount: 0 });
+        }
+      }
+      return send({ repos, providers }, 200);
     }
     if (path === "/api/rows") {
       const base = ROW_ORDER[media].map((k) => ({ key: k, title: ROW_DEFS[media][k].title }));
@@ -1692,7 +1795,7 @@ footer p{max-width:94%;margin:8px auto 0}
 .toast.on{opacity:1}
 
 /* ---------- site notice + owner panel ---------- */
-.notice{display:none;margin:12px 16px 0;padding:12px 40px 12px 14px;border-radius:14px;background:linear-gradient(135deg,#3a0b10,#1b1b1d);border:1px solid rgba(229,9,20,.35);font-size:14px;font-weight:600;line-height:1.45;position:relative}
+.notice{display:none;margin:12px 16px 0;padding:12px 40px 12px 14px;border-radius:14px;background:linear-gradient(135deg,#3a0b10,#1b1b1d);border:1px solid rgba(229,9,20,.35);font-weight:600;line-height:1.45;position:relative}
 .notice.on{display:block}
 .notice button{position:absolute;right:6px;top:6px;width:30px;height:30px;border:0;background:none;color:#a3a3a8;font-size:22px;line-height:1}
 #admin{position:fixed;inset:0;z-index:75;background:var(--bg);overflow-y:auto;overflow-x:hidden;display:none;-webkit-overflow-scrolling:touch;padding:calc(var(--sat) + 14px) 16px calc(var(--sab) + 60px)}
@@ -3172,20 +3275,54 @@ $("smclose").onclick = function () {
     var cPl = h("div", "acard");
     cPl.appendChild(h("h3", null, "Plugins"));
     cPl.appendChild(h("p", null, "Install JavaScript scraper repositories and test providers internally."));
-    (ADM.plugins || []).forEach(function(p) {
-      var prow = h("div", "arow");
-      prow.appendChild(h("b", null, p.name));
-      var rmBtn = h("button", "abtn red", "Remove");
-      rmBtn.onclick = function() {
-        adm("/api/admin/plugins", { action: "remove", id: p.id }).then(function(r) {
-          ADM.plugins = r.plugins;
-          renderAdmin(false);
-          toast("Plugin removed");
-        });
-      };
-      prow.appendChild(rmBtn);
-      cPl.appendChild(prow);
-    });
+    var nuvioListWrap = h("div", null);
+    nuvioListWrap.appendChild(h("div", "note", "Loading repositories & providers..."));
+    cPl.appendChild(nuvioListWrap);
+
+    fetch("/api/providers").then(function(r) { return r.json(); }).then(function(data) {
+      nuvioListWrap.textContent = "";
+      var repos = data.repos || [];
+      var providers = data.providers || [];
+
+      // 1. Render Repositories Cards
+      repos.forEach(function(repo) {
+        var card = h("div", "arow");
+        card.style.cssText = "flex-direction:column;align-items:stretch;gap:6px;padding:14px;background:#18181b;border:1px solid #27272a;border-radius:12px;margin-bottom:10px;";
+
+        var topRow = h("div", null);
+        topRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;";
+        var titleEl = h("b", null, repo.name || "Repository");
+        titleEl.style.fontSize = "16px";
+        topRow.appendChild(titleEl);
+
+        var rmBtn = h("button", "abtn red", "Remove");
+        rmBtn.onclick = function() {
+          adm("/api/admin/plugins", { action: "remove", id: repo.id }).then(function(res) {
+            ADM.plugins = res.plugins;
+            renderAdmin(false);
+            toast("Repository removed");
+          });
+        };
+        topRow.appendChild(rmBtn);
+        card.appendChild(topRow);
+
+        var verEl = h("div", null, "Version " + (repo.version || "1.0.0"));
+        verEl.style.cssText = "font-size:12px;color:#a1a1aa;";
+        card.appendChild(verEl);
+
+        var urlEl = h("div", null, repo.url || "");
+        urlEl.style.cssText = "font-size:11px;color:#71717a;word-break:break-all;";
+        card.appendChild(urlEl);
+
+        var countBadge = h("span", null, (repo.providerCount || 0) + " providers");
+        countBadge.style.cssText = "align-self:flex-start;background:#27272a;color:#d4d4d8;font-size:11px;padding:4px 10px;border-radius:6px;margin-top:4px;";
+        card.appendChild(countBadge);
+
+        nuvioListWrap.appendChild(card);
+      });
+}).catch(function () { nuvioListWrap.textContent = "Couldn't load repositories."; });
+
+      // 2. Render Expanded Providers Section
     var plName = h("input", "ainp"); plName.placeholder = "Plugin Name";
     var plUrl = h("input", "ainp"); plUrl.type = "url"; plUrl.placeholder = "Repository URL (https://...)";
     cPl.appendChild(plName); cPl.appendChild(plUrl);
@@ -3728,10 +3865,10 @@ async function inspectAddon(base) {
   } catch (e) {
     throw new Error("That link isn't an add-on manifest");
   }
-  const cats = (Array.isArray(m.catalogs) ? m.catalogs : [])
-    .filter((c) => c && (c.type === "movie" || c.type === "series") && c.id && !(c.extra || []).some((e) => e && e.isRequired))
-    .slice(0, 40)
-    .map((c) => ({ type: c.type, id: String(c.id).slice(0, 80), name: String(c.name || c.id).slice(0, 60) }));
+  const cats = (Array.isArray(m.catalogs) ? m.catalogs : (m.cats || [])).map((c) => ({
+    type: c.type,
+    id: String(c.id).slice(0, 60)
+  }));
   const resNames = (Array.isArray(m.resources) ? m.resources : []).map((r) => (typeof r === "string" ? r : r && r.name));
   return {
     name: String(m.name || "Add-on").slice(0, 60),
@@ -3747,7 +3884,7 @@ const importedRowList = async (env, media) => {
   const out = [];
   for (const a of await getAddons(env)) {
     for (const c of a.cats || []) {
-      if (stType(c.type) === media) out.push({ key: c.k, title: `${a.name}: ${c.name}`.slice(0, 70) });
+      if (stType(c.type) === media) out.push({ key: c.k, title: `${a.name}: ${c.name}`.slice(0, 60) });
     }
   }
   return out;
@@ -3900,7 +4037,7 @@ async function adminRoute(request, url, env) {
         if (!cats.length) return json({ error: "Pick at least one catalog" }, 400);
         list = list.filter((a) => a.base !== base);
         list.push({ name: info.name, base, cats });
-        if (list.length > 6 || list.reduce((n, a) => n + a.cats.length, 0) > 20) {
+        if (list.length > 6 || list.reduce((n, a) => n + (a.cats || []).length, 0) > 20) {
           return json({ error: "Limit reached: 6 add-ons and 20 catalogs in total" }, 400);
         }
       } else {

@@ -24,13 +24,19 @@ const mockBotUsersKV = {
   async put(key, value) {
     try {
       if (key === 'cfg:plugins' || key === 'cfg:addons') {
-        fs.writeFileSync(ADDONS_FILE, value, 'utf8');
+        let parsed = typeof value === 'string' ? JSON.parse(value) : value;
+        if (Array.isArray(parsed)) {
+          parsed = parsed.map(item => ({ cats: [], ...item }));
+        } else if (parsed && Array.isArray(parsed.repos)) {
+          parsed.repos = parsed.repos.map(item => ({ cats: [], ...item }));
+        }
+        fs.writeFileSync(ADDONS_FILE, JSON.stringify(parsed, null, 2), 'utf8');
       }
     } catch (e) {
       console.error("Error writing addons.json:", e);
     }
   }
-};
+  };
 // ==========================================
 // 🔑 YOUR TOKENS & CONFIG:
 // ==========================================
