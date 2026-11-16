@@ -3,6 +3,42 @@ import { createServer } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// --- ROBUST COMMONJS & EVAL SHIMS FOR NUVIO SCRAPERS ---
+globalThis.moduleObj = { exports: {} };
+globalThis.module = globalThis.moduleObj;
+globalThis.exports = globalThis.moduleObj.exports;
+
+globalThis.customRequire = (mod) => {
+  if (mod === 'cheerio') return globalThis.cheerio || {};
+  if (mod === 'axios') return globalThis.axios || { get: fetch, post: fetch };
+  throw new Error(`Module not found: ${mod}`);
+};
+
+// Intercept global Function constructor so any dynamically evaluated scraper code 
+// automatically receives moduleObj, module, exports, and require without throwing ReferenceError.
+const OriginalFunction = globalThis.Function;
+globalThis.Function = function(...args) {
+  if (args.length === 0) return new OriginalFunction();
+  const body = args[args.length - 1];
+  const params = args.slice(0, -1);
+  
+  if (!params.includes('moduleObj')) params.push('moduleObj');
+  if (!params.includes('module')) params.push('module');
+  if (!params.includes('exports')) params.push('exports');
+  if (!params.includes('require')) params.push('require');
+  
+  const wrappedBody = `
+    var moduleObj = globalThis.moduleObj;
+    var module = globalThis.module;
+    var exports = globalThis.exports;
+    var require = globalThis.customRequire;
+    ${body}
+  `;
+  return new OriginalFunction(...params, wrappedBody);
+};
+globalThis.Function.prototype = OriginalFunction.prototype;
+// -------------------------------------------------------
+
 // Local file storage fallback for Cloudflare KV (BOT_USERS)
 const ADDONS_FILE = path.join(process.cwd(), 'addons.json');
 
@@ -36,14 +72,15 @@ const mockBotUsersKV = {
       console.error("Error writing addons.json:", e);
     }
   }
-  };
+};
+
 // ==========================================
 // 🔑 YOUR TOKENS & CONFIG:
 // ==========================================
 const CONFIG = {
-    BOT_TOKEN: process.env.BOT_TOKEN,
-    TMDB_KEY: process.env.TMDB_KEY,
-    OWNER_ID: process.env.OWNER_ID
+  BOT_TOKEN: process.env.BOT_TOKEN,
+  TMDB_KEY: process.env.TMDB_KEY,
+  OWNER_ID: process.env.OWNER_ID
 };
 
 // Polyfill Cloudflare's 'caches' API for Node.js environments
@@ -92,13 +129,13 @@ const server = createServer(async (req, res) => {
     });
 
     const env = {
-  ...process.env,
-  BOT_TOKEN: CONFIG.BOT_TOKEN,
-  TMDB_KEY: CONFIG.TMDB_KEY,
-  OWNER_ID: CONFIG.OWNER_ID,
-  BOT_USERS: mockBotUsersKV 
-};
-    
+      ...process.env,
+      BOT_TOKEN: CONFIG.BOT_TOKEN,
+      TMDB_KEY: CONFIG.TMDB_KEY,
+      OWNER_ID: CONFIG.OWNER_ID,
+      BOT_USERS: mockBotUsersKV
+    };
+
     const ctx = {
       waitUntil: (promise) => Promise.resolve(promise).catch(console.error),
       passThroughOnException: () => {}

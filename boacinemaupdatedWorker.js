@@ -3320,7 +3320,189 @@ $("smclose").onclick = function () {
 
         nuvioListWrap.appendChild(card);
       });
+
+           // ===== Installed providers (development view) =====
+      // Shows the providers found in the repositories you installed, Nuvio style.
+      // This is NOT your licensed list. That stays in its own card.
+      // Delete = removes it from this list (saved in this browser). Refresh = re-reads /api/providers.
+      if (!Array.isArray(providers)) providers = [];
+
+      var repoNames = {};
+      repos.forEach(function (r) { repoNames[r.id] = r.name; });
+
+      var ipHidden = {};
+      try { ipHidden = JSON.parse(localStorage.getItem("ipHidden") || "{}") || {}; } catch (e) { ipHidden = {}; }
+      var ipSave = function () {
+        try { localStorage.setItem("ipHidden", JSON.stringify(ipHidden)); } catch (e) {}
+      };
+      var ipKey = function (p) {
+        return String(p.repoId || (typeof p.repo === "string" ? p.repo : "") || "") + "::" + String(p.id || p.name || "");
+      };
+
+      var ipChip = function (text) {
+        var c = h("span", null, text);
+        c.style.cssText = "display:inline-block;background:#27272a;color:#e4e4e7;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;";
+        return c;
+      };
+
+      var ipDraw; // defined below
+
+      var ipCard = function (p) {
+        var types = p.supportedTypes || p.types || p.type || "";
+        if (Array.isArray(types)) types = types.join(" | ");
+        types = String(types || "");
+        var ver = p.version ? "v" + String(p.version).replace(/^v/i, "") : "";
+        var repoLabel = p.repoName || repoNames[p.repoId] || repoNames[p.repo] || "";
+        if (!repoLabel && typeof p.repo === "string") repoLabel = p.repo;
+        var pname = p.name || p.title || p.id || "Provider";
+
+        var row = h("div", null);
+        row.style.cssText = "display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:14px;background:#18181b;border:1px solid #27272a;border-radius:16px;margin-bottom:12px;";
+
+        var top = h("div", null);
+        top.style.cssText = "display:flex;align-items:center;gap:12px;";
+
+        var ico = h("div", null, String(pname).charAt(0).toUpperCase());
+        ico.style.cssText = "width:40px;height:40px;border-radius:12px;background:#1e3a5f;color:#60a5fa;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;flex:none;";
+        top.appendChild(ico);
+
+        var txt = h("div", null);
+        var pub = h("div", null, repoLabel);
+        pub.style.cssText = "font-size:12px;font-weight:700;color:#a1a1aa;";
+        var nm = h("div", null, pname);
+        nm.style.cssText = "font-size:18px;font-weight:800;line-height:1.2;";
+        var ds = h("div", null, p.description || p.desc || "");
+        ds.style.cssText = "font-size:13px;color:#d4d4d8;margin-top:2px;";
+        txt.appendChild(pub);
+        txt.appendChild(nm);
+        txt.appendChild(ds);
+        top.appendChild(txt);
+        row.appendChild(top);
+
+        var chips = h("div", null);
+        chips.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;";
+        if (types) chips.appendChild(ipChip(types));
+        if (ver) chips.appendChild(ipChip(ver));
+        row.appendChild(chips);
+
+        var btns = h("div", null);
+        btns.style.cssText = "display:flex;gap:8px;";
+
+        var tb = h("button", "abtn", "Test Provider");
+        tb.style.cssText = "flex:1;margin:0;padding:12px 16px;border-radius:14px;";
+        tb.onclick = function () {
+          toast("Provider testing isn't connected yet");
+        };
+        btns.appendChild(tb);
+
+        var del = h("button", "abtn red", "Delete");
+        del.style.cssText = "margin:0;padding:12px 18px;border-radius:14px;";
+        var armed = false;
+        del.onclick = function () {
+          if (!armed) {
+            armed = true;
+            del.textContent = "Tap again to delete";
+            setTimeout(function () { armed = false; del.textContent = "Delete"; }, 3000);
+            return;
+          }
+          ipHidden[ipKey(p)] = 1;
+          ipSave();
+          ipDraw();
+          toast(pname + " deleted");
+        };
+        btns.appendChild(del);
+
+        row.appendChild(btns);
+        return row;
+      };
+
+      // Header row: title on the left, Refresh on the right
+      var ipBar = h("div", null);
+      ipBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin:16px 2px 8px;";
+      var ipHead = h("div", null, "PROVIDERS");
+      ipHead.style.cssText = "font-size:12px;font-weight:800;letter-spacing:.6px;color:#a1a1aa;";
+      var ipRefresh = h("button", "abtn", "Refresh");
+      ipRefresh.style.cssText = "margin:0;padding:8px 16px;border-radius:999px;";
+      ipBar.appendChild(ipHead);
+      ipBar.appendChild(ipRefresh);
+      nuvioListWrap.appendChild(ipBar);
+
+      nuvioListWrap.appendChild(h("div", "note", "Found in the repositories you installed. For development only. Your licensed providers are listed separately below."));
+
+      var ipSearch = h("input", "ainp");
+      ipSearch.placeholder = "Search providers";
+      nuvioListWrap.appendChild(ipSearch);
+
+      var ipList = h("div", null);
+      nuvioListWrap.appendChild(ipList);
+
+      var ipMore = h("button", "abtn", "Show more");
+      ipMore.style.cssText = "width:100%;margin:4px 0 12px;padding:12px 16px;border-radius:14px;";
+      nuvioListWrap.appendChild(ipMore);
+
+      var ipRestore = h("button", "abtn", "Restore deleted");
+      ipRestore.style.cssText = "width:100%;margin:0 0 12px;padding:10px 16px;border-radius:14px;background:#27272a;color:#e4e4e7;";
+      nuvioListWrap.appendChild(ipRestore);
+
+      var ipLimit = 12;
+      ipDraw = function () {
+        var q = (ipSearch.value || "").toLowerCase();
+        var vis = providers.filter(function (p) { return !ipHidden[ipKey(p)]; });
+        var matches = vis.filter(function (p) {
+          var hay = String(p.name || "") + " " + String(p.description || "") + " " + String(p.id || "");
+          return !q || hay.toLowerCase().indexOf(q) !== -1;
+        });
+        ipHead.textContent = "PROVIDERS (" + vis.length + ")";
+        ipList.textContent = "";
+        matches.slice(0, ipLimit).forEach(function (p) { ipList.appendChild(ipCard(p)); });
+        if (!matches.length) {
+          ipList.appendChild(h("div", "note", vis.length ? "No providers match your search." : "No providers to show."));
+        }
+        if (matches.length > ipLimit) {
+          ipMore.style.display = "";
+          ipMore.textContent = "Show more (" + (matches.length - ipLimit) + " more)";
+        } else {
+          ipMore.style.display = "none";
+        }
+        var hiddenN = providers.length - vis.length;
+        if (hiddenN > 0) {
+          ipRestore.style.display = "";
+          ipRestore.textContent = "Restore deleted (" + hiddenN + ")";
+        } else {
+          ipRestore.style.display = "none";
+        }
+      };
+
+      ipSearch.oninput = function () { ipLimit = 12; ipDraw(); };
+      ipMore.onclick = function () { ipLimit += 20; ipDraw(); };
+      ipRestore.onclick = function () {
+        ipHidden = {};
+        ipSave();
+        ipDraw();
+        toast("Deleted providers restored");
+      };
+      ipRefresh.onclick = function () {
+        ipRefresh.textContent = "Refreshing...";
+        ipRefresh.disabled = true;
+        fetch("/api/providers?t=" + Date.now(), { cache: "no-store" }).then(function (r) {
+          return r.json();
+        }).then(function (d) {
+          providers = Array.isArray(d.providers) ? d.providers : [];
+          (d.repos || []).forEach(function (r) { repoNames[r.id] = r.name; });
+          ipDraw();
+          toast("Refreshed: " + providers.length + " providers");
+        }).catch(function (e) {
+          toast("Couldn't refresh: " + e.message);
+        }).then(function () {
+          ipRefresh.disabled = false;
+          ipRefresh.textContent = "Refresh";
+        });
+      };
+      ipDraw();
+      // ===== end installed providers =====
 }).catch(function () { nuvioListWrap.textContent = "Couldn't load repositories."; });
+
+
 
       // 2. Render Expanded Providers Section
     var plName = h("input", "ainp"); plName.placeholder = "Plugin Name";
@@ -3336,6 +3518,76 @@ $("smclose").onclick = function () {
     };
     cPl.appendChild(plAdd);
     box.appendChild(cPl);
+    // ===== Licensed providers (separate card) =====
+    // Edit this list. Remove "sample: true" from an entry once it is a real, licensed provider.
+    var LICENSED_PROVIDERS = [
+      { id: "sample-1", publisher: "Your licensor", name: "Sample Provider One", desc: "Movies and series up to 1080p", types: "movie | tv", version: "v1.0.0", sample: true },
+      { id: "sample-2", publisher: "Your licensor", name: "Sample Provider Two", desc: "Documentaries and faith-based films", types: "movie", version: "v1.2.0", sample: true },
+      { id: "sample-3", publisher: "Your licensor", name: "Sample Provider Three", desc: "TV series catalogue", types: "tv", version: "v0.9.1", sample: true }
+    ];
+
+    var lpChip = function (text, bg, fg) {
+      var c = h("span", null, text);
+      c.style.cssText = "display:inline-block;background:" + bg + ";color:" + fg + ";font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;";
+      return c;
+    };
+
+    var lpWrap = h("div", "acard");
+    lpWrap.appendChild(h("h3", null, "Licensed providers"));
+    lpWrap.appendChild(h("p", null, "Providers you hold a license for. Only entries in your own list show up here."));
+
+    var lpLabel = h("div", null, "PROVIDERS");
+    lpLabel.style.cssText = "font-size:12px;font-weight:800;letter-spacing:.6px;color:#a1a1aa;margin:6px 2px 10px;";
+    lpWrap.appendChild(lpLabel);
+
+    LICENSED_PROVIDERS.forEach(function (p) {
+      var row = h("div", null);
+      row.style.cssText = "display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:14px;background:#18181b;border:1px solid #27272a;border-radius:16px;margin-bottom:12px;";
+
+      var top = h("div", null);
+      top.style.cssText = "display:flex;align-items:center;gap:12px;";
+
+      var ico = h("div", null, (p.name || "?").charAt(0).toUpperCase());
+      ico.style.cssText = "width:40px;height:40px;border-radius:12px;background:#14532d;color:#4ade80;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;flex:none;";
+      top.appendChild(ico);
+
+      var txt = h("div", null);
+      var pub = h("div", null, p.publisher || "");
+      pub.style.cssText = "font-size:12px;font-weight:700;color:#a1a1aa;";
+      var nm = h("div", null, p.name || "Provider");
+      nm.style.cssText = "font-size:18px;font-weight:800;line-height:1.2;";
+      var ds = h("div", null, p.desc || "");
+      ds.style.cssText = "font-size:13px;color:#d4d4d8;margin-top:2px;";
+      txt.appendChild(pub);
+      txt.appendChild(nm);
+      txt.appendChild(ds);
+      top.appendChild(txt);
+      row.appendChild(top);
+
+      var chips = h("div", null);
+      chips.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;";
+      if (p.types) chips.appendChild(lpChip(p.types, "#27272a", "#e4e4e7"));
+      if (p.version) chips.appendChild(lpChip(p.version, "#27272a", "#e4e4e7"));
+      chips.appendChild(lpChip(p.sample ? "Sample" : "Licensed", p.sample ? "#3f3f46" : "#14532d", p.sample ? "#d4d4d8" : "#4ade80"));
+      row.appendChild(chips);
+
+      var tb = h("button", "abtn", "Test Provider");
+      tb.style.cssText = "width:100%;margin:2px 0 0;padding:12px 16px;border-radius:14px;";
+      tb.onclick = function () {
+        // Later: call your own test endpoint here, for example adm("/api/admin/licensed/test", { id: p.id })
+        toast("Test for " + (p.name || "provider") + " is not connected yet");
+      };
+      row.appendChild(tb);
+
+      lpWrap.appendChild(row);
+    });
+
+    if (!LICENSED_PROVIDERS.length) {
+      lpWrap.appendChild(h("div", "note", "No licensed providers added yet."));
+    }
+    box.appendChild(lpWrap);
+    // ===== end licensed providers =====
+
     box.appendChild(h("div", "note center", "Only your account can see this panel."));
   }
 
