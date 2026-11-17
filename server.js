@@ -170,6 +170,35 @@ if (!onRender) {
       BOT_USERS: mockBotUsersKV
     };
 
+    // Stream backend route: runs before the worker so nothing can intercept it
+    const reqUrl = new URL(url);
+    if (reqUrl.pathname === '/api/plugin-streams') {
+      const isPublic = !!process.env.RENDER || process.env.NODE_ENV === 'production';
+      const key = process.env.STREAM_KEY || '';
+      const allowed = !isPublic || (key && req.headers['x-stream-key'] === key);
+      res.setHeader('content-type', 'application/json');
+      if (!allowed) {
+        res.statusCode = 401;
+        res.end('{"error":"unauthorized"}');
+        return;
+      }
+      try {
+        const out = await globalThis.__fetchPluginStreams(
+          env,
+          reqUrl.searchParams.get('id') || '',
+          reqUrl.searchParams.get('type') || 'movie',
+          Number(reqUrl.searchParams.get('s')) || 1,
+          Number(reqUrl.searchParams.get('e')) || 1
+        );
+        res.statusCode = 200;
+        res.end(JSON.stringify(out));
+      } catch (e) {
+        console.error('plugin-streams failed:', e);
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: String((e && e.message) || e) }));
+      }
+      return;
+    }
     const ctx = {
       waitUntil: (promise) => Promise.resolve(promise).catch(console.error),
       passThroughOnException: () => {}

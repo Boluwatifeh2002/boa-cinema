@@ -1351,6 +1351,7 @@ async function getPluginsConfig(env) {
   } catch (e) {}
   return { globalEnabled: true, groupByRepo: false, repos: [] };
 }
+globalThis.__fetchPluginStreams = fetchPluginStreams;
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
   if (env.STREAM_BACKEND) {
   try {
