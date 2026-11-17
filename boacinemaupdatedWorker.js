@@ -1353,6 +1353,7 @@ async function getPluginsConfig(env) {
 }
 globalThis.__fetchPluginStreams = fetchPluginStreams;
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
+  if (globalThis.__fastStreams) return globalThis.__fastStreams(env, tmdbId, mediaType, season, episode);
   if (env.STREAM_BACKEND) {
   try {
     const r = await fetch(

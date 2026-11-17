@@ -3,6 +3,12 @@ import { createServer } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { createKV } from './kvstore.js';
+import { fastStreams } from './fastStreams.js';
+import { handleExtras } from './extras.js';
+globalThis.__fastStreams = fastStreams;
+const kvStore = createKV();
+console.log('Settings storage:', kvStore.kind);
 
 // Real Node require, so installed packages (cheerio-without-node-native, crypto-js, axios...) can load
 const nodeRequire = createRequire(import.meta.url);
@@ -167,7 +173,7 @@ if (!onRender) {
       TMDB_KEY: CONFIG.TMDB_KEY,
       OWNER_ID: CONFIG.OWNER_ID,
       ALLOW_LOCAL_DEV: (process.env.RENDER || process.env.NODE_ENV === 'production') ? '' : '1',
-      BOT_USERS: mockBotUsersKV
+      BOT_USERS: kvstore
     };
 
     // Stream backend route: runs before the worker so nothing can intercept it
@@ -199,6 +205,7 @@ if (!onRender) {
       }
       return;
     }
+    if (await handleExtras(req, res, env, url)) return;
     const ctx = {
       waitUntil: (promise) => Promise.resolve(promise).catch(console.error),
       passThroughOnException: () => {}
