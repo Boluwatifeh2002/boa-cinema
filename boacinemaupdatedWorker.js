@@ -1352,6 +1352,18 @@ async function getPluginsConfig(env) {
   return { globalEnabled: true, groupByRepo: false, repos: [] };
 }
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
+  if (env.STREAM_BACKEND) {
+  try {
+    const r = await fetch(
+      env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) +
+      "&id=" + encodeURIComponent(tmdbId) + "&s=" + season + "&e=" + episode,
+      { headers: { "x-stream-key": env.STREAM_KEY || "" } }
+    );
+    return r.ok ? await r.json() : [];
+  } catch (e) {
+    return [];
+  }
+}
   try {
     const rawPlugins = (await env.BOT_USERS.get('cfg:plugins')) || (await env.BOT_USERS.get('cfg:addons'));
     if (!rawPlugins) return [];
@@ -1453,6 +1465,18 @@ async function handleApi(url, env) {
   try {
 
     const path = url.pathname;
+    if (path === "/api/plugin-streams") {
+  const keyOk = env.ALLOW_LOCAL_DEV === "1" || (env.STREAM_KEY && request.headers.get("x-stream-key") === env.STREAM_KEY);
+  if (!keyOk) return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json" } });
+  const out = await fetchPluginStreams(
+    env,
+    url.searchParams.get("id") || "",
+    url.searchParams.get("type") || "movie",
+    Number(url.searchParams.get("s")) || 1,
+    Number(url.searchParams.get("e")) || 1
+  );
+  return new Response(JSON.stringify(out), { headers: { "content-type": "application/json" } });
+}
     if (path === "/api/streams") {
       const id = url.searchParams.get("id") || "";
       const s = url.searchParams.get("s") || "1";
