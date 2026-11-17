@@ -34,5 +34,11 @@
     "id": "pl_1794856020931",
     "name": "phisher98",
     "url": "https://raw.githubusercontent.com/phisher98/phisher-nuvio-providers/refs/heads/main/manifest.json"
+  },
+  {
+    "cats": [],
+    "id": "pl_1794911334071",
+    "name": "streamio",
+    "url": "stremio://v3-cinemeta.strem.io/manifest.json"
   }
 ]

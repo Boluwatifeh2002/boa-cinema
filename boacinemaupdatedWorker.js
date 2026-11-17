@@ -2651,7 +2651,7 @@ $("smclose").onclick = function () {
     player.style.display = "none";
     player.textContent = "";
     list.textContent = "";
-    list.appendChild(h("div", "note center", "Discovering streams from enabled plugins\u2026"));
+    list.appendChild(h("div", "note center", "Please Wait\u2026"));
     modal.classList.add("open");
 
     api("/api/streams?type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1), 0)
