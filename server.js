@@ -2,39 +2,66 @@ import 'dotenv/config';
 import { createServer } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+
+// Real Node require, so installed packages (cheerio-without-node-native, crypto-js, axios...) can load
+const nodeRequire = createRequire(import.meta.url);
 
 // --- ROBUST COMMONJS & EVAL SHIMS FOR NUVIO SCRAPERS ---
 globalThis.moduleObj = { exports: {} };
 globalThis.module = globalThis.moduleObj;
 globalThis.exports = globalThis.moduleObj.exports;
 
+// Scrapers are remote code downloaded from a GitHub repo, so only these modules are handed out.
+// If a log line says "Module not allowed: xyz" and you trust it, add it here and run: npm install xyz
+const ALLOWED_MODULES = new Set([
+  'cheerio',
+  'cheerio-without-node-native',
+  'crypto-js',
+  'axios',
+  'crypto',
+  'url',
+  'querystring',
+  'buffer',
+  'util',
+  'zlib'
+]);
+
 globalThis.customRequire = (mod) => {
-  if (mod === 'cheerio') return globalThis.cheerio || {};
-  if (mod === 'axios') return globalThis.axios || { get: fetch, post: fetch };
-  throw new Error(`Module not found: ${mod}`);
+  const name = String(mod).replace(/^node:/, '');
+  if (!ALLOWED_MODULES.has(name)) {
+    throw new Error(`Module not allowed: ${mod} (add it to ALLOWED_MODULES in server.js if you trust it)`);
+  }
+  try {
+    return nodeRequire(name);
+  } catch (e) {
+    // Old stand-ins, used only if the real package is not installed
+    if (name === 'axios') return globalThis.axios || { get: fetch, post: fetch };
+    if (name === 'cheerio') return globalThis.cheerio || {};
+    throw new Error(`Module not found: ${mod} (${e.code || e.message})`);
+  }
 };
 
-// Intercept global Function constructor so any dynamically evaluated scraper code 
-// automatically receives moduleObj, module, exports, and require without throwing ReferenceError.
+// Intercept global Function constructor so dynamically evaluated scraper code
+// never throws ReferenceError for moduleObj, module, exports or require.
+// IMPORTANT: module / exports / moduleObj are only filled in when the caller did NOT pass its own.
+// The worker passes its own per-scraper objects and reads results back from them,
+// so overwriting them with globals would make every scraper return nothing.
 const OriginalFunction = globalThis.Function;
-globalThis.Function = function(...args) {
+globalThis.Function = function (...args) {
   if (args.length === 0) return new OriginalFunction();
   const body = args[args.length - 1];
   const params = args.slice(0, -1);
-  
-  if (!params.includes('moduleObj')) params.push('moduleObj');
-  if (!params.includes('module')) params.push('module');
-  if (!params.includes('exports')) params.push('exports');
-  if (!params.includes('require')) params.push('require');
-  
-  const wrappedBody = `
-    var moduleObj = globalThis.moduleObj;
-    var module = globalThis.module;
-    var exports = globalThis.exports;
-    var require = globalThis.customRequire;
-    ${body}
-  `;
-  return new OriginalFunction(...params, wrappedBody);
+  const declared = params.flatMap((p) => String(p).split(',').map((s) => s.trim()));
+
+  let prelude = '';
+  if (!declared.includes('moduleObj')) prelude += 'var moduleObj = globalThis.moduleObj;\n';
+  if (!declared.includes('module')) prelude += 'var module = globalThis.module;\n';
+  if (!declared.includes('exports')) prelude += 'var exports = globalThis.exports;\n';
+  // require always points at the allow-listed loader above
+  prelude += 'var require = globalThis.customRequire;\n';
+
+  return new OriginalFunction(...params, prelude + body);
 };
 globalThis.Function.prototype = OriginalFunction.prototype;
 // -------------------------------------------------------
@@ -120,7 +147,13 @@ const server = createServer(async (req, res) => {
 
     // Attach local dev header so the admin panel unlocks in desktop browsers
     const headers = new Headers(req.headers);
-    headers.set('x-tg-init', 'local-dev');
+// Admin bypass only on your own PC. Never on Render or any public host.
+const onRender = !!process.env.RENDER || process.env.NODE_ENV === 'production';
+if (!onRender) {
+  headers.set('x-tg-init', 'local-dev');
+} else if (headers.get('x-tg-init') === 'local-dev') {
+  headers.delete('x-tg-init');
+}
 
     const request = new Request(url, {
       method: req.method,
@@ -133,6 +166,7 @@ const server = createServer(async (req, res) => {
       BOT_TOKEN: CONFIG.BOT_TOKEN,
       TMDB_KEY: CONFIG.TMDB_KEY,
       OWNER_ID: CONFIG.OWNER_ID,
+      ALLOW_LOCAL_DEV: (process.env.RENDER || process.env.NODE_ENV === 'production') ? '' : '1',
       BOT_USERS: mockBotUsersKV
     };
 

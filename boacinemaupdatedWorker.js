@@ -1380,7 +1380,9 @@ async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 
         const scrapers = manifest.scrapers || manifest.plugins || [];
 
         for (const scraper of scrapers) {
-          if (scraper.enabled === false) continue;
+         if (scraper.enabled === false) continue;
+const only = String(env.ONLY_SCRAPERS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+if (only.length && !only.some(o => String(scraper.name || scraper.id).toLowerCase().includes(o))) continue;
 // If the scraper has a filename instead of a direct url, resolve it against the manifest origin
 if (!scraper.url && scraper.filename) {
   const repoBase = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
@@ -1403,15 +1405,16 @@ const mockRequire = (mod) => {
 const fn = new Function('module', 'exports', 'require', 'moduleObj', 'fetch', 'console', scriptCode);
 fn(moduleObj, moduleObj.exports, mockRequire, moduleObj, fetch, console);
 
-            const getstreams = moduleobj.exports.getstreams || moduleobj.exports.default?.getstreams;
-    if (typeof getstreams === 'function') {
+           const exp = moduleObj.exports || {};
+const getstreams = exp.getStreams || exp.getstreams || exp.default?.getStreams || exp.default?.getstreams;
+if (typeof getstreams === 'function') {
       try {
         const scraperPromise = getstreams(String(tmdbId), mediaType, Number(season) || 1, Number(episode) || 1);
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Scraper timeout')), 5000));
         const streams = await Promise.race([scraperPromise, timeoutPromise]);
         
         if (Array.isArray(streams) && streams.length > 0) {
-          allStreams.push(...streams);
+         allStreams.push(...streams.map(s => ({ ...s, provider: scraper.name || s.provider || scraper.id })));
           console.log(`Collected ${streams.length} streams from ${scraper.name || scraper.id}`);
         }
       } catch (err) {
@@ -1949,7 +1952,7 @@ textarea.ainp{min-height:72px;resize:vertical}
   function api(path, tries) {
     tries = tries == null ? 1 : tries;
     var ctl = window.AbortController ? new AbortController() : null;
-    var to = setTimeout(function () { if (ctl) ctl.abort(); }, 14000);
+    var to = setTimeout(function () { if (ctl) ctl.abort(); }, 120000);
     var headers = {};
     if (tg && tg.initData) headers["x-tg-init"] = tg.initData;
     return fetch(path, { headers: headers, signal: ctl ? ctl.signal : undefined })
@@ -2635,37 +2638,116 @@ $("smclose").onclick = function () {
         }
         streams.forEach(function (st) {
           var row = h("div", "sitem");
+          row.setAttribute("data-prov", st.provider || "Plugin");
           var meta = h("div");
           meta.appendChild(h("b", null, st.title || "Stream"));
           meta.appendChild(h("span", null, (st.provider || "Plugin") + " \u2022 " + (st.quality || "HD")));
           row.appendChild(meta);
           var btn = h("button", "splaybtn", "Play");
           btn.onclick = function () {
-            player.style.display = "block";
-            player.textContent = "";
-            if (/\.m3u8|\.mp4|\.mkv|\.webm/i.test(st.url)) {
-              var v = document.createElement("video");
-              v.src = st.url;
-              v.controls = true;
-              v.autoplay = true;
-              v.setAttribute("playsinline", "");
-              player.appendChild(v);
-            } else {
-              var ifr = document.createElement("iframe");
-              ifr.src = st.url;
-              ifr.allow = "autoplay; fullscreen; encrypted-media";
-              ifr.setAttribute("allowfullscreen", "");
-              player.appendChild(ifr);
-            }
-            modal.scrollTo({ top: 0, behavior: "smooth" });
-          };
+  player.style.display = "block";
+  player.textContent = "";
+  if (btn._msg) { btn._msg.remove(); btn._msg = null; }
+  var note = h("div", "note", "");
+  btn._msg = note;
+  meta.appendChild(note);
+  if (!st.url || /^magnet:/i.test(st.url)) {
+    note.textContent = "Torrent result with no direct link. It needs a debrid service.";
+    return;
+  }
+  if (!/\/embed\/|\.html?($|\?)/i.test(st.url)) {
+    note.textContent = "Loading stream...";
+    var v = document.createElement("video");
+    v.src = st.url;
+    v.controls = true;
+    v.autoplay = true;
+    v.setAttribute("playsinline", "");
+    v.onwaiting = function () { note.textContent = "Buffering..."; };
+    v.onplaying = function () { note.textContent = ""; };
+    v.onerror = function () {
+      note.textContent = "Can't play in the browser (error " + (v.error ? v.error.code : "?") + "). Use the VLC button.";
+    };
+    player.appendChild(v);
+  } else {
+    var ifr = document.createElement("iframe");
+    ifr.src = st.url;
+    ifr.allow = "autoplay; fullscreen; encrypted-media";
+    ifr.setAttribute("allowfullscreen", "");
+    player.appendChild(ifr);
+  }
+  modal.scrollTo({ top: 0, behavior: "smooth" });
+};
           row.appendChild(btn);
+          var acts = h("div");
+acts.style.cssText = "display:flex;gap:8px;align-items:center;flex:none";
+acts.appendChild(btn);
+          var rk = streamRank(st);
+if (rk >= 3) {
+  var badge = h("span", null, rk === 9 ? "Torrent (needs debrid)" : "Large file: best in VLC or the app");
+  badge.style.cssText = "display:block;opacity:.7;font-size:12px";
+  meta.appendChild(badge);
+}
+var vb = h("button", "splaybtn", "VLC");
+vb.style.marginLeft = "8px";
+vb.onclick = function () {
+  var u = st.url || "";
+  if (!u || /^magnet:/i.test(u)) return;
+  var ua = navigator.userAgent;
+  if (/Android/i.test(ua)) {
+    var sch = /^https:/i.test(u) ? "https" : "http";
+    location.href = "intent://" + u.replace(/^https?:\/\//i, "") + "#Intent;scheme=" + sch + ";package=org.videolan.vlc;type=video/*;end";
+  } else if (/iPhone|iPad|iPod/i.test(ua)) {
+    location.href = "vlc://" + u;
+  } else {
+    var txt = "#EXTM3U\n#EXTINF:-1," + String(st.title || "Stream").replace(/[\r\n]+/g, " ") + "\n" + u + "\n";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([txt], { type: "audio/x-mpegurl" }));
+    a.download = "stream.m3u";
+    a.click();
+  }
+};
+acts.appendChild(vb);
+row.appendChild(acts);
           list.appendChild(row);
         });
+        var provs = [];
+        function streamRank(s) {
+  var u = String(s.url || ""), t = String(s.title || "");
+  if (!u || /^magnet:/i.test(u)) return 9;
+  var heavy = /hevc|x265|h\.?265|remux|dts|2160p|\b4k\b/i.test(t);
+  if (/\.mp4(\?|$)/i.test(u) && !heavy) return 0;
+  if (/\.m3u8(\?|$)/i.test(u) && !heavy) return 1;
+  if (/\.mkv(\?|$)/i.test(u) || heavy) return 3;
+  return 2;
+}
+streams = streams.slice().sort(function (a, b) { return streamRank(a) - streamRank(b); });
+streams.forEach(function (s) {
+  var p = s.provider || "Plugin";
+  if (provs.indexOf(p) < 0) provs.push(p);
+});
+if (provs.length) {
+  var bar = document.createElement("div");
+  bar.style.cssText = "display:flex;gap:8px;overflow-x:auto;padding:4px 0 10px";
+  ["All"].concat(provs).forEach(function (name) {
+    var c = document.createElement("button");
+    c.textContent = name;
+    c.style.cssText = "flex:none;padding:6px 14px;border-radius:999px;border:0;cursor:pointer;background:#2a2a2e;color:#fff";
+    c.onclick = function () {
+      Array.prototype.forEach.call(bar.children, function (x) { x.style.background = "#2a2a2e"; x.style.color = "#fff"; });
+      c.style.background = "#fff"; c.style.color = "#000";
+      Array.prototype.forEach.call(list.querySelectorAll(".sitem"), function (r) {
+        r.style.display = (name === "All" || r.getAttribute("data-prov") === name) ? "" : "none";
+      });
+    };
+    bar.appendChild(c);
+  });
+  list.insertBefore(bar, list.firstChild);
+}
       })
-      .catch(function () {
-        list.textContent = "";
-        list.appendChild(h("div", "note center", "Failed to query plugins."));
+      .catch(function (e) {
+  console.error("Plugin query error:", e);
+  list.textContent = "";
+  list.appendChild(h("div", "note center", "Failed to query plugins: " + (e && e.message ? e.message : e)));
       });
   }
   function renderDetail(d) {
@@ -4025,7 +4107,9 @@ function tgUserId(initData) {
 
 async function ownerCheck(request, env) {
   const init = request.headers.get("x-tg-init") || "";
-  if (init === "local-dev") return { ok: true, status: 200 };
+ if (init === "local-dev") {
+  return env.ALLOW_LOCAL_DEV === "1" ? { ok: true, status: 200 } : { ok: false, status: 401 };
+}
   if (!(await verifyInitData(init, env.BOT_TOKEN))) return { ok: false, status: 401 };
   const id = tgUserId(init);
   return { ok: !!id && ownerIds(env).includes(id), status: 403 };
