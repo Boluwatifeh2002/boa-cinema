@@ -1893,7 +1893,7 @@ textarea.ainp{min-height:72px;resize:vertical}
     <div>Curated by Boa Entertainment</div>
     <a href="https://t.me/Boa_entertainment_bot" id="fhandle">@Boa_entertainment_bot</a>
     <p>&copy; <span id="yr">2026</span> Boa Entertainment. All rights reserved. The Boa Cinema platform, design and curation belong to Boa Entertainment. All titles, posters, trailers and trademarks belong to their respective owners.</p>
-    <p>Movie data and images by TMDB. Streaming availability by JustWatch. This product uses the TMDB API but is not endorsed or certified by TMDB. Boa Entertainment is a discovery platform and does not host or stream any media. Netflix is a trademark of Netflix, Inc. Boa Entertainment is not affiliated with Netflix.</p>
+    <p>This product uses the TMDB API but is not endorsed or certified by TMDB. Netflix is a trademark of Netflix, Inc. Boa Entertainment is not affiliated with Netflix.</p>
   </footer>
 </div>
 
@@ -2658,7 +2658,7 @@ $("smclose").onclick = function () {
       .then(function (streams) {
         list.textContent = "";
         if (!streams || !streams.length) {
-          list.appendChild(h("div", "note center", "No streams returned by your enabled plugins for this title."));
+          list.appendChild(h("div", "note center", "No stream returned."));
           return;
         }
         streams.forEach(function (st) {
