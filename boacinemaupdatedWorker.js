@@ -702,6 +702,122 @@ function detectSong(text) {
 // A person is counted once (by Telegram user id) whether they type, tap a button or use
 // the Cinema app, and drops out of the count after 30 days without activity.
 
+
+// ============================================================================
+// PRIVACY RELAY (optional, user-chosen): the stream host sees this Worker, not the viewer.
+// Links are signed (HMAC) and expire after 6 hours, so this can't be used as an open proxy.
+// ============================================================================
+async function relayHmac(env, msg) {
+  const secret = env.RELAY_SECRET || env.BOT_TOKEN || "boa-relay";
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function relayAllowed(u) {
+  try {
+    const x = new URL(u);
+    if (!/^https?:$/.test(x.protocol)) return false;
+    const h = x.hostname;
+    if (h === "localhost" || h.includes(":") || /^(0|10|127)\./.test(h) || /^169\.254\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /\.(local|internal)$/.test(h)) return false;
+    return true;
+  } catch (e) { return false; }
+}
+async function relaySign(env, u) {
+  const e = Math.floor(Date.now() / 1000) + 21600;
+  return "/api/relay?u=" + encodeURIComponent(u) + "&e=" + e + "&s=" + (await relayHmac(env, u + "|" + e));
+}
+async function relayHandle(request, url, env) {
+  const u = url.searchParams.get("u") || "";
+  const e = Number(url.searchParams.get("e")) || 0;
+  const sg = url.searchParams.get("s") || "";
+  if (!relayAllowed(u) || e < Date.now() / 1000 || sg !== (await relayHmac(env, u + "|" + e))) return new Response("forbidden", { status: 403 });
+  const h = new Headers();
+  h.set("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36");
+  const rg = request.headers.get("range");
+  if (rg) h.set("Range", rg);
+  let res;
+  try { res = await fetch(u, { headers: h, redirect: "follow", method: request.method === "HEAD" ? "HEAD" : "GET" }); }
+  catch (err) { return new Response("relay failed", { status: 502 }); }
+  const out = new Headers();
+  ["content-type", "content-length", "content-range", "accept-ranges"].forEach((k) => { const v = res.headers.get(k); if (v) out.set(k, v); });
+  out.set("Access-Control-Allow-Origin", "*");
+  out.set("Cache-Control", "no-store");
+  const ct = res.headers.get("content-type") || "";
+  if (/mpegurl/i.test(ct) || /\.m3u8(\?|$)/i.test(u)) {
+    const base = res.url || u;
+    const lines = (await res.text()).split("\n");
+    const fix = async (ref) => { try { const abs = new URL(ref.trim(), base).href; return relayAllowed(abs) ? await relaySign(env, abs) : ref; } catch (err) { return ref; } };
+    const done = await Promise.all(lines.map(async (ln) => {
+      if (!ln.trim()) return ln;
+      if (ln[0] === "#") {
+        const m = /URI="([^"]+)"/.exec(ln);
+        return m ? ln.replace(m[0], 'URI="' + (await fix(m[1])) + '"') : ln;
+      }
+      return fix(ln);
+    }));
+    out.delete("content-length");
+    out.set("content-type", "application/vnd.apple.mpegurl");
+    return new Response(done.join("\n"), { status: res.status, headers: out });
+  }
+  return new Response(res.body, { status: res.status, headers: out });
+}
+
+// ============================================================================
+// SUBTITLES from installed Stremio-style subtitle add-ons (e.g. OpenSubtitles)
+// ============================================================================
+const SUBS_CACHE = new Map();
+async function imdbFor(env, mt, id) {
+  try {
+    const j = await tmdb(env, "/" + (mt === "tv" ? "tv" : "movie") + "/" + id + "/external_ids");
+    return j && /^tt\d+$/.test(j.imdb_id || "") ? j.imdb_id : "";
+  } catch (e) { return ""; }
+}
+async function findSubs(env, mt, id, sNum, eNum) {
+  const key = [mt, id, sNum, eNum].join("|");
+  const hit = SUBS_CACHE.get(key);
+  if (hit && Date.now() - hit.at < 3600000) return hit.v;
+  const addons = (await getAddons(env)).filter((a) => a.subs && a.enabled !== false && a.base);
+  if (!addons.length) return [];
+  const imdb = await imdbFor(env, mt, id);
+  if (!imdb) return [];
+  const vid = mt === "tv" ? imdb + ":" + (sNum || 1) + ":" + (eNum || 1) : imdb;
+  const lists = await Promise.all(addons.map(async (a) => {
+    try {
+      const r = await fetch(a.base + "/subtitles/" + (mt === "tv" ? "series" : "movie") + "/" + encodeURIComponent(vid).replace(/%3A/g, ":") + ".json", { headers: { "User-Agent": "BoaCinema/1.0" }, signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return [];
+      const j = await r.json();
+      return (Array.isArray(j.subtitles) ? j.subtitles : []).map((x) => ({ lang: String(x.lang || "und").slice(0, 12), url: x.url, from: a.name }));
+    } catch (e) { return []; }
+  }));
+  const seen = {};
+  const out = [];
+  for (const x of lists.flat()) {
+    if (!x.url || !relayAllowed(x.url)) continue;
+    seen[x.lang] = (seen[x.lang] || 0) + 1;
+    if (seen[x.lang] > 3) continue; // up to 3 per language keeps the list short
+    const e = Math.floor(Date.now() / 1000) + 21600;
+    out.push({ lang: x.lang, n: seen[x.lang], from: x.from, u: "/api/sub?u=" + encodeURIComponent(x.url) + "&e=" + e + "&s=" + (await relayHmac(env, "sub|" + x.url + "|" + e)) });
+  }
+  out.sort((a, b) => (a.lang === "eng" ? 0 : 1) - (b.lang === "eng" ? 0 : 1) || a.lang.localeCompare(b.lang));
+  SUBS_CACHE.set(key, { at: Date.now(), v: out });
+  if (SUBS_CACHE.size > 300) SUBS_CACHE.delete(SUBS_CACHE.keys().next().value);
+  return out;
+}
+async function subHandle(url, env) {
+  const u = url.searchParams.get("u") || "";
+  const e = Number(url.searchParams.get("e")) || 0;
+  if (!relayAllowed(u) || e < Date.now() / 1000 || url.searchParams.get("s") !== (await relayHmac(env, "sub|" + u + "|" + e))) return new Response("forbidden", { status: 403 });
+  try {
+    const r = await fetch(u, { headers: { "User-Agent": "BoaCinema/1.0" }, signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return new Response("not found", { status: 404 });
+    let t = await r.text();
+    if (t.length > 3000000) return new Response("too big", { status: 413 });
+    t = t.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+    if (!/^WEBVTT/.test(t)) t = "WEBVTT\n\n" + t.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
+    return new Response(t, { headers: { "content-type": "text/vtt; charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600" } });
+  } catch (err) { return new Response("failed", { status: 502 }); }
+}
+
 const ACTIVE_DAYS = 30;
 let usersCache = { n: null, at: 0 };
 
@@ -712,8 +828,36 @@ async function trackUser(env, userId) {
     const today = Math.floor(Date.now() / 86400000);
     const last = await env.BOT_USERS.get(key);
     if (last !== null && Number(last) === today) return; // already counted today, no write
-    await env.BOT_USERS.put(key, String(today), { expirationTtl: ACTIVE_DAYS * 86400 });
+    await env.BOT_USERS.put(key, String(today), { expirationTtl: ACTIVE_DAYS * 86400, metadata: { d: today } });
+    const now = Date.now();
+    if (now - lastVisitWrite > 120000) {
+      lastVisitWrite = now;
+      await env.BOT_USERS.put("cfg:lastvisit", String(now));
+    }
   } catch (e) {}
+}
+let lastVisitWrite = 0;
+async function activityStats(env) {
+  const out = { active: null, today: 0, week: 0, lastVisit: 0 };
+  if (!env.BOT_USERS) return out;
+  const today = Math.floor(Date.now() / 86400000);
+  let n = 0, cursor;
+  try {
+    for (let i = 0; i < 25; i++) {
+      const page = await env.BOT_USERS.list({ prefix: "u:", cursor });
+      page.keys.forEach((k) => {
+        n++;
+        const d = k.metadata && k.metadata.d;
+        if (d === today) out.today++;
+        if (d != null && today - d < 7) out.week++;
+      });
+      if (page.list_complete) break;
+      cursor = page.cursor;
+    }
+    out.active = n;
+    out.lastVisit = Number(await env.BOT_USERS.get("cfg:lastvisit")) || 0;
+  } catch (e) {}
+  return out;
 }
 
 async function activeUsers(env, fresh = false) {
@@ -1719,12 +1863,23 @@ async function handleApi(url, env, request) {
       if (!/^\d{1,9}$/.test(id)) return send({ error: "bad id" }, 400);
       return send(await getLogoApi(env, media, id));
     }
+    if (path === "/api/subs") {
+      const mt = url.searchParams.get("type") === "tv" ? "tv" : "movie";
+      const id = url.searchParams.get("id") || "";
+      if (!/^\d{1,9}$/.test(id)) return send([], 200, "no-store");
+      return send(await findSubs(env, mt, id, url.searchParams.get("s"), url.searchParams.get("e")), 200, "no-store");
+    }
+    if (path === "/api/relay-sign") {
+      const u = url.searchParams.get("u") || "";
+      if (!relayAllowed(u)) return send({ error: "bad link" }, 400, "no-store");
+      return send({ u: await relaySign(env, u) }, 200, "no-store");
+    }
     if (path === "/api/notice") {
-      let n = "";
+      let n = "", p = 0;
       try {
-        if (env.BOT_USERS) n = (await env.BOT_USERS.get("cfg:notice")) || "";
+        if (env.BOT_USERS) { n = (await env.BOT_USERS.get("cfg:notice")) || ""; p = n && (await env.BOT_USERS.get("cfg:notice_pri")) === "1" ? 1 : 0; }
       } catch (e) {}
-      return send({ n }, 200, "no-store");
+      return send({ n, p }, 200, "no-store");
     }
     if (path === "/api/search") {
       const q = (url.searchParams.get("q") || "").trim().slice(0, 100);
@@ -2062,6 +2217,16 @@ textarea.ainp{min-height:72px;resize:vertical}
 .adbtns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .tpanel{display:flex;flex-direction:column;gap:8px}
 .tout{font-size:13px;color:#d4d4d8;word-break:break-word}
+
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 16px 12px}
+.stat{background:linear-gradient(160deg,#1c1c20,#141416);border:1px solid #2a2a2e;border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:2px}
+.stat svg{width:22px;height:22px;margin-bottom:8px}
+.stat b{font-size:26px;font-weight:800;letter-spacing:-.5px}
+.stat span{font-size:13px;font-weight:700;color:#d4d4d8}
+.stat i{font-style:normal;font-size:11px;color:#71717a}
+.notice.pri{background:#3b0d10;border-color:#e50914}
+#smpriv{padding:8px 16px;font-size:13px;color:#d4d4d8;display:flex;align-items:center;gap:10px}
+#smpriv input{width:20px;height:20px}
 @media (min-width:720px){
   html{background:#000}
   body{max-width:560px;margin:0 auto;background:var(--bg);min-height:100vh;box-shadow:0 0 0 1px #1b1b1d,0 0 80px rgba(229,9,20,.08)}
@@ -2076,6 +2241,8 @@ textarea.ainp{min-height:72px;resize:vertical}
     <h2 id="smtitle">Streams</h2>
     <button class="ib" id="smclose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
+  <div id="smpriv"></div>
+  <div id="smsubs"></div>
   <div class="splayer" id="smplayer"></div>
   <div id="smlist"></div>
 </div>
@@ -2245,6 +2412,58 @@ textarea.ainp{min-height:72px;resize:vertical}
   var WATCH = [];
   var AVC = ["#e50914", "#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#0891b2"];
   var CUR = null;
+  var SUBS = [];
+  var SUBSEL = "";
+  var LANGS = { eng: "English", spa: "Spanish", fre: "French", fra: "French", por: "Portuguese", ara: "Arabic", ger: "German", deu: "German", ita: "Italian", rus: "Russian", hin: "Hindi", tur: "Turkish", chi: "Chinese", zho: "Chinese", jpn: "Japanese", kor: "Korean", dut: "Dutch", pol: "Polish", ind: "Indonesian", swa: "Swahili", yor: "Yoruba" };
+  function applySub() {
+    var v = document.querySelector("#smplayer video");
+    if (!v) return;
+    Array.prototype.slice.call(v.querySelectorAll("track")).forEach(function (t) { t.remove(); });
+    if (SUBSEL === "") return;
+    var sb = SUBS[+SUBSEL];
+    if (!sb) return;
+    var tr = document.createElement("track");
+    tr.kind = "subtitles"; tr.label = sb.lang; tr.srclang = String(sb.lang).slice(0, 2); tr.src = sb.u; tr.default = true;
+    v.appendChild(tr);
+    setTimeout(function () { try { if (v.textTracks && v.textTracks[0]) v.textTracks[0].mode = "showing"; } catch (e) {} }, 300);
+  }
+  function loadSubs(mt, id, s, e) {
+    SUBS = []; SUBSEL = "";
+    var box = $("smsubs");
+    if (!box) return;
+    box.textContent = "";
+    api("/api/subs?type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1), 0, 20000).then(function (list) {
+      if (!list || !list.length) return;
+      SUBS = list;
+      var sel = h("select", "ainp");
+      sel.style.cssText = "margin:0 16px 8px;width:calc(100% - 32px)";
+      var o0 = h("option", null, "Subtitles: Off"); o0.value = ""; sel.appendChild(o0);
+      list.forEach(function (x, i) {
+        var o = h("option", null, "Subtitles: " + (LANGS[x.lang] || x.lang) + (x.n > 1 ? " " + x.n : "")); o.value = String(i); sel.appendChild(o);
+      });
+      var def = -1;
+      list.forEach(function (x, i) { if (def < 0 && x.lang === "eng") def = i; });
+      sel.onchange = function () { SUBSEL = sel.value; applySub(); };
+      box.appendChild(sel);
+      sel._def = def;
+    }).catch(function () {});
+  }
+  function RELAY_ON() { return lsGet("boa_relay", "0") === "1"; }
+  function relaySign(u) {
+    return api("/api/relay-sign?u=" + encodeURIComponent(u), 0, 15000).then(function (r) { return location.origin + r.u; }).catch(function () { toast("Privacy relay unavailable, playing directly"); return u; });
+  }
+  function paintPriv() {
+    var b = $("smpriv");
+    if (!b) return;
+    b.textContent = "";
+    var cb = h("input"); cb.type = "checkbox"; cb.checked = RELAY_ON();
+    cb.onchange = function () { lsSet("boa_relay", cb.checked ? "1" : "0"); toast(cb.checked ? "Privacy relay ON for new plays" : "Privacy relay OFF"); };
+    var l = h("label");
+    l.style.cssText = "display:flex;align-items:center;gap:10px";
+    l.appendChild(cb);
+    l.appendChild(document.createTextNode("Privacy relay (optional): hide my IP from the stream host"));
+    b.appendChild(l);
+  }
   var LIBF = "all", LIBSORT = "recent", LIBEDIT = false;
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -3180,6 +3399,8 @@ $("smclose").onclick = function () {
     $("smplayer").textContent = "";
   };
   function openStreams(mt, id, title, s, e, meta, resumeAt) {
+    paintPriv();
+    loadSubs(mt, id, s, e);
     CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0 };
     var slowT = setTimeout(function () {
       var f = $("smlist").firstChild;
@@ -3225,11 +3446,12 @@ $("smclose").onclick = function () {
   if (!/\/embed\/|\.html?($|\?)/i.test(st.url)) {
     note.textContent = "Loading stream...";
     var v = document.createElement("video");
-    v.src = st.url;
+    if (RELAY_ON()) { relaySign(st.url).then(function (ru) { v.src = ru; var pp = v.play && v.play(); if (pp && pp.catch) pp.catch(function () {}); }); } else { v.src = st.url; }
     v.controls = true;
     v.autoplay = true;
     v.setAttribute("playsinline", "");
     trackVideo(v, CUR);
+    v.addEventListener("loadedmetadata", applySub);
     v.onwaiting = function () { note.textContent = "Buffering..."; };
     v.onplaying = function () { note.textContent = ""; };
     v.onerror = function () {
@@ -3261,6 +3483,7 @@ var vb = h("button", "splaybtn", "VLC");
 vb.style.marginLeft = "8px";
 vb.onclick = function () {
   var u = st.url || "";
+  if (RELAY_ON() && u && !vb._r && !/^magnet:/i.test(u)) { relaySign(u).then(function (ru) { st = Object.assign({}, st, { url: ru }); vb._r = 1; vb.onclick(); }); return; }
   if (!u || /^magnet:/i.test(u)) return;
   var ua = navigator.userAgent;
   if (/Android/i.test(ua)) {
@@ -3683,8 +3906,10 @@ if (provs.length) {
       var seen = "";
       try { seen = localStorage.getItem("boa_notice_x") || ""; } catch (e) {}
       el.textContent = "";
-      if (!t || t === seen) { el.className = "notice"; return; }
+      var pri = !!(r && r.p);
+      if (!t || (t === seen && !pri)) { el.className = "notice"; return; }
       el.appendChild(document.createTextNode(t));
+      if (pri) { el.className = "notice on pri"; return; }
       var x = h("button", null, "×");
       x.setAttribute("aria-label", "Dismiss");
       x.onclick = function () {
@@ -3777,11 +4002,32 @@ if (provs.length) {
       Array.prototype.forEach.call(tabBar.children, function (b) { b.className = "atab" + (b.getAttribute("data-tb") === ADM_TAB ? " on" : ""); });
     }
 
-    var c1 = h("div", "acard");
-    c1.appendChild(h("h3", null, "Members"));
-    c1.appendChild(h("p", null, ADM.active === null ? "Member counting needs the BOT_USERS storage connected." : ADM.active + " active in the last 30 days"));
-    if (!ADM.kv) c1.appendChild(h("p", null, "Storage isn't connected, so picks and notices can't be saved yet."));
+    function fmtN(n) { return n >= 1000 ? (Math.round(n / 100) / 10) + "k" : String(n); }
+    function ago(ts) {
+      if (!ts) return "No visits yet";
+      var m = Math.max(0, Math.round((Date.now() - ts) / 60000));
+      if (m < 1) return "Just now";
+      if (m < 60) return m + " min ago";
+      if (m < 1440) return Math.round(m / 60) + " h ago";
+      return Math.round(m / 1440) + " d ago";
+    }
+    var stt = ADM.stats || {};
+    var c1 = h("div", "stats");
+    [
+      ["M17 20v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M10 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8", stt.active == null ? "\u2013" : fmtN(stt.active), "Active Users", "30 days"],
+      ["M3 12h4l3-9 4 18 3-9h4", stt.active == null ? "\u2013" : fmtN(stt.today || 0), "Active Today", "24 hours"],
+      ["M3 4h18v16H3zM3 10h18M8 2v4M16 2v4", stt.active == null ? "\u2013" : fmtN(stt.week || 0), "This Week", "7 days"],
+      ["M12 6v6l4 2M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20", ago(stt.lastVisit), "Last Visit", "most recent"]
+    ].forEach(function (c) {
+      var card = h("div", "stat");
+      card.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#e50914" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="' + c[0] + '"/></svg>';
+      card.appendChild(h("b", null, c[1]));
+      card.appendChild(h("span", null, c[2]));
+      card.appendChild(h("i", null, c[3]));
+      c1.appendChild(card);
+    });
     put("ov", c1);
+    if (!ADM.kv) put("ov", h("div", "acard", "Storage isn't connected, so picks, notices and member stats can't be saved yet."));
 
     var c2 = h("div", "acard");
     c2.appendChild(h("h3", null, "Site notice"));
@@ -3792,10 +4038,16 @@ if (provs.length) {
     ni.placeholder = "e.g. Jagun Jagun 2 trailer is out!";
     ni.value = ADM.notice || "";
     c2.appendChild(ni);
+    var priB = h("button", "abtn alt", "");
+    var priOn = !!ADM.noticePri;
+    function paintPri() { priB.textContent = "Priority: " + (priOn ? "ON (cannot be dismissed)" : "OFF"); priB.style.background = priOn ? "#e50914" : ""; priB.style.color = priOn ? "#fff" : ""; }
+    paintPri();
+    priB.onclick = function () { priOn = !priOn; paintPri(); };
+    c2.appendChild(priB);
     var ns = h("button", "abtn", "Save notice");
     ns.onclick = function () {
-      adm("/api/admin/notice", { text: ni.value }).then(function (r) {
-        ADM.notice = r.notice;
+      adm("/api/admin/notice", { text: ni.value, priority: priOn }).then(function (r) {
+        ADM.notice = r.notice; ADM.noticePri = r.priority;
         toast(r.notice ? "Notice saved" : "Notice cleared");
         try { localStorage.removeItem("boa_notice_x"); } catch (e) {}
       }).catch(function (e) { toast("Couldn't save: " + e.message); });
@@ -3946,6 +4198,15 @@ if (provs.length) {
         if (r.description) ares.appendChild(h("p", null, r.description));
         if (r.hasStreams) ares.appendChild(h("p", null, "This add-on also offers streams. Boa Cinema ignores them and only uses its catalogs."));
         if (r.skipped) ares.appendChild(h("p", null, r.skipped + " catalog(s) skipped (they need a search or filter, or aren't movies/series)."));
+        if (!r.cats.length && r.hasSubs) {
+          ares.appendChild(h("p", null, "This is a subtitles add-on. It adds a Subtitles menu to the stream player."));
+          var si = h("button", "abtn", "Install subtitles add-on");
+          si.onclick = function () {
+            adm("/api/admin/addons", { action: "add", base: r.base, subs: true, cats: [] }).then(function (res) { ADM.addons = res.addons; ADM_TAB = "ad"; renderAdmin(false); toast("Subtitles add-on installed"); }).catch(function (e) { toast("Couldn't install: " + e.message); });
+          };
+          ares.appendChild(si);
+          return;
+        }
         if (!r.cats.length) {
           var rs = r.resources || [];
           var why = "No usable catalogs found.";
@@ -3987,7 +4248,23 @@ if (provs.length) {
         ares.appendChild(h("p", null, "Couldn't use that link: " + e.message));
       });
     };
-    cAI.appendChild(ab);
+    var ib = h("button", "abtn", "Install add-on");
+    ib.onclick = function () {
+      var u = au.value.trim();
+      if (!u) { toast("Paste the add-on link first"); return; }
+      ib.disabled = true; ib.textContent = "Installing\u2026";
+      adm("/api/admin/addon-inspect", { url: u }).then(function (r) {
+        if (!r.cats.length && !r.hasSubs) throw new Error("no usable catalogs (use Plugins for stream add-ons)");
+        if (!r.cats.length) return adm("/api/admin/addons", { action: "add", base: r.base, subs: true, cats: [] });
+        return adm("/api/admin/addons", { action: "add", base: r.base, cats: r.cats.map(function (c) { return { type: c.type, id: c.id }; }) });
+      }).then(function (res) {
+        ADM.addons = res.addons; ADM_TAB = "ad"; renderAdmin(false);
+        toast("Installed and active now");
+      }).catch(function (e) { ib.disabled = false; ib.textContent = "Install add-on"; toast("Couldn't install: " + e.message); });
+    };
+    var btnRow = h("div", "arow2");
+    btnRow.appendChild(ab); btnRow.appendChild(ib);
+    cAI.appendChild(btnRow);
     cAI.appendChild(ares);
     put("ad", cAI);
 
@@ -4002,12 +4279,13 @@ if (provs.length) {
       inf.appendChild(h("b", null, a.name || "Add-on"));
       var host = "";
       try { host = new URL(a.base || "").host; } catch (e) {}
-      inf.appendChild(h("span", null, (a.cats || []).length + " catalogs" + (host ? " • " + host : "") + (a.enabled === false ? " • Disabled" : "")));
+      inf.appendChild(h("span", null, (a.subs ? "Subtitles add-on" : (a.cats || []).length + " catalogs") + (host ? " • " + host : "") + (a.enabled === false ? " • Disabled" : "")));
       top.appendChild(inf);
       card.appendChild(top);
       var btns = h("div", "adbtns");
       var det = h("div");
       var setB = h("button", "abtn mini", "Settings");
+      if (a.subs) setB.style.display = "none";
       setB.onclick = function () {
         if (det.firstChild) { det.textContent = ""; return; }
         det.appendChild(h("p", null, "Loading…"));
@@ -4597,8 +4875,18 @@ async function cachedApi(request, url, env, ctx) {
 
   // The visitor's country (from Cloudflare), used to highlight "available in your country"
   if (url.pathname === "/api/me") {
+    try {
+      const init = request.headers.get("x-tg-init") || "";
+      if (init && env.BOT_TOKEN && (await verifyInitData(init, env.BOT_TOKEN))) {
+        const uo = JSON.parse(new URLSearchParams(init).get("user") || "{}");
+        if (uo && uo.id) await trackUser(env, uo.id);
+      }
+    } catch (e) {}
     return json({ country: (request.cf && request.cf.country) || "" });
   }
+
+  if (url.pathname === "/api/relay") return relayHandle(request, url, env);
+  if (url.pathname === "/api/sub") return subHandle(url, env);
 
   if (REQUIRE_TELEGRAM) {
     const ok = await verifyInitData(request.headers.get("x-tg-init") || "", env.BOT_TOKEN);
@@ -4985,6 +5273,7 @@ async function inspectAddon(base) {
     cats,
     skipped,
     hasStreams: resNames.includes("stream"),
+    hasSubs: resNames.includes("subtitles"),
     resources: resNames.filter((x) => typeof x === "string").slice(0, 10),
   };
 }
@@ -5062,6 +5351,9 @@ async function adminRoute(request, url, env) {
     if (path === "/api/admin/state" && !isPost) {
       let notice = "";
       let homeMode = "builtin";
+      let noticePri = false;
+      try { if (env.BOT_USERS) noticePri = (await env.BOT_USERS.get("cfg:notice_pri")) === "1"; } catch (e) {}
+      const stats = await activityStats(env);
       try { if (env.BOT_USERS) homeMode = (await env.BOT_USERS.get("cfg:homemode")) || "builtin"; } catch (e) {}
       let custom = false;
       let mediaServer = null;
@@ -5079,6 +5371,8 @@ async function adminRoute(request, url, env) {
         kv: !!env.BOT_USERS,
         addons: await getAddons(env),
         homeMode,
+        noticePri,
+        stats,
         mediaServer,
         plugins: await getPluginRepos(env),
       });
@@ -5242,7 +5536,8 @@ async function adminRoute(request, url, env) {
         const cats = info.cats
           .filter((c) => wanted.has(`${c.type}|${c.id}`))
           .map((c) => ({ type: c.type, id: c.id, name: c.name, k: "x" + fnv(`${base}|${c.type}|${c.id}`) }));
-        if (!cats.length) return json({ error: "Pick at least one catalog" }, 400);
+        const isSubs = !!body.subs && !!info.hasSubs;
+        if (!cats.length && !isSubs) return json({ error: "Pick at least one catalog" }, 400);
         const i = list.findIndex((a) => a.base === base);
         const prev = i > -1 ? list[i] : null;
         const entry = {
@@ -5252,6 +5547,7 @@ async function adminRoute(request, url, env) {
           version: info.version,
           description: info.description,
           cats,
+          subs: isSubs || undefined,
           enabled: prev ? prev.enabled !== false : true,
           addedAt: (prev && prev.addedAt) || Date.now(),
         };
@@ -5282,9 +5578,12 @@ async function adminRoute(request, url, env) {
     }
     if (path === "/api/admin/notice") {
       const text = String(body.text || "").trim().slice(0, 200);
+      const pri = !!body.priority && !!text;
       if (text) await env.BOT_USERS.put("cfg:notice", text);
       else await env.BOT_USERS.delete("cfg:notice");
-      return json({ notice: text });
+      if (pri) await env.BOT_USERS.put("cfg:notice_pri", "1");
+      else await env.BOT_USERS.delete("cfg:notice_pri");
+      return json({ notice: text, priority: pri });
     }
     return json({ error: "not found" }, 404);
   } catch (e) {
