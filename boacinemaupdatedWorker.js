@@ -2174,6 +2174,12 @@ textarea.ainp{min-height:72px;resize:vertical}
 .sitem b{display:block;font-size:15px}
 .sitem span{font-size:12.5px;color:var(--muted)}
 .splaybtn{border:0;border-radius:999px;background:#fff;color:#000;font-weight:800;font-size:13px;padding:9px 16px;flex:0 0 auto}
+.sitem{box-sizing:border-box;width:100%;max-width:100%;overflow:hidden;align-items:center}
+.sitem>div:first-child{flex:1 1 0;min-width:0;max-width:100%}
+.sitem b,.sitem span,.sitem .note{display:block;min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+.sitem>div:last-child{flex:0 0 auto;display:flex;align-items:center;gap:8px;margin-left:auto}
+.sitem .splaybtn{margin-left:0!important;white-space:nowrap;flex:0 0 auto}
+@media (max-width:360px){.sitem{padding:11px 12px;gap:8px}.sitem .splaybtn{padding:8px 12px}}
 /* ---------- wide screens (website on laptop/tablet): keep the phone layout, centred ---------- */
 
 .btn.disabled{background:#2a2a2e;color:#8a8a90}
