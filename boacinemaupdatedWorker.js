@@ -1,4 +1,4 @@
-// Boa Entertainment Bot - Cloudflare Worker (v91: Nuvio-style Media Servers & Plugins, Nuvio-style Boa Cinema, worldwide "Where to watch", library, caching)
+// Boa Entertainment Bot - Cloudflare Worker (v92 fixes: add-ons, plugins, profiles, library; v91: Nuvio-style Media Servers & Plugins, Nuvio-style Boa Cinema, worldwide "Where to watch", library, caching)
 //
 // What it does
 //   * Telegram bot: browse movies AND series by category/genre, type any title,
@@ -1082,33 +1082,35 @@ async function getRow(env, media, key) {
   if (!def) return null;
   // Boa Picks: hand-picked titles (TMDB data when it has them, your own details when it doesn't)
   if (def.curated) {
-    const out = [];
     const picks = await getPicks(env);
-    for (let i = 0; i < picks.length; i++) {
-      const p = picks[i];
-      if ((p.media || "movie") !== media) continue;
-      let hit = null;
-      try {
-        const d = await tmdb(
-          env,
-          `/search/${MEDIA[media].path}`,
-          `include_adult=false&query=${encodeURIComponent(p.title)}`
-        );
-        hit = (d.results || []).find((r) => titleOf(r).toLowerCase() === p.title.toLowerCase()) || null;
-      } catch (e) {}
-      const card = hit
-        ? slim(hit, media)
-        : { id: "c" + i, mt: media, d: "", t: p.title, y: "", r: "", p: null, b: null, o: clip(p.note || "", 220) };
-      if (p.poster) {
-        card.p = p.poster;
-        card.b = p.poster;
-      }
-      if (p.date) {
-        card.d = p.date;
-        card.y = p.date.slice(0, 4);
-      }
-      out.push(card);
-    }
+    const out = (
+      await Promise.all(
+        picks.map(async (p, i) => {
+          if ((p.media || "movie") !== media) return null;
+          let hit = null;
+          try {
+            const d = await tmdb(
+              env,
+              `/search/${MEDIA[media].path}`,
+              `include_adult=false&query=${encodeURIComponent(p.title)}`
+            );
+            hit = (d.results || []).find((r) => titleOf(r).toLowerCase() === p.title.toLowerCase()) || null;
+          } catch (e) {}
+          const card = hit
+            ? slim(hit, media)
+            : { id: "c" + i, mt: media, d: "", t: p.title, y: "", r: "", p: null, b: null, o: clip(p.note || "", 220) };
+          if (p.poster) {
+            card.p = p.poster;
+            card.b = p.poster;
+          }
+          if (p.date) {
+            card.d = p.date;
+            card.y = p.date.slice(0, 4);
+          }
+          return card;
+        })
+      )
+    ).filter(Boolean);
     return out.sort((a, b) => (a.d ? 0 : 1) - (b.d ? 0 : 1) || String(a.d).localeCompare(String(b.d)));
   }
   // Coming Soon: titles releasing from today onward, merged from one or more TMDB queries
@@ -1352,184 +1354,335 @@ async function getPluginsConfig(env) {
   return { globalEnabled: true, groupByRepo: false, repos: [] };
 }
 globalThis.__fetchPluginStreams = fetchPluginStreams;
+
+// ---- Stream discovery fallback: every scraper runs at the same time, results are cached and time-boxed ----
+// (If globalThis.__fastStreams exists, e.g. your faststream.js on Render, it is used first and this is skipped.)
+const STREAM_TTL_MS = 10 * 60 * 1000;
+const EMPTY_TTL_MS = 30 * 1000;
+const CODE_TTL_MS = 30 * 60 * 1000;
+const STREAM_CACHE = new Map();
+const STREAM_JOBS = new Map();
+const MANIFEST_CACHE = new Map();
+const SCRIPT_CACHE = new Map();
+
+function cacheSetStreams(key, list) {
+  STREAM_CACHE.set(key, { at: Date.now(), list });
+  if (STREAM_CACHE.size > 300) STREAM_CACHE.delete(STREAM_CACHE.keys().next().value);
+}
+
+// Plugin repositories live ONLY in cfg:plugins. (Older versions also read cfg:addons, which is
+// where the catalog add-ons live; that mixing made removed items "come back".)
+async function getPluginRepos(env) {
+  if (!env.BOT_USERS) return [];
+  const read = async (k) => {
+    try {
+      const raw = await env.BOT_USERS.get(k);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  let list = await read("cfg:plugins");
+  if (list === null) list = await read("cfg:addons"); // legacy, only when cfg:plugins never existed
+  if (list && !Array.isArray(list)) list = list.repos || list.addons || [];
+  return (Array.isArray(list) ? list : [])
+    .map((p) => {
+      const url = p && (p.url || p.transportUrl);
+      return url ? { ...p, url, id: p.id || "pl_" + fnv(String(url)) } : null;
+    })
+    .filter(Boolean);
+}
+
+async function loadManifest(url, timeoutMs, fresh) {
+  const hit = MANIFEST_CACHE.get(url);
+  if (!fresh && hit && Date.now() - hit.at < CODE_TTL_MS) return hit.m;
+  const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs || 8000), headers: { "user-agent": "BoaCinema/1.0" } });
+  if (!r.ok) throw new Error("manifest " + r.status);
+  const m = await r.json();
+  MANIFEST_CACHE.set(url, { at: Date.now(), m });
+  return m;
+}
+
+function scraperList(manifest, manifestUrl) {
+  const items = (manifest && (manifest.scrapers || manifest.plugins || manifest.providers)) || [];
+  const base = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+  const abs = (u) => (/^https?:\/\//i.test(u) ? u : base + String(u).replace(/^\.?\//, ""));
+  return items.map((s) => {
+    const raw = s.url || s.scriptUrl || s.filename || "";
+    return { ...s, url: raw ? abs(raw) : "" };
+  });
+}
+
+function compileScraper(code, timeoutMs) {
+  const moduleObj = { exports: {} };
+  const timedFetch = (input, init) => {
+    const o = init || {};
+    if (o.signal) return fetch(input, o);
+    return fetch(input, Object.assign({}, o, { signal: AbortSignal.timeout(timeoutMs) }));
+  };
+  const mockRequire = (mod) => (mod === "axios" ? timedFetch : {});
+  const fn = new Function("module", "exports", "require", "moduleObj", "fetch", "console", code);
+  fn(moduleObj, moduleObj.exports, mockRequire, moduleObj, timedFetch, console);
+  const exp = moduleObj.exports || {};
+  const g = exp.getStreams || exp.getstreams || (exp.default && (exp.default.getStreams || exp.default.getstreams));
+  return typeof g === "function" ? g : null;
+}
+
+async function loadScraperFn(url, timeoutMs, fresh) {
+  const hit = SCRIPT_CACHE.get(url);
+  if (!fresh && hit && Date.now() - hit.at < CODE_TTL_MS) return hit.fn;
+  const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs || 12000) });
+  if (!r.ok) throw new Error("script " + r.status);
+  const fn = compileScraper(await r.text(), 9000);
+  if (!fn) throw new Error("no getStreams function in that script");
+  SCRIPT_CACHE.set(url, { at: Date.now(), fn });
+  return fn;
+}
+
+function withTimeout(p, ms, label) {
+  let t;
+  const timer = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error(label + " timed out")), ms);
+  });
+  return Promise.race([p, timer]).finally(() => clearTimeout(t));
+}
+
+function startScrapers(env, tmdbId, mediaType, season, episode, key) {
+  const bag = [];
+  const seen = new Set();
+  const job = { bag, done: null };
+  job.done = (async () => {
+    const perScraper = Number(env.SCRAPER_TIMEOUT_MS) || 9000;
+    const only = String(env.ONLY_SCRAPERS || "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+    const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false);
+    const tasks = [];
+    await Promise.all(
+      repos.map(async (repo) => {
+        let manifest;
+        try {
+          manifest = await loadManifest(repo.url, 8000);
+        } catch (err) {
+          console.log("Repo failed " + repo.url + ": " + err.message);
+          return;
+        }
+        const off = new Set((repo.disabled || []).map(String));
+        for (const sc of scraperList(manifest, repo.url)) {
+          const sid = String(sc.id || sc.name || "");
+          const label = sc.name || sc.id || sc.url;
+          if (sc.enabled === false || !sc.url || off.has(sid)) continue;
+          if (only.length && !only.some((o) => String(sc.name || sc.id).toLowerCase().includes(o))) continue;
+          const types = sc.supportedTypes || sc.types;
+          if (Array.isArray(types) && types.length && !types.includes(mediaType)) continue;
+          tasks.push(
+            (async () => {
+              try {
+                const fn = await loadScraperFn(sc.url, 12000);
+                const res = await withTimeout(
+                  Promise.resolve().then(() => fn(String(tmdbId), mediaType, season, episode)),
+                  perScraper,
+                  label
+                );
+                if (Array.isArray(res)) {
+                  for (const st of res) {
+                    if (!st) continue;
+                    const k = String(st.url || st.title || "");
+                    if (seen.has(k)) continue;
+                    seen.add(k);
+                    bag.push({ ...st, provider: sc.name || st.provider || sc.id });
+                  }
+                  console.log("Collected " + res.length + " streams from " + label);
+                }
+              } catch (err) {
+                console.log("Skipped scraper " + label + ": " + (err && err.message));
+              }
+            })()
+          );
+        }
+      })
+    );
+    await Promise.allSettled(tasks);
+  })();
+  job.done
+    .then(() => cacheSetStreams(key, bag.slice()))
+    .catch(() => {})
+    .finally(() => STREAM_JOBS.delete(key));
+  return job;
+}
+
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
   if (globalThis.__fastStreams) return globalThis.__fastStreams(env, tmdbId, mediaType, season, episode);
+  const s = Number(season) || 1;
+  const e = Number(episode) || 1;
+  const key = [mediaType, tmdbId, mediaType === "tv" ? s : 0, mediaType === "tv" ? e : 0].join(":");
+  const cached = STREAM_CACHE.get(key);
+  if (cached && Date.now() - cached.at < (cached.list.length ? STREAM_TTL_MS : EMPTY_TTL_MS)) return cached.list;
+
   if (env.STREAM_BACKEND) {
+    try {
+      const r = await fetch(
+        env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) +
+          "&id=" + encodeURIComponent(tmdbId) + "&s=" + s + "&e=" + e,
+        { headers: { "x-stream-key": env.STREAM_KEY || "" }, signal: AbortSignal.timeout(Number(env.BACKEND_TIMEOUT_MS) || 45000) }
+      );
+      const list = r.ok ? await r.json() : [];
+      if (Array.isArray(list)) cacheSetStreams(key, list);
+      return Array.isArray(list) ? list : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  let job = STREAM_JOBS.get(key);
+  if (!job) {
+    job = startScrapers(env, tmdbId, mediaType, s, e, key);
+    STREAM_JOBS.set(key, job);
+  }
+  const budget = Number(env.STREAM_BUDGET_MS) || 10000;
+  let timer;
+  await Promise.race([job.done, new Promise((r) => { timer = setTimeout(r, budget); })]);
+  clearTimeout(timer);
+  return job.bag.slice();
+}
+
+// Runs ONE provider for the admin "Test provider" button
+async function testScraper(env, o) {
+  const t0 = Date.now();
+  const type = o.type === "tv" ? "tv" : "movie";
+  if (!/^https:\/\//i.test(o.url || "")) return { ok: false, error: "This provider has no script link to test." };
   try {
-    const r = await fetch(
-      env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) +
-      "&id=" + encodeURIComponent(tmdbId) + "&s=" + season + "&e=" + episode,
-      { headers: { "x-stream-key": env.STREAM_KEY || "" } }
+    const fn = await loadScraperFn(o.url, 15000, true);
+    const res = await withTimeout(
+      Promise.resolve().then(() => fn(String(o.id), type, Number(o.s) || 1, Number(o.e) || 1)),
+      Number(env.TEST_TIMEOUT_MS) || 20000,
+      "Provider"
     );
-    return r.ok ? await r.json() : [];
-  } catch (e) {
-    return [];
-  }
-}
-  try {
-    const rawPlugins = (await env.BOT_USERS.get('cfg:plugins')) || (await env.BOT_USERS.get('cfg:addons'));
-    if (!rawPlugins) return [];
-
-    const parsed = JSON.parse(rawPlugins);
-    // Support both top-level array (your addons.json format) and { repos: [] }
-    const repos = Array.isArray(parsed)
-      ? parsed
-      : (parsed.repos || parsed.addons || []);
-
-    let allStreams = [];
-
-    for (const repo of repos) {
-      if (repo.enabled === false) continue;
-      const manifestUrl = repo.url || repo.transportUrl;
-      if (!manifestUrl) continue;
-
-      console.log(`Fetching Nuvio repo manifest: ${manifestUrl}`);
-
-      try {
-        const manifestRes = await fetch(manifestUrl);
-        if (!manifestRes.ok) continue;
-        const manifest = await manifestRes.json();
-
-        // Nuvio manifests list scrapers under manifest.scrapers or manifest.plugins
-        const scrapers = manifest.scrapers || manifest.plugins || [];
-
-        for (const scraper of scrapers) {
-         if (scraper.enabled === false) continue;
-const only = String(env.ONLY_SCRAPERS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
-if (only.length && !only.some(o => String(scraper.name || scraper.id).toLowerCase().includes(o))) continue;
-// If the scraper has a filename instead of a direct url, resolve it against the manifest origin
-if (!scraper.url && scraper.filename) {
-  const repoBase = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
-  scraper.url = repoBase + scraper.filename;
-}
-if (!scraper.url) continue;
-          try {
-            console.log(`Running scraper: ${scraper.name || scraper.id}`);
-            const codeRes = await fetch(scraper.url);
-            if (!codeRes.ok) continue;
-            const scriptCode = await codeRes.text();
-
-            // Execute Nuvio-compatible JS scraper module
-            // Execute Nuvio-compatible JS scraper module
-const moduleObj = { exports: {} };
-const mockRequire = (mod) => {
-  if (mod === 'axios') return fetch;
-  return {};
-};
-const fn = new Function('module', 'exports', 'require', 'moduleObj', 'fetch', 'console', scriptCode);
-fn(moduleObj, moduleObj.exports, mockRequire, moduleObj, fetch, console);
-
-           const exp = moduleObj.exports || {};
-const getstreams = exp.getStreams || exp.getstreams || exp.default?.getStreams || exp.default?.getstreams;
-if (typeof getstreams === 'function') {
-      try {
-        const scraperPromise = getstreams(String(tmdbId), mediaType, Number(season) || 1, Number(episode) || 1);
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Scraper timeout')), 5000));
-        const streams = await Promise.race([scraperPromise, timeoutPromise]);
-        
-        if (Array.isArray(streams) && streams.length > 0) {
-         allStreams.push(...streams.map(s => ({ ...s, provider: scraper.name || s.provider || scraper.id })));
-          console.log(`Collected ${streams.length} streams from ${scraper.name || scraper.id}`);
-        }
-      } catch (err) {
-        console.log(`Skipped scraper ${scraper.name || scraper.id}: ${err.message}`);
-      }
-    }
-          } catch (scraperErr) {
-            console.error(`Scraper ${scraper.name || scraper.url} failed:`, scraperErr.message);
-          }
-        }
-      } catch (repoErr) {
-        console.error(`Failed to load repo ${manifestUrl}:`, repoErr.message);
-      }
-    }
-
-    console.log(`Total streams collected: ${allStreams.length}`);
-    return allStreams;
+    const list = Array.isArray(res) ? res : [];
+    return {
+      ok: true,
+      count: list.length,
+      ms: Date.now() - t0,
+      sample: list.slice(0, 5).map((x) => ({
+        title: String((x && (x.title || x.name)) || "Stream").slice(0, 90),
+        quality: String((x && (x.quality || x.resolution)) || "").slice(0, 20),
+      })),
+    };
   } catch (err) {
-    console.error("Plugin stream fetch failed:", err.message);
-    return [];
+    const msg = String((err && err.message) || err);
+    return {
+      ok: false,
+      ms: Date.now() - t0,
+      error: /code generation|eval/i.test(msg)
+        ? "Cloudflare Workers block running provider code. Run this test on your Render server (set STREAM_BACKEND on the Worker)."
+        : msg,
+    };
   }
 }
 
-          
+// Repositories + providers for the admin panel (reads the manifests)
+async function providersPayload(env, fresh) {
+  const saved = await getPluginRepos(env);
+  const repos = [];
+  const providers = [];
+  await Promise.all(
+    saved.map(async (repo, idx) => {
+      const dis = new Set((repo.disabled || []).map(String));
+      try {
+        const m = await loadManifest(repo.url, 8000, fresh);
+        const items = scraperList(m, repo.url);
+        const rname = m.name || repo.name || "Repository";
+        repos[idx] = { id: repo.id, name: rname, version: m.version || "1.0.0", url: repo.url, providerCount: items.length };
+        providers[idx] = items.map((p) => {
+          const t = p.supportedTypes || p.types;
+          const pid = String(p.id || p.name || "");
+          return {
+            id: pid,
+            name: p.name || p.id || "Provider",
+            description: p.description || "",
+            version: p.version || "1.0.0",
+            types: Array.isArray(t) ? t.join(" | ") : p.type || "movie | tv",
+            repoId: repo.id,
+            repoName: rname,
+            url: p.url,
+            enabled: !dis.has(pid),
+          };
+        });
+      } catch (e) {
+        repos[idx] = { id: repo.id, name: repo.name || "Repository", version: "", url: repo.url, providerCount: 0, error: "Couldn't load the manifest" };
+        providers[idx] = [];
+      }
+    })
+  );
+  return { repos: repos.filter(Boolean), providers: [].concat(...providers.filter(Boolean)) };
+}
 
-async function handleApi(url, env) {
-  const send = (data, status = 200) =>
+// Clears Cloudflare's cached copies after an admin change, so every phone sees it right away
+async function bustCache(url, paths) {
+  try {
+    if (typeof caches === "undefined" || !caches.default) return;
+    await Promise.all(paths.map((p) => caches.default.delete(new Request(url.origin + p, { method: "GET" }))));
+  } catch (e) {}
+}
+const bustRows = (url) => bustCache(url, ["/api/rows?type=movie", "/api/rows?type=tv"]);
+const bustPicks = (url) =>
+  bustCache(url, ["/api/row?type=movie&name=upcoming_boa", "/api/row?type=tv&name=upcoming_boa"]);
+
+async function handleApi(url, env, request) {
+  const send = (data, status = 200, cache) =>
     new Response(JSON.stringify(data), {
       status,
       headers: {
         "content-type": "application/json; charset=utf-8",
-        "cache-control": status === 200 ? "public, max-age=300" : "no-store",
+        "cache-control": cache || (status === 200 ? "public, max-age=300" : "no-store"),
       },
     });
   const media = url.searchParams.get("type") === "tv" ? "tv" : "movie";
   try {
 
     const path = url.pathname;
-    if (path === "/api/plugin-streams") {
-  const keyOk = env.ALLOW_LOCAL_DEV === "1" || (env.STREAM_KEY && request.headers.get("x-stream-key") === env.STREAM_KEY);
-  if (!keyOk) return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json" } });
-  const out = await fetchPluginStreams(
-    env,
-    url.searchParams.get("id") || "",
-    url.searchParams.get("type") || "movie",
-    Number(url.searchParams.get("s")) || 1,
-    Number(url.searchParams.get("e")) || 1
-  );
-  return new Response(JSON.stringify(out), { headers: { "content-type": "application/json" } });
-}
+    if (path === "/api/plugin-streams" || path === "/api/plugin-test") {
+      const keyOk =
+        env.ALLOW_LOCAL_DEV === "1" ||
+        (env.STREAM_KEY && request && request.headers.get("x-stream-key") === env.STREAM_KEY);
+      if (!keyOk) return send({ error: "unauthorized" }, 401, "no-store");
+      if (path === "/api/plugin-test") {
+        const r = await testScraper(env, {
+          url: url.searchParams.get("u") || "",
+          type: url.searchParams.get("type") || "movie",
+          id: url.searchParams.get("id") || "550",
+          s: url.searchParams.get("s") || 1,
+          e: url.searchParams.get("e") || 1,
+        });
+        return send(r, 200, "no-store");
+      }
+      const out = await fetchPluginStreams(
+        env,
+        url.searchParams.get("id") || "",
+        url.searchParams.get("type") || "movie",
+        Number(url.searchParams.get("s")) || 1,
+        Number(url.searchParams.get("e")) || 1
+      );
+      return send(out, 200, "no-store");
+    }
     if (path === "/api/streams") {
       const id = url.searchParams.get("id") || "";
       const s = url.searchParams.get("s") || "1";
       const e = url.searchParams.get("e") || "1";
       if (!/^\d{1,9}$/.test(id)) return send({ error: "bad id" }, 400);
       try {
-      console.log("Fetching streams for ID:", id, "media:", media, "s:", s, "e:", e);
-      const streams = await fetchPluginStreams(env, id, media, s, e);
-      console.log("Streams found:", JSON.stringify(streams));
-      return send(streams);
-    } catch (err) {
-      console.error("Plugin fetch error:", err.message);
-      return send({ error: err.message }, 500);
-    }
+        const streams = await fetchPluginStreams(env, id, media, s, e);
+        return send(Array.isArray(streams) ? streams : [], 200, "no-store");
+      } catch (err) {
+        console.error("Plugin fetch error:", err.message);
+        return send({ error: err.message }, 500);
+      }
     }
     if (path === "/api/providers") {
-      const raw = (await env.BOT_USERS.get("cfg:plugins")) || (await env.BOT_USERS.get("cfg:addons")) || "[]";
-      const parsed = JSON.parse(raw);
-      const savedRepos = Array.isArray(parsed) ? parsed : (parsed.repos || []);
-      const repos = [];
-      const providers = [];
-
-      for (const repo of savedRepos) {
-        try {
-          const res = await fetch(repo.url);
-          const manifest = res.ok ? await res.json() : {};
-          const items = manifest.scrapers || manifest.plugins || manifest.providers || [];
-
-          repos.push({
-            id: repo.id,
-            name: manifest.name || repo.name,
-            version: manifest.version || "1.0.0",
-            url: repo.url,
-            providerCount: items.length
-          });
-
-          for (const p of items) {
-            providers.push({
-              name: p.name,
-              description: p.description || "",
-              version: p.version || "1.0.0",
-              types: Array.isArray(p.types) ? p.types.join(" | ") : (p.type || "movie | tv"),
-              repoName: manifest.name || repo.name,
-              url: p.url || p.scriptUrl || ""
-            });
-          }
-        } catch (e) {
-          repos.push({ ...repo, version: "1.0.0", providerCount: 0 });
-        }
+      // owner only (kept for older panels; the new panel uses /api/admin/providers)
+      if (request) {
+        const who = await ownerCheck(request, env);
+        if (!who.ok) return send({ error: "owner only" }, 403, "no-store");
       }
-      return send({ repos, providers }, 200);
+      return send(await providersPayload(env, url.searchParams.get("fresh") === "1"), 200, "no-store");
     }
     if (path === "/api/rows") {
       const base = ROW_ORDER[media].map((k) => ({ key: k, title: ROW_DEFS[media][k].title }));
@@ -1568,7 +1721,7 @@ async function handleApi(url, env) {
       try {
         if (env.BOT_USERS) n = (await env.BOT_USERS.get("cfg:notice")) || "";
       } catch (e) {}
-      return send({ n });
+      return send({ n }, 200, "no-store");
     }
     if (path === "/api/search") {
       const q = (url.searchParams.get("q") || "").trim().slice(0, 100);
@@ -1606,6 +1759,7 @@ const APP_HTML = String.raw`<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Boa Cinema">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://image.tmdb.org" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap">
@@ -1625,7 +1779,10 @@ svg{display:block}
 .view.on{display:block}
 
 /* ---------- top switch (movies / series) ---------- */
-#seg{position:absolute;top:calc(var(--sat) + 12px);left:50%;transform:translateX(-50%);z-index:6;display:flex;padding:4px;border-radius:999px;background:rgba(20,20,22,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1)}
+#v-home{position:relative}
+#brand{position:absolute;top:calc(var(--sat) + 12px);left:14px;z-index:7;height:38px;display:flex;align-items:center;background:none;border:0;padding:0;color:#fff;font-size:21px;font-weight:800;letter-spacing:-.5px;text-shadow:0 2px 10px rgba(0,0,0,.7)}
+#brand b{color:#e50914;font-weight:900}
+#seg{position:absolute;top:calc(var(--sat) + 12px);right:14px;left:auto;transform:none;z-index:6;display:flex;padding:4px;border-radius:999px;background:rgba(20,20,22,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1)}
 #seg button{border:0;background:none;color:#d4d4d8;font-size:13px;font-weight:700;padding:7px 16px;border-radius:999px}
 #seg button.on{background:#fff;color:#000}
 
@@ -1860,10 +2017,52 @@ textarea.ainp{min-height:72px;resize:vertical}
 .sitem span{font-size:12.5px;color:var(--muted)}
 .splaybtn{border:0;border-radius:999px;background:#fff;color:#000;font-weight:800;font-size:13px;padding:9px 16px;flex:0 0 auto}
 /* ---------- wide screens (website on laptop/tablet): keep the phone layout, centred ---------- */
+
+.btn.disabled{background:#2a2a2e;color:#8a8a90}
+.pplay.off{background:rgba(70,70,76,.92);color:#9a9aa0}
+.ep.off{opacity:.45}
+.prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.25)}
+.prog i{display:block;height:100%;background:#e50914}
+.xbtn{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;border:0;background:rgba(0,0,0,.8);color:#fff;font-size:18px;line-height:26px;padding:0;z-index:3}
+.whoami{display:flex;align-items:center;gap:10px;margin:calc(var(--sat) + 14px) 16px 4px;background:#1c1c1f;border:1px solid #2a2a2e;color:#fff;border-radius:999px;padding:6px 16px 6px 6px;font-size:14px;font-weight:700}
+.pav{width:96px;height:96px;border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:#fff;position:relative}
+.pav.sm{width:30px;height:30px;border-radius:50%;font-size:14px}
+.pav.big{width:120px;height:120px;font-size:52px;margin:0 auto 18px}
+.pav.add{background:#2a2a2e;color:#a1a1aa;font-size:44px}
+.pav .pen{position:absolute;inset:0;border-radius:20px;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font-size:30px}
+#profiles{position:fixed;inset:0;z-index:70;background:#0b0b0c;display:none;flex-direction:column;align-items:center;justify-content:center;padding:24px;overflow:auto;text-align:center}
+#profiles.open{display:flex}
+#profiles h1{font-size:26px;margin:0 0 26px;font-weight:800}
+.pfgrid{display:flex;flex-wrap:wrap;gap:20px;justify-content:center;max-width:380px}
+.who{background:none;border:0;color:#d4d4d8;display:flex;flex-direction:column;align-items:center;gap:8px;font-size:14px;font-weight:600;width:100px}
+.who.cur .pav{outline:3px solid #fff}
+.pfbtn{margin-top:22px;padding:12px 26px;border-radius:12px;border:0;background:#fff;color:#000;font-size:15px;font-weight:700;min-width:200px}
+.pfbtn.ghost{background:#2a2a2e;color:#fff;margin-top:10px}
+.pfbtn.danger{background:#3b1215;color:#ff6b6b;margin-top:10px}
+.pfin{max-width:260px;text-align:center;margin:0 auto}
+.pfsw{display:flex;gap:10px;justify-content:center;margin-top:14px}
+.sw{width:30px;height:30px;border-radius:50%;border:2px solid transparent;padding:0}
+.sw.on{border-color:#fff}
+.libbar{display:flex;gap:8px;overflow-x:auto;padding:0 16px 12px;scrollbar-width:none}
+.atabs{display:flex;gap:8px;padding:0 16px 12px;position:sticky;top:0;z-index:5;background:var(--bg)}
+.atab{flex:1;padding:10px 0;border-radius:999px;border:0;background:#1c1c1f;color:#d4d4d8;font-weight:700;font-size:14px}
+.atab.on{background:#fff;color:#000}
+.abtn.mini{padding:7px 12px;font-size:12px;margin:0;border-radius:10px;width:auto}
+.arow2{display:flex;gap:8px;margin:8px 0}
+.achk2{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0}
+.apv{display:flex;gap:8px;overflow-x:auto;padding:6px 0}
+.apvi{flex:none;width:84px;font-size:11px;color:#d4d4d8}
+.apvi img{width:84px;height:120px;object-fit:cover;border-radius:8px;display:block;margin-bottom:4px;background:#222}
+.adon{background:#18181b;border:1px solid #27272a;border-radius:14px;padding:12px;margin:10px 0}
+.adtop b{display:block;font-size:16px}
+.adtop span{font-size:12px;color:#a1a1aa}
+.adbtns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.tpanel{display:flex;flex-direction:column;gap:8px}
+.tout{font-size:13px;color:#d4d4d8;word-break:break-word}
 @media (min-width:720px){
   html{background:#000}
   body{max-width:560px;margin:0 auto;background:var(--bg);min-height:100vh;box-shadow:0 0 0 1px #1b1b1d,0 0 80px rgba(229,9,20,.08)}
-  #detail,#dbar,#catmenu,#admin{left:50%;right:auto;width:560px;margin-left:-280px}
+  #detail,#dbar,#catmenu,#admin,#profiles{left:50%;right:auto;width:560px;margin-left:-280px}
   #detail,#catmenu,#admin{top:0;bottom:0}
 }
 </style>
@@ -1878,6 +2077,7 @@ textarea.ainp{min-height:72px;resize:vertical}
   <div id="smlist"></div>
 </div>
 <div id="v-home" class="view on">
+  <button id="brand" aria-label="Boa Cinema"><b>Boa</b>-cinema</button>
   <div id="hero" class="sk">
     <div id="seg"><button id="segm" class="on">Movies</button><button id="segt">Series</button></div>
   </div>
@@ -1937,6 +2137,7 @@ textarea.ainp{min-height:72px;resize:vertical}
   <div id="dbody"></div>
 </div>
 <div id="admin" role="dialog" aria-label="Owner panel"></div>
+<div id="profiles"></div>
 <div id="toast" class="toast"></div>
 
 <script>
@@ -1975,10 +2176,10 @@ textarea.ainp{min-height:72px;resize:vertical}
     if (text != null) e.textContent = text;
     return e;
   }
-  function api(path, tries) {
+  function api(path, tries, timeoutMs) {
     tries = tries == null ? 1 : tries;
     var ctl = window.AbortController ? new AbortController() : null;
-    var to = setTimeout(function () { if (ctl) ctl.abort(); }, 120000);
+    var to = setTimeout(function () { if (ctl) ctl.abort(); }, timeoutMs || 25000);
     var headers = {};
     if (tg && tg.initData) headers["x-tg-init"] = tg.initData;
     return fetch(path, { headers: headers, signal: ctl ? ctl.signal : undefined })
@@ -1989,7 +2190,7 @@ textarea.ainp{min-height:72px;resize:vertical}
       })
       .catch(function (e) {
         clearTimeout(to);
-        if (tries > 0) return api(path, tries - 1);
+        if (tries > 0) return api(path, tries - 1, timeoutMs);
         throw e;
       });
   }
@@ -2031,37 +2232,98 @@ textarea.ainp{min-height:72px;resize:vertical}
     return min >= 60 ? Math.floor(min / 60) + "h " + (min % 60) + "m" : min + "m";
   }
 
-  // ---------- library (saved on this device, mirrored to Telegram cloud when available) ----------
+  // ---------- profiles, library and watch history (per Telegram account, per profile) ----------
   var cloud = null;
   try {
     if (tg && tg.CloudStorage && tg.isVersionAtLeast && tg.isVersionAtLeast("6.9")) cloud = tg.CloudStorage;
   } catch (e) {}
-  function libKey(mt, id) { return "l_" + mt + "_" + id; }
+  var PROFILES = [];
+  var PID = "p1";
+  var WATCH = [];
+  var AVC = ["#e50914", "#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#0891b2"];
+  var CUR = null;
+  var LIBF = "all", LIBSORT = "recent", LIBEDIT = false;
+  function lsGet(k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function pById(id) { for (var i = 0; i < PROFILES.length; i++) if (PROFILES[i].id === id) return PROFILES[i]; return null; }
+  function curProfile() { return pById(PID) || PROFILES[0]; }
+  function tgName() {
+    var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+    return u && u.first_name ? u.first_name : "";
+  }
+  function profilesSave() {
+    var s = JSON.stringify(PROFILES);
+    lsSet("boa_profiles", s);
+    if (cloud) { try { cloud.setItem("profiles", s); } catch (e) {} }
+  }
+  function profilesLoad() {
+    try { PROFILES = JSON.parse(lsGet("boa_profiles", "[]")) || []; } catch (e) { PROFILES = []; }
+    if (!PROFILES.length) { PROFILES = [{ id: "p1", n: tgName() || "Me", c: 0 }]; lsSet("boa_profiles", JSON.stringify(PROFILES)); }
+    PID = lsGet("boa_pid", PROFILES[0].id);
+    if (!pById(PID)) PID = PROFILES[0].id;
+    if (cloud) {
+      try {
+        cloud.getItem("profiles", function (err, v) {
+          if (err || !v) { profilesSave(); return; }
+          try {
+            var arr = JSON.parse(v);
+            if (arr && arr.length && arr.length >= PROFILES.length) {
+              PROFILES = arr;
+              lsSet("boa_profiles", v);
+              if (!pById(PID)) PID = PROFILES[0].id;
+              refreshAll();
+            }
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+  }
+  function libKey(mt, id) { return "l_" + PID + "_" + mt + "_" + id; }
+  function watchKey(mt, id) { return "w_" + PID + "_" + mt + "_" + id; }
   function libIdx(mt, id) {
     for (var i = 0; i < LIB.length; i++) if (LIB[i].m === mt && String(LIB[i].i) === String(id)) return i;
     return -1;
   }
-  function libSaveLocal() {
-    try { localStorage.setItem("boa_lib", JSON.stringify(LIB)); } catch (e) {}
+  function libSaveLocal() { lsSet("boa_lib_" + PID, JSON.stringify(LIB)); }
+  function watchSaveLocal() { lsSet("boa_watch_" + PID, JSON.stringify(WATCH)); }
+  function refreshAll() {
+    paintNavAvatar();
+    if (tab === "lib") renderLib();
+    if (tab === "me") renderMe();
   }
-  function libLoad() {
-    try { LIB = JSON.parse(localStorage.getItem("boa_lib") || "[]") || []; } catch (e) { LIB = []; }
+  function dataLoad() {
+    var raw = lsGet("boa_lib_" + PID, null);
+    if (raw == null && PID === "p1") raw = lsGet("boa_lib", "[]");
+    try { LIB = JSON.parse(raw || "[]") || []; } catch (e) { LIB = []; }
+    try { WATCH = JSON.parse(lsGet("boa_watch_" + PID, "[]")) || []; } catch (e) { WATCH = []; }
     if (!cloud) return;
+    var pid = PID;
+    var pl = "l_" + pid + "_", pw = "w_" + pid + "_";
     try {
       cloud.getKeys(function (err, keys) {
-        if (err || !keys || !keys.length) return;
-        var want = keys.filter(function (k) { return k.indexOf("l_") === 0; }).slice(0, 200);
+        if (err || !keys || !keys.length || pid !== PID) return;
+        var want = keys.filter(function (k) {
+          if (k.indexOf(pl) === 0 || k.indexOf(pw) === 0) return true;
+          return pid === "p1" && /^l_(movie|tv)_/.test(k);
+        }).slice(0, 100);
         if (!want.length) return;
         cloud.getItems(want, function (err2, vals) {
-          if (err2 || !vals) return;
+          if (err2 || !vals || pid !== PID) return;
           var changed = false;
           want.forEach(function (k) {
             try {
               var o = JSON.parse(vals[k]);
-              if (o && o.m && o.i && libIdx(o.m, o.i) < 0) { LIB.push(o); changed = true; }
+              if (!o || !o.m || !o.i) return;
+              if (k.charAt(0) === "l") {
+                if (libIdx(o.m, o.i) < 0) { LIB.push(o); changed = true; }
+              } else {
+                var w = watchGet(o.m, o.i);
+                if (!w) { WATCH.push(o); changed = true; }
+                else if ((o.a || 0) > (w.a || 0)) { WATCH[WATCH.indexOf(w)] = o; changed = true; }
+              }
             } catch (e) {}
           });
-          if (changed) { libSaveLocal(); if (tab === "lib") renderLib(); if (tab === "me") renderMe(); }
+          if (changed) { libSaveLocal(); watchSaveLocal(); refreshAll(); }
         });
       });
     } catch (e) {}
@@ -2078,15 +2340,193 @@ textarea.ainp{min-height:72px;resize:vertical}
       if (p && p.length > 200) p = null;
       var o = { m: d.mt, i: d.id, t: d.t, p: p, y: d.y || "", a: Date.now() };
       LIB.unshift(o);
-      if (LIB.length > 200) LIB.length = 200;
+      if (LIB.length > 150) LIB.length = 150;
       if (cloud) { try { cloud.setItem(libKey(d.mt, d.id), JSON.stringify(o)); } catch (e) {} }
       toast("Added to Library");
     }
     libSaveLocal();
   }
+  function libRemove(mt, id) {
+    var i = libIdx(mt, id);
+    if (i > -1) LIB.splice(i, 1);
+    if (cloud) { try { cloud.removeItem(libKey(mt, id)); } catch (e) {} }
+    libSaveLocal();
+  }
   function paintLibBtn(d) {
     $("dlib").innerHTML = libHas(d.mt, d.id) ? ICON.check : ICON.plus;
     $("dlib").setAttribute("aria-label", libHas(d.mt, d.id) ? "Remove from library" : "Add to library");
+  }
+  // ----- watch history (Continue Watching / Watch Next) -----
+  function watchGet(mt, id) {
+    for (var i = 0; i < WATCH.length; i++) if (WATCH[i].m === mt && String(WATCH[i].i) === String(id)) return WATCH[i];
+    return null;
+  }
+  function watchPush(o, force) {
+    var now = Date.now();
+    if (!force && o._cl && now - o._cl < 20000) return;
+    o._cl = now;
+    if (cloud) {
+      var c = {}; for (var k in o) if (k !== "_cl") c[k] = o[k];
+      try { cloud.setItem(watchKey(o.m, o.i), JSON.stringify(c)); } catch (e) {}
+    }
+  }
+  function watchDrop(mt, id) {
+    var w = watchGet(mt, id);
+    if (w) WATCH.splice(WATCH.indexOf(w), 1);
+    if (cloud) { try { cloud.removeItem(watchKey(mt, id)); } catch (e) {} }
+    watchSaveLocal();
+  }
+  function recordWatch(c, pos, dur, force) {
+    if (!c) return;
+    var w = watchGet(c.mt, c.id);
+    if (!w) {
+      w = { m: c.mt, i: c.id, t: c.base || c.title, p: (c.meta && c.meta.p) || null, y: (c.meta && c.meta.y) || "" };
+      if (w.p && w.p.length > 200) w.p = null;
+      WATCH.unshift(w);
+      if (WATCH.length > 60) { var old = WATCH.pop(); if (cloud) { try { cloud.removeItem(watchKey(old.m, old.i)); } catch (e) {} } }
+    }
+    w.s = c.s || 1; w.e = c.e || 1; w.nx = 0;
+    w.pos = Math.floor(pos || 0); w.dur = Math.floor(dur || 0); w.a = Date.now();
+    if (c.mt === "movie" && dur > 60 && pos / dur > 0.93) { watchDrop(c.mt, c.id); return; }
+    if (c.mt === "tv" && dur > 60 && pos / dur > 0.93) { w.e = w.e + 1; w.pos = 0; w.dur = 0; w.nx = 1; force = true; }
+    watchSaveLocal();
+    watchPush(w, force);
+  }
+  function watchClear() {
+    WATCH.forEach(function (w) { if (cloud) { try { cloud.removeItem(watchKey(w.m, w.i)); } catch (e) {} } });
+    WATCH = [];
+    watchSaveLocal();
+  }
+  function trackVideo(v, c) {
+    var last = 0;
+    v.onloadedmetadata = function () {
+      if (c.resumeAt > 10 && v.duration && c.resumeAt < v.duration - 30) { try { v.currentTime = c.resumeAt; } catch (e) {} }
+    };
+    v.ontimeupdate = function () {
+      var now = Date.now();
+      if (now - last < 4000) return;
+      last = now;
+      if (v.currentTime > 5) recordWatch(c, v.currentTime, v.duration || 0, false);
+    };
+    v.onpause = function () { if (v.currentTime > 5) recordWatch(c, v.currentTime, v.duration || 0, true); };
+    v.onended = function () { recordWatch(c, v.duration || 1, v.duration || 1, true); };
+  }
+  // ----- unreleased titles -----
+  function isUnreleased(m) {
+    var today = new Date().toISOString().slice(0, 10);
+    if (m && m.d && /^\d{4}-\d{2}-\d{2}/.test(m.d)) return m.d.slice(0, 10) > today;
+    if (m && m.y && /^\d{4}$/.test(String(m.y))) return +m.y > new Date().getFullYear();
+    return false;
+  }
+  // ----- Who's watching -----
+  function avatarEl(p, cls) {
+    var a = h("div", cls || "pav", String(p.n || "?").charAt(0).toUpperCase());
+    a.style.background = AVC[(p.c || 0) % AVC.length];
+    return a;
+  }
+  function setProfile(id) {
+    if (!pById(id)) return;
+    PID = id;
+    lsSet("boa_pid", id);
+    dataLoad();
+    closeProfiles();
+    refreshAll();
+    toast("Watching as " + curProfile().n);
+  }
+  function closeProfiles() { $("profiles").className = ""; }
+  function openProfiles(manage) {
+    var box = $("profiles");
+    box.textContent = "";
+    box.className = "open";
+    box.appendChild(h("h1", null, manage === "edit" ? "Manage profiles" : "Who's watching?"));
+    var grid = h("div", "pfgrid");
+    PROFILES.forEach(function (p) {
+      var b = h("button", "who");
+      var av = avatarEl(p);
+      if (manage === "edit") av.appendChild(h("span", "pen", "✎"));
+      b.appendChild(av);
+      b.appendChild(h("span", null, p.n));
+      if (p.id === PID && manage !== "edit") b.className = "who cur";
+      b.onclick = function () { if (manage === "edit") editProfile(p); else setProfile(p.id); };
+      grid.appendChild(b);
+    });
+    if (PROFILES.length < 5) {
+      var add = h("button", "who");
+      var pl = h("div", "pav add", "+");
+      add.appendChild(pl);
+      add.appendChild(h("span", null, "Add profile"));
+      add.onclick = function () {
+        var np = { id: "p" + Date.now().toString(36), n: "Profile " + (PROFILES.length + 1), c: PROFILES.length % AVC.length };
+        PROFILES.push(np);
+        profilesSave();
+        editProfile(np);
+      };
+      grid.appendChild(add);
+    }
+    box.appendChild(grid);
+    var mb = h("button", "pfbtn", manage === "edit" ? "Done" : "Manage profiles");
+    mb.onclick = function () { openProfiles(manage === "edit" ? false : "edit"); };
+    box.appendChild(mb);
+    if (manage !== "edit" && manage !== false) {
+      var cl = h("button", "pfbtn ghost", "Close");
+      cl.onclick = closeProfiles;
+      box.appendChild(cl);
+    }
+  }
+  function editProfile(p) {
+    var box = $("profiles");
+    box.textContent = "";
+    box.className = "open";
+    box.appendChild(h("h1", null, "Edit profile"));
+    var av = avatarEl(p, "pav big");
+    box.appendChild(av);
+    var inp = h("input", "ainp pfin");
+    inp.type = "text"; inp.maxLength = 16; inp.value = p.n;
+    inp.oninput = function () { av.textContent = (inp.value || "?").charAt(0).toUpperCase(); };
+    box.appendChild(inp);
+    var sw = h("div", "pfsw");
+    AVC.forEach(function (c, i) {
+      var s = h("button", "sw" + ((p.c || 0) === i ? " on" : ""));
+      s.style.background = c;
+      s.onclick = function () {
+        p.c = i; av.style.background = c;
+        Array.prototype.forEach.call(sw.children, function (x) { x.className = "sw"; });
+        s.className = "sw on";
+      };
+      sw.appendChild(s);
+    });
+    box.appendChild(sw);
+    var save = h("button", "pfbtn", "Save");
+    save.onclick = function () {
+      p.n = (inp.value || "").trim() || "Profile";
+      profilesSave();
+      openProfiles("edit");
+      refreshAll();
+    };
+    box.appendChild(save);
+    if (PROFILES.length > 1) {
+      var del = h("button", "pfbtn danger", "Delete profile");
+      del.onclick = function () {
+        function go() {
+          if (cloud) {
+            var pre1 = "l_" + p.id + "_", pre2 = "w_" + p.id + "_";
+            try { cloud.getKeys(function (e, ks) { (ks || []).forEach(function (k) { if (k.indexOf(pre1) === 0 || k.indexOf(pre2) === 0) { try { cloud.removeItem(k); } catch (x) {} } }); }); } catch (e) {}
+          }
+          try { localStorage.removeItem("boa_lib_" + p.id); localStorage.removeItem("boa_watch_" + p.id); } catch (e) {}
+          PROFILES = PROFILES.filter(function (x) { return x.id !== p.id; });
+          profilesSave();
+          if (PID === p.id) { PID = PROFILES[0].id; lsSet("boa_pid", PID); dataLoad(); }
+          openProfiles("edit");
+          refreshAll();
+        }
+        if (tg && tg.showConfirm) { try { tg.showConfirm("Delete " + p.n + " and its library?", function (ok) { if (ok) go(); }); return; } catch (e) {} }
+        if (window.confirm("Delete " + p.n + " and its library?")) go();
+      };
+      box.appendChild(del);
+    }
+    var back = h("button", "pfbtn ghost", "Back");
+    back.onclick = function () { openProfiles("edit"); };
+    box.appendChild(back);
   }
 
   // ---------- tabs ----------
@@ -2127,11 +2567,13 @@ textarea.ainp{min-height:72px;resize:vertical}
     if (opts.badge && m.mt === "tv") p.appendChild(h("span", "badge", "SERIES"));
     if (opts.soon && m.d) p.appendChild(h("span", "badge soon", shortDate(m.d)));
     if (opts.nf) p.appendChild(h("span", "nfb", "N"));
-    var plBadge = h("span", "pplay");
+    var unrelC = isUnreleased(m);
+    var plBadge = h("span", "pplay" + (unrelC ? " off" : ""));
     plBadge.innerHTML = ICON.play;
     plBadge.onclick = function (ev) {
       ev.stopPropagation();
-      openStreams(m.mt, m.id, m.t, 1, 1);
+      if (unrelC) { toast("Not released yet" + (m.d ? ": " + fmtDate(m.d) : "")); return; }
+      openStreams(m.mt, m.id, m.t, 1, 1, { p: m.p, y: m.y });
     };
     p.appendChild(plBadge);
     b.appendChild(p);
@@ -2182,6 +2624,7 @@ textarea.ainp{min-height:72px;resize:vertical}
     var w = h("div", "pills");
     w.id = "segfb";
     w.style.paddingTop = "calc(var(--sat) + 14px)";
+    w.style.paddingLeft = "140px";
     var a = h("button", "pill" + (media === "movie" ? " sel" : ""), "Movies");
     var b = h("button", "pill" + (media === "tv" ? " sel" : ""), "Series");
     a.onclick = function () { setMedia("movie"); };
@@ -2496,18 +2939,97 @@ textarea.ainp{min-height:72px;resize:vertical}
   $("dgenre").onchange = function () { dGenre = this.value; loadDisc(); };
 
   // ---------- library and profile ----------
+  function libSection(title) {
+    var s = h("div", "sec");
+    s.appendChild(h("h3", null, title));
+    return s;
+  }
+  function watchCard(o) {
+    var tv = o.m === "tv";
+    var b = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true });
+    var poster = b.firstChild;
+    if (o.dur > 0 && o.pos > 0 && !o.nx) {
+      var pr = h("div", "prog");
+      var bar = h("i");
+      bar.style.width = Math.min(100, Math.max(3, Math.round(o.pos / o.dur * 100))) + "%";
+      pr.appendChild(bar);
+      poster.appendChild(pr);
+    }
+    var cy = b.querySelector(".cy");
+    if (cy) cy.textContent = tv ? ((o.nx ? "Next: " : "") + "S" + (o.s || 1) + " E" + (o.e || 1)) : (o.dur > 0 ? Math.max(1, Math.round((o.dur - o.pos) / 60)) + "m left" : "Resume");
+    var pb = b.querySelector(".pplay");
+    if (pb) pb.onclick = function (ev) {
+      ev.stopPropagation();
+      openStreams(o.m, o.i, o.t + (tv ? " (S" + (o.s || 1) + "E" + (o.e || 1) + ")" : ""), o.s || 1, o.e || 1, { p: o.p, y: o.y }, o.nx ? 0 : (o.pos || 0));
+    };
+    if (LIBEDIT) {
+      var x = h("button", "xbtn", "×");
+      x.setAttribute("aria-label", "Remove");
+      x.onclick = function (ev) { ev.stopPropagation(); watchDrop(o.m, o.i); renderLib(); };
+      poster.appendChild(x);
+    }
+    return b;
+  }
   function renderLib() {
     var box = $("libgrid");
     box.textContent = "";
-    if (!LIB.length) {
-      box.appendChild(h("div", "note center", "Your library is empty. Open any title and tap + to save it here."));
-      return;
+    var p = curProfile();
+    var who = h("button", "whoami");
+    var av = avatarEl(p, "pav sm");
+    who.appendChild(av);
+    who.appendChild(h("span", null, "Watching as " + p.n));
+    who.onclick = function () { openProfiles(true); };
+    box.appendChild(who);
+
+    var cont = WATCH.filter(function (w) { return !w.nx; }).sort(function (a, b) { return (b.a || 0) - (a.a || 0); });
+    var next = WATCH.filter(function (w) { return w.nx; }).sort(function (a, b) { return (b.a || 0) - (a.a || 0); });
+    if (cont.length) {
+      var s1 = libSection("Continue Watching");
+      var st1 = h("div", "strip");
+      cont.forEach(function (o) { st1.appendChild(watchCard(o)); });
+      s1.appendChild(st1);
+      box.appendChild(s1);
     }
-    var g = h("div", "grid");
-    LIB.slice().sort(function (a, b) { return (b.a || 0) - (a.a || 0); }).forEach(function (o) {
-      g.appendChild(makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true }));
+    if (next.length) {
+      var s2 = libSection("Watch Next");
+      var st2 = h("div", "strip");
+      next.forEach(function (o) { st2.appendChild(watchCard(o)); });
+      s2.appendChild(st2);
+      box.appendChild(s2);
+    }
+    var s3 = libSection("My List (" + LIB.length + ")");
+    var bar = h("div", "libbar");
+    [["all", "All"], ["movie", "Movies"], ["tv", "Series"]].forEach(function (f) {
+      var pb = h("button", "pill" + (LIBF === f[0] ? " sel" : ""), f[1]);
+      pb.onclick = function () { LIBF = f[0]; renderLib(); };
+      bar.appendChild(pb);
     });
-    box.appendChild(g);
+    var sb = h("button", "pill", LIBSORT === "recent" ? "Recent" : "A–Z");
+    sb.onclick = function () { LIBSORT = LIBSORT === "recent" ? "az" : "recent"; renderLib(); };
+    bar.appendChild(sb);
+    var eb = h("button", "pill" + (LIBEDIT ? " sel" : ""), LIBEDIT ? "Done" : "Edit");
+    eb.onclick = function () { LIBEDIT = !LIBEDIT; renderLib(); };
+    bar.appendChild(eb);
+    s3.appendChild(bar);
+    var items = LIB.filter(function (o) { return LIBF === "all" || o.m === LIBF; });
+    items.sort(LIBSORT === "az" ? function (a, b) { return String(a.t).localeCompare(String(b.t)); } : function (a, b) { return (b.a || 0) - (a.a || 0); });
+    if (!items.length) {
+      s3.appendChild(h("div", "note center", LIB.length ? "Nothing here with this filter." : "Your list is empty. Open any title and tap + to save it here."));
+    } else {
+      var g = h("div", "grid");
+      items.forEach(function (o) {
+        var c = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true });
+        if (LIBEDIT) {
+          var x = h("button", "xbtn", "×");
+          x.setAttribute("aria-label", "Remove");
+          x.onclick = function (ev) { ev.stopPropagation(); libRemove(o.m, o.i); renderLib(); };
+          c.firstChild.appendChild(x);
+        }
+        g.appendChild(c);
+      });
+      s3.appendChild(g);
+    }
+    box.appendChild(s3);
   }
   function renderMe() {
     var box = $("v-me");
@@ -2532,7 +3054,9 @@ textarea.ainp{min-height:72px;resize:vertical}
       b.onclick = fn;
       list.appendChild(b);
     }
+    item("Who's watching", curProfile().n, function () { openProfiles(true); });
     item("Library", LIB.length + (LIB.length === 1 ? " title" : " titles"), function () { showTab("lib"); });
+    if (WATCH.length) item("Clear watch history", WATCH.length + "", function () { watchClear(); renderMe(); toast("History cleared"); }, "danger");
     if (myCC) item("Your region", flag(myCC) + " " + cname(myCC), function () {});
     item("Open the bot", "@Boa_entertainment_bot", function () {
       var url = "https://t.me/Boa_entertainment_bot";
@@ -2544,6 +3068,7 @@ textarea.ainp{min-height:72px;resize:vertical}
     if (LIB.length) item("Clear library", "", function () {
       function wipe() {
         if (cloud) { LIB.forEach(function (o) { try { cloud.removeItem(libKey(o.m, o.i)); } catch (e) {} }); }
+        watchClear();
         LIB = [];
         libSaveLocal();
         renderMe();
@@ -2560,6 +3085,13 @@ textarea.ainp{min-height:72px;resize:vertical}
   function paintNavAvatar() {
     var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
     var a = $("navav");
+    var p = curProfile();
+    if (p && PROFILES.length > 1) {
+      a.textContent = String(p.n || "B").charAt(0).toUpperCase();
+      a.style.background = AVC[(p.c || 0) % AVC.length];
+      return;
+    }
+    a.style.background = "";
     if (!u) return;
     if (u.photo_url) {
       a.textContent = "";
@@ -2644,7 +3176,12 @@ $("smclose").onclick = function () {
     $("smplayer").style.display = "none";
     $("smplayer").textContent = "";
   };
-  function openStreams(mt, id, title, s, e) {
+  function openStreams(mt, id, title, s, e, meta, resumeAt) {
+    CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0 };
+    var slowT = setTimeout(function () {
+      var f = $("smlist").firstChild;
+      if (f && f.className === "note center") f.textContent = "Still searching providers… the first search for a title can take up to a minute.";
+    }, 8000);
     var modal = $("streammodal");
     var list = $("smlist");
     var player = $("smplayer");
@@ -2655,8 +3192,9 @@ $("smclose").onclick = function () {
     list.appendChild(h("div", "note center", "Please Wait\u2026"));
     modal.classList.add("open");
 
-    api("/api/streams?type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1), 0)
+    api("/api/streams?type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1), 0, 60000)
       .then(function (streams) {
+        clearTimeout(slowT);
         list.textContent = "";
         if (!streams || !streams.length) {
           list.appendChild(h("div", "note center", "No stream returned."));
@@ -2688,6 +3226,7 @@ $("smclose").onclick = function () {
     v.controls = true;
     v.autoplay = true;
     v.setAttribute("playsinline", "");
+    trackVideo(v, CUR);
     v.onwaiting = function () { note.textContent = "Buffering..."; };
     v.onplaying = function () { note.textContent = ""; };
     v.onerror = function () {
@@ -2702,6 +3241,8 @@ $("smclose").onclick = function () {
     player.appendChild(ifr);
   }
   modal.scrollTo({ top: 0, behavior: "smooth" });
+  var w0 = CUR && watchGet(CUR.mt, CUR.id);
+  if (CUR && (!w0 || w0.nx || w0.e !== CUR.e || w0.s !== CUR.s)) recordWatch(CUR, 1, 0, true);
 };
           row.appendChild(btn);
           var acts = h("div");
@@ -2771,9 +3312,10 @@ if (provs.length) {
 }
       })
       .catch(function (e) {
+  clearTimeout(slowT);
   console.error("Plugin query error:", e);
   list.textContent = "";
-  list.appendChild(h("div", "note center", "Failed to query plugins: " + (e && e.message ? e.message : e)));
+  list.appendChild(h("div", "note center", "Search timed out. Tap Play again; the second try is usually instant because results get cached."));
       });
   }
   function renderDetail(d) {
@@ -2831,22 +3373,34 @@ if (provs.length) {
       info.appendChild(gc);
     }
     var acts = h("div", "acts");
-    if (d.trailer) {
-    var streamBtn = h("button", "btn primary");
+    var unrel = isUnreleased(d);
+    var wEnt = watchGet(d.mt, d.id);
+    var streamBtn = h("button", "btn primary" + (unrel ? " disabled" : ""));
     streamBtn.innerHTML = ICON.play;
-    streamBtn.appendChild(document.createTextNode(d.mt === "tv" ? "Play S1 E1" : "Play"));
-    streamBtn.onclick = function () { openStreams(d.mt, d.id, d.t, 1, 1); };
+    var lbl = "Play";
+    if (unrel) lbl = d.d ? "Releases " + fmtDate(d.d) : "Not released yet";
+    else if (d.mt === "tv") lbl = wEnt ? ((wEnt.nx ? "Next: S" : "Resume S") + (wEnt.s || 1) + " E" + (wEnt.e || 1)) : "Play S1 E1";
+    else if (wEnt && wEnt.pos > 30) lbl = "Resume";
+    streamBtn.appendChild(document.createTextNode(lbl));
+    streamBtn.onclick = function () {
+      if (unrel) { toast("Not released yet"); return; }
+      var s1 = 1, e1 = 1, at = 0;
+      if (wEnt && d.mt === "tv") { s1 = wEnt.s || 1; e1 = wEnt.e || 1; at = wEnt.nx ? 0 : (wEnt.pos || 0); }
+      else if (wEnt) at = wEnt.pos || 0;
+      openStreams(d.mt, d.id, d.t + (d.mt === "tv" ? " (S" + s1 + "E" + e1 + ")" : ""), s1, e1, { p: d.p, y: d.y }, at);
+    };
     acts.appendChild(streamBtn);
-      var pb = h("button", "btn primary");
+    if (d.trailer) {
+      var pb = h("button", "btn ghost");
       pb.innerHTML = ICON.play;
-      pb.appendChild(document.createTextNode("Play trailer"));
+      pb.appendChild(document.createTextNode("Trailer"));
       pb.onclick = play;
       acts.appendChild(pb);
-      var yt = h("button", "btn ghost", "Open on YouTube");
+      var yt = h("button", "btn ghost", "YouTube");
       yt.onclick = function () { openLink("https://www.youtube.com/watch?v=" + d.trailer); };
       acts.appendChild(yt);
     } else {
-      var sy = h("button", "btn ghost", "Find trailer on YouTube");
+      var sy = h("button", "btn ghost", "Find trailer");
       sy.onclick = function () { openLink("https://www.youtube.com/results?search_query=" + encodeURIComponent(d.t + " " + d.y + " trailer")); };
       acts.appendChild(sy);
     }
@@ -2926,6 +3480,7 @@ if (provs.length) {
     }
     body.appendChild(h("div", "credit", "Powered by TMDB"));
     body.appendChild(h("div", "dbottom"));
+    if (d.mt === "movie" && !isUnreleased(d) && /^\d+$/.test(String(d.id))) { api("/api/streams?type=movie&id=" + d.id + "&s=1&e=1", 0, 60000).catch(function () {}); }
     if (!d.lg && d.mt && /^\d+$/.test(String(d.id))) {
       api("/api/logo?type=" + d.mt + "&id=" + d.id, 0).then(function (r) {
         if (!r || !r.l) return;
@@ -2985,7 +3540,13 @@ if (provs.length) {
         inf.appendChild(ft);
         c.appendChild(inf);
         c.style.cursor = "pointer";
-        c.onclick = function () { openStreams("tv", d.id, d.t + " (S" + n + "E" + e.n + ")", n, e.n); };
+        var epWatch = watchGet("tv", d.id);
+        if (e.d && e.d.slice(0, 10) > new Date().toISOString().slice(0, 10)) {
+          c.className = "ep off";
+          c.onclick = function () { toast("Airs " + fmtDate(e.d)); };
+        } else {
+          c.onclick = function () { openStreams("tv", d.id, d.t + " (S" + n + "E" + e.n + ")", n, e.n, { p: d.p, y: d.y }, (epWatch && !epWatch.nx && epWatch.s === n && epWatch.e === e.n) ? epWatch.pos : 0); };
+        }
         strip.appendChild(c);
       });
     }
@@ -3173,6 +3734,7 @@ if (provs.length) {
       toast(msg);
     }).catch(function (e) { toast("Couldn't save: " + e.message); });
   }
+  var ADM_TAB = "ov";
   function renderAdmin(reload) {
     var box = $("admin");
     box.textContent = "";
@@ -3198,12 +3760,25 @@ if (provs.length) {
     head.appendChild(back);
     head.appendChild(h("h1", null, "Owner panel"));
     box.appendChild(head);
+    var tabBar = h("div", "atabs");
+    [["ov", "Overview"], ["ad", "Add-ons"], ["pl", "Plugins"]].forEach(function (t) {
+      var b = h("button", "atab" + (ADM_TAB === t[0] ? " on" : ""), t[1]);
+      b.onclick = function () { ADM_TAB = t[0]; showAdmTab(); };
+      b.setAttribute("data-tb", t[0]);
+      tabBar.appendChild(b);
+    });
+    box.appendChild(tabBar);
+    function put(t, el) { el.setAttribute("data-t", t); box.appendChild(el); }
+    function showAdmTab() {
+      Array.prototype.forEach.call(box.querySelectorAll("[data-t]"), function (el) { el.style.display = el.getAttribute("data-t") === ADM_TAB ? "" : "none"; });
+      Array.prototype.forEach.call(tabBar.children, function (b) { b.className = "atab" + (b.getAttribute("data-tb") === ADM_TAB ? " on" : ""); });
+    }
 
     var c1 = h("div", "acard");
     c1.appendChild(h("h3", null, "Members"));
     c1.appendChild(h("p", null, ADM.active === null ? "Member counting needs the BOT_USERS storage connected." : ADM.active + " active in the last 30 days"));
     if (!ADM.kv) c1.appendChild(h("p", null, "Storage isn't connected, so picks and notices can't be saved yet."));
-    box.appendChild(c1);
+    put("ov", c1);
 
     var c2 = h("div", "acard");
     c2.appendChild(h("h3", null, "Site notice"));
@@ -3226,7 +3801,7 @@ if (provs.length) {
     nc.onclick = function () { ni.value = ""; ns.onclick(); };
     c2.appendChild(ns);
     c2.appendChild(nc);
-    box.appendChild(c2);
+    put("ov", c2);
 
     var c3 = h("div", "acard");
     c3.appendChild(h("h3", null, "Boa Picks"));
@@ -3283,33 +3858,63 @@ if (provs.length) {
       };
       c3.appendChild(rs);
     }
-    box.appendChild(c3);
-    var c4 = h("div", "acard");
-    c4.appendChild(h("h3", null, "Catalog add-ons"));
-    c4.appendChild(h("p", null, "Paste a Stremio-style add-on link (ending in manifest.json) to add its catalogs as rows on your home page. Only the catalogs are used. Streams and downloads are never loaded."));
-    (ADM.addons || []).forEach(function (a, i) {
-      var row = h("div", "arow" + (i === 0 ? " first" : ""));
-      var info = h("div");
-      info.appendChild(h("b", null, a.name));
-      info.appendChild(h("span", null, a.cats.length + (a.cats.length === 1 ? " catalog row" : " catalog rows")));
-      row.appendChild(info);
-      var rm = h("button", "abtn red", "Remove");
-      rm.onclick = function () {
-        function go() {
-          adm("/api/admin/addons", { action: "remove", base: a.base }).then(function (r) { ADM.addons = r.addons; renderAdmin(false); toast("Removed"); }).catch(function (e) { toast("Couldn't remove: " + e.message); });
-        }
-        if (tg && tg.showConfirm) { try { tg.showConfirm("Remove " + a.name + "?", function (ok) { if (ok) go(); }); return; } catch (e) {} }
-        if (window.confirm("Remove " + a.name + "?")) go();
-      };
-      row.appendChild(rm);
-      c4.appendChild(row);
-    });
+    put("ov", c3);
+    // ===== ADD-ONS TAB (install, inspect, refresh, settings, delete) =====
+    function confirmThen(msg, go) {
+      if (tg && tg.showConfirm) { try { tg.showConfirm(msg, function (ok) { if (ok) go(); }); return; } catch (e) {} }
+      if (window.confirm(msg)) go();
+    }
+    function previewInto(target, base, cat) {
+      target.textContent = "";
+      target.appendChild(h("p", null, "Loading…"));
+      adm("/api/admin/addon-preview", { base: base, type: cat.type, id: cat.id }).then(function (r) {
+        target.textContent = "";
+        target.appendChild(h("p", null, r.total + " titles in this catalog. First " + r.items.length + ":"));
+        var wrap = h("div", "apv");
+        r.items.forEach(function (it) {
+          var c = h("div", "apvi");
+          if (it.poster) { var im = h("img"); im.loading = "lazy"; im.alt = ""; im.src = it.poster; c.appendChild(im); }
+          c.appendChild(h("span", null, it.name + (it.year ? " (" + it.year + ")" : "")));
+          wrap.appendChild(c);
+        });
+        target.appendChild(wrap);
+      }).catch(function (e) { target.textContent = ""; target.appendChild(h("p", null, "Couldn't preview: " + e.message)); });
+    }
+    function catPicker(parent, base, cats, selected) {
+      var boxes = [];
+      var tools = h("div", "arow2");
+      var all = h("button", "abtn mini", "Select all");
+      var none = h("button", "abtn mini", "None");
+      tools.appendChild(all); tools.appendChild(none);
+      parent.appendChild(tools);
+      cats.forEach(function (c) {
+        var lab = h("div", "achk2");
+        var l = h("label", "achk");
+        var cb = h("input"); cb.type = "checkbox"; cb.checked = selected(c);
+        l.appendChild(cb);
+        l.appendChild(document.createTextNode(c.name + " (" + (c.type === "series" ? "Series" : "Movies") + ")"));
+        lab.appendChild(l);
+        var pv = h("button", "abtn mini", "Preview");
+        var pvBox = h("div");
+        pv.onclick = function () { if (pvBox.firstChild) { pvBox.textContent = ""; return; } previewInto(pvBox, base, c); };
+        lab.appendChild(pv);
+        parent.appendChild(lab);
+        parent.appendChild(pvBox);
+        boxes.push({ cb: cb, c: c });
+      });
+      all.onclick = function () { boxes.forEach(function (x) { x.cb.checked = true; }); };
+      none.onclick = function () { boxes.forEach(function (x) { x.cb.checked = false; }); };
+      return function () { return boxes.filter(function (x) { return x.cb.checked; }).map(function (x) { return { type: x.c.type, id: x.c.id }; }); };
+    }
+    var cAI = h("div", "acard");
+    cAI.appendChild(h("h3", null, "Install an add-on"));
+    cAI.appendChild(h("p", null, "Paste a Stremio-style add-on link (ending in manifest.json). Check it first, look inside each catalog with Preview, then install only what you want. No limit on add-ons or catalogs."));
     var au = h("input", "ainp");
     au.type = "url";
     au.placeholder = "https://.../manifest.json";
     au.setAttribute("autocapitalize", "off");
     au.setAttribute("autocomplete", "off");
-    c4.appendChild(au);
+    cAI.appendChild(au);
     var ares = h("div");
     var ab = h("button", "abtn", "Check add-on");
     ab.onclick = function () {
@@ -3319,37 +3924,31 @@ if (provs.length) {
       ares.appendChild(h("p", null, "Checking…"));
       adm("/api/admin/addon-inspect", { url: u }).then(function (r) {
         ares.textContent = "";
-        ares.appendChild(h("h3", null, r.name));
+        ares.appendChild(h("h3", null, r.name + (r.version ? " v" + r.version : "")));
         if (r.description) ares.appendChild(h("p", null, r.description));
         if (r.hasStreams) ares.appendChild(h("p", null, "This add-on also offers streams. Boa Cinema ignores them and only uses its catalogs."));
+        if (r.skipped) ares.appendChild(h("p", null, r.skipped + " catalog(s) skipped (they need a search or filter, or aren't movies/series)."));
         if (!r.cats.length) {
           var rs = r.resources || [];
-          var why = "No usable catalogs found (catalogs that need a search or filter are skipped).";
-          if (rs.indexOf("subtitles") >= 0) why = "This is a subtitles add-on. Boa Cinema doesn't play videos, so there is nothing to show from it. Add-ons that list movies and series (catalogs) can be installed, for example a metadata or catalog add-on.";
-          else if (rs.indexOf("stream") >= 0) why = "This add-on only offers streams, which Boa Cinema never uses. Add-ons with movie and series catalogs can be installed.";
+          var why = "No usable catalogs found.";
+          if (rs.indexOf("subtitles") >= 0) why = "This is a subtitles add-on. There is nothing to show from it.";
+          else if (rs.indexOf("stream") >= 0) why = "This add-on only offers streams. Use the Plugins tab for scrapers instead.";
           ares.appendChild(h("p", null, why));
           return;
         }
-        var boxes = [];
-        r.cats.forEach(function (c, i) {
-          var lab = h("label", "achk");
-          var cb = h("input");
-          cb.type = "checkbox";
-          cb.checked = i < 6;
-          boxes.push({ cb: cb, c: c });
-          lab.appendChild(cb);
-          lab.appendChild(document.createTextNode(c.name + " (" + (c.type === "series" ? "Series" : "Movies") + ")"));
-          ares.appendChild(lab);
-        });
-        var inst = h("button", "abtn", "Add selected");
+        ares.appendChild(h("p", null, r.cats.length + " catalogs found. Tick the ones to install:"));
+        var getPicked = catPicker(ares, r.base, r.cats, function () { return true; });
+        var inst = h("button", "abtn", "Install selected");
         inst.onclick = function () {
-          var picked = boxes.filter(function (x) { return x.cb.checked; }).map(function (x) { return { type: x.c.type, id: x.c.id }; });
+          var picked = getPicked();
           if (!picked.length) { toast("Tick at least one catalog"); return; }
+          inst.disabled = true;
           adm("/api/admin/addons", { action: "add", base: r.base, cats: picked }).then(function (res) {
             ADM.addons = res.addons;
+            ADM_TAB = "ad";
             renderAdmin(false);
-            toast("Added. Reopen the app to see the new rows");
-          }).catch(function (e) { toast("Couldn't add: " + e.message); });
+            toast("Installed. Pull the home page to see new rows");
+          }).catch(function (e) { inst.disabled = false; toast("Couldn't install: " + e.message); });
         };
         ares.appendChild(inst);
       }).catch(function (e) {
@@ -3357,9 +3956,70 @@ if (provs.length) {
         ares.appendChild(h("p", null, "Couldn't use that link: " + e.message));
       });
     };
-    c4.appendChild(ab);
-    c4.appendChild(ares);
-    box.appendChild(c4);
+    cAI.appendChild(ab);
+    cAI.appendChild(ares);
+    put("ad", cAI);
+
+    var cAL = h("div", "acard");
+    var addons = ADM.addons || [];
+    cAL.appendChild(h("h3", null, "Installed add-ons (" + addons.length + ")"));
+    if (!addons.length) cAL.appendChild(h("p", null, "Nothing installed yet."));
+    addons.forEach(function (a) {
+      var card = h("div", "adon");
+      var top = h("div", "adtop");
+      var inf = h("div");
+      inf.appendChild(h("b", null, a.name || "Add-on"));
+      var host = "";
+      try { host = new URL(a.base || "").host; } catch (e) {}
+      inf.appendChild(h("span", null, (a.cats || []).length + " catalogs" + (host ? " • " + host : "") + (a.enabled === false ? " • Disabled" : "")));
+      top.appendChild(inf);
+      card.appendChild(top);
+      var btns = h("div", "adbtns");
+      var det = h("div");
+      var setB = h("button", "abtn mini", "Settings");
+      setB.onclick = function () {
+        if (det.firstChild) { det.textContent = ""; return; }
+        det.appendChild(h("p", null, "Loading…"));
+        adm("/api/admin/addon-inspect", { url: (a.base || "") + "/manifest.json" }).then(function (r) {
+          det.textContent = "";
+          det.appendChild(h("p", null, a.base || ""));
+          if (r.description) det.appendChild(h("p", null, r.description));
+          var chosen = {};
+          (a.cats || []).forEach(function (c) { chosen[c.type + "|" + c.id] = 1; });
+          var getPicked = catPicker(det, r.base || a.base, r.cats, function (c) { return !!chosen[c.type + "|" + c.id]; });
+          var sv = h("button", "abtn", "Save catalogs");
+          sv.onclick = function () {
+            var picked = getPicked();
+            if (!picked.length) { toast("Keep at least one catalog, or use Delete"); return; }
+            adm("/api/admin/addons", { action: "update", id: a.id, cats: picked }).then(function (res) { ADM.addons = res.addons; ADM_TAB = "ad"; renderAdmin(false); toast("Saved"); }).catch(function (e) { toast("Couldn't save: " + e.message); });
+          };
+          det.appendChild(sv);
+        }).catch(function (e) { det.textContent = ""; det.appendChild(h("p", null, "Couldn't load this add-on: " + e.message + ". It may be offline; you can still Delete it.")); });
+      };
+      btns.appendChild(setB);
+      var rf = h("button", "abtn mini", "Refresh");
+      rf.onclick = function () {
+        rf.textContent = "…";
+        adm("/api/admin/addons", { action: "refresh", id: a.id }).then(function (res) { ADM.addons = res.addons; ADM_TAB = "ad"; renderAdmin(false); toast("Refreshed"); }).catch(function (e) { rf.textContent = "Refresh"; toast("Couldn't refresh: " + e.message); });
+      };
+      btns.appendChild(rf);
+      var tg2 = h("button", "abtn mini", a.enabled === false ? "Enable" : "Disable");
+      tg2.onclick = function () {
+        adm("/api/admin/addons", { action: "toggle", id: a.id, enabled: a.enabled === false }).then(function (res) { ADM.addons = res.addons; ADM_TAB = "ad"; renderAdmin(false); }).catch(function (e) { toast("Couldn't change: " + e.message); });
+      };
+      btns.appendChild(tg2);
+      var rm = h("button", "abtn mini red", "Delete");
+      rm.onclick = function () {
+        confirmThen("Delete " + (a.name || "this add-on") + "?", function () {
+          adm("/api/admin/addons", { action: "remove", id: a.id, base: a.base }).then(function (res) { ADM.addons = res.addons; ADM_TAB = "ad"; renderAdmin(false); toast("Deleted"); }).catch(function (e) { toast("Couldn't delete: " + e.message); });
+        });
+      };
+      btns.appendChild(rm);
+      card.appendChild(btns);
+      card.appendChild(det);
+      cAL.appendChild(card);
+    });
+    put("ad", cAL);
 
     // === MEDIA SERVERS CARD (Nuvio style) ===
     var cMS = h("div", "acard");
@@ -3377,7 +4037,7 @@ if (provs.length) {
       }).catch(function(e) { toast("Error: " + e.message); });
     };
     cMS.appendChild(msBtn);
-    box.appendChild(cMS);
+    put("ov", cMS);
 
     // === PLUGINS CARD (Nuvio style) ===
     var cPl = h("div", "acard");
@@ -3387,7 +4047,7 @@ if (provs.length) {
     nuvioListWrap.appendChild(h("div", "note", "Loading repositories & providers..."));
     cPl.appendChild(nuvioListWrap);
 
-    fetch("/api/providers").then(function(r) { return r.json(); }).then(function(data) {
+    adm("/api/admin/providers").then(function(data) {
       nuvioListWrap.textContent = "";
       var repos = data.repos || [];
       var providers = data.providers || [];
@@ -3405,10 +4065,13 @@ if (provs.length) {
 
         var rmBtn = h("button", "abtn red", "Remove");
         rmBtn.onclick = function() {
-          adm("/api/admin/plugins", { action: "remove", id: repo.id }).then(function(res) {
-            ADM.plugins = res.plugins;
-            renderAdmin(false);
-            toast("Repository removed");
+          confirmThen("Remove " + (repo.name || "this repository") + "?", function () {
+            adm("/api/admin/plugins", { action: "remove", id: repo.id }).then(function(res) {
+              ADM.plugins = res.plugins;
+              ADM_TAB = "pl";
+              renderAdmin(false);
+              toast("Repository removed");
+            }).catch(function (e) { toast("Couldn't remove: " + e.message); });
           });
         };
         topRow.appendChild(rmBtn);
@@ -3439,14 +4102,12 @@ if (provs.length) {
       repos.forEach(function (r) { repoNames[r.id] = r.name; });
 
       var ipHidden = {};
-      try { ipHidden = JSON.parse(localStorage.getItem("ipHidden") || "{}") || {}; } catch (e) { ipHidden = {}; }
-      var ipSave = function () {
-        try { localStorage.setItem("ipHidden", JSON.stringify(ipHidden)); } catch (e) {}
-      };
+      var ipSave = function () {};
       var ipKey = function (p) {
         return String(p.repoId || (typeof p.repo === "string" ? p.repo : "") || "") + "::" + String(p.id || p.name || "");
       };
 
+      providers.forEach(function (p) { if (p.enabled === false) ipHidden[ipKey(p)] = 1; });
       var ipChip = function (text) {
         var c = h("span", null, text);
         c.style.cssText = "display:inline-block;background:#27272a;color:#e4e4e7;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;";
@@ -3498,8 +4159,35 @@ if (provs.length) {
 
         var tb = h("button", "abtn", "Test Provider");
         tb.style.cssText = "flex:1;margin:0;padding:12px 16px;border-radius:14px;";
+        var tpanel = null;
         tb.onclick = function () {
-          toast("Provider testing isn't connected yet");
+          if (tpanel) { tpanel.remove(); tpanel = null; return; }
+          tpanel = h("div", "tpanel");
+          var isTv = /tv|series/i.test(types) && !/movie/i.test(types);
+          var sel = h("select", "ainp");
+          [["movie", "Movie (TMDB id)"], ["tv", "Series (TMDB id)"]].forEach(function (o) {
+            var op = h("option", null, o[1]); op.value = o[0]; sel.appendChild(op);
+          });
+          sel.value = isTv ? "tv" : "movie";
+          var tid = h("input", "ainp");
+          tid.type = "text";
+          tid.value = isTv ? "1399" : "550";
+          tid.placeholder = "TMDB id, e.g. 550 (Fight Club) or 1399 (Game of Thrones)";
+          sel.onchange = function () { tid.value = sel.value === "tv" ? "1399" : "550"; };
+          var go = h("button", "abtn", "Run test");
+          var out = h("div", "tout");
+          go.onclick = function () {
+            out.textContent = "Testing… can take up to 20 seconds";
+            go.disabled = true;
+            adm("/api/admin/test-provider", { url: p.url, type: sel.value, id: tid.value.trim(), s: 1, e: 1 }).then(function (r) {
+              out.textContent = "";
+              out.appendChild(h("b", null, r.ok ? "Working: " + r.count + " stream(s) in " + (r.ms / 1000).toFixed(1) + "s" : "No result" + (r.ms ? " after " + (r.ms / 1000).toFixed(1) + "s" : "")));
+              if (r.error) out.appendChild(h("div", null, r.error));
+              (r.sample || []).forEach(function (s) { out.appendChild(h("div", null, "• " + (s.title || "stream") + (s.quality ? " • " + s.quality : ""))); });
+            }).catch(function (e) { out.textContent = "Test failed: " + e.message; }).then(function () { go.disabled = false; });
+          };
+          tpanel.appendChild(sel); tpanel.appendChild(tid); tpanel.appendChild(go); tpanel.appendChild(out);
+          row.appendChild(tpanel);
         };
         btns.appendChild(tb);
 
@@ -3513,10 +4201,12 @@ if (provs.length) {
             setTimeout(function () { armed = false; del.textContent = "Delete"; }, 3000);
             return;
           }
-          ipHidden[ipKey(p)] = 1;
-          ipSave();
-          ipDraw();
-          toast(pname + " deleted");
+          adm("/api/admin/plugins", { action: "disable", id: p.repoId, provider: p.id }).then(function (res) {
+            ADM.plugins = res.plugins;
+            ipHidden[ipKey(p)] = 1;
+            ipDraw();
+            toast(pname + " deleted");
+          }).catch(function (e) { toast("Couldn't delete: " + e.message); });
         };
         btns.appendChild(del);
 
@@ -3584,18 +4274,20 @@ if (provs.length) {
       ipSearch.oninput = function () { ipLimit = 12; ipDraw(); };
       ipMore.onclick = function () { ipLimit += 20; ipDraw(); };
       ipRestore.onclick = function () {
-        ipHidden = {};
-        ipSave();
-        ipDraw();
-        toast("Deleted providers restored");
+        adm("/api/admin/plugins", { action: "restore", id: "" }).then(function (res) {
+          ADM.plugins = res.plugins;
+          ipHidden = {};
+          ipDraw();
+          toast("Deleted providers restored");
+        }).catch(function (e) { toast("Couldn't restore: " + e.message); });
       };
       ipRefresh.onclick = function () {
         ipRefresh.textContent = "Refreshing...";
         ipRefresh.disabled = true;
-        fetch("/api/providers?t=" + Date.now(), { cache: "no-store" }).then(function (r) {
-          return r.json();
-        }).then(function (d) {
+        adm("/api/admin/providers?fresh=1").then(function (d) {
           providers = Array.isArray(d.providers) ? d.providers : [];
+          ipHidden = {};
+          providers.forEach(function (p) { if (p.enabled === false) ipHidden[ipKey(p)] = 1; });
           (d.repos || []).forEach(function (r) { repoNames[r.id] = r.name; });
           ipDraw();
           toast("Refreshed: " + providers.length + " providers");
@@ -3608,24 +4300,25 @@ if (provs.length) {
       };
       ipDraw();
       // ===== end installed providers =====
-}).catch(function () { nuvioListWrap.textContent = "Couldn't load repositories."; });
+}).catch(function (e) { nuvioListWrap.textContent = "Couldn't load repositories: " + (e && e.message ? e.message : "try again"); });
 
 
 
       // 2. Render Expanded Providers Section
     var plName = h("input", "ainp"); plName.placeholder = "Plugin Name";
     var plUrl = h("input", "ainp"); plUrl.type = "url"; plUrl.placeholder = "Repository URL (https://...)";
-    cPl.appendChild(plName); cPl.appendChild(plUrl);
+    cPl.insertBefore(plName, nuvioListWrap); cPl.insertBefore(plUrl, nuvioListWrap);
     var plAdd = h("button", "abtn", "Install Plugin");
     plAdd.onclick = function() {
       adm("/api/admin/plugins", { action: "add", name: plName.value, url: plUrl.value }).then(function(r) {
         ADM.plugins = r.plugins;
+        ADM_TAB = "pl";
         renderAdmin(false);
         toast("Plugin installed");
       }).catch(function(e) { toast("Error: " + e.message); });
     };
-    cPl.appendChild(plAdd);
-    box.appendChild(cPl);
+    cPl.insertBefore(plAdd, nuvioListWrap);
+    put("pl", cPl);
     // ===== Licensed providers (separate card) =====
     // Edit this list. Remove "sample: true" from an entry once it is a real, licensed provider.
     var LICENSED_PROVIDERS = [
@@ -3693,9 +4386,10 @@ if (provs.length) {
     if (!LICENSED_PROVIDERS.length) {
       lpWrap.appendChild(h("div", "note", "No licensed providers added yet."));
     }
-    box.appendChild(lpWrap);
+    put("pl", lpWrap);
     // ===== end licensed providers =====
 
+    showAdmTab();
     box.appendChild(h("div", "note center", "Only your account can see this panel."));
   }
 
@@ -3705,12 +4399,16 @@ if (provs.length) {
     if (tg && tg.openTelegramLink) { e.preventDefault(); try { tg.openTelegramLink(this.href); } catch (x) { openLink(this.href); } }
   });
 
-  libLoad();
+  profilesLoad();
+  dataLoad();
   loadNotice();
+  setInterval(loadNotice, 60000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) loadNotice(); });
   checkOwner();
   paintNavAvatar();
   paintSeg();
   loadHome();
+  if (PROFILES.length > 1) openProfiles(false);
   api("/api/me", 0).then(function (r) {
     if (r && r.country) { myCC = String(r.country).toUpperCase(); if (tab === "me") renderMe(); }
   }).catch(function () {});
@@ -3857,7 +4555,6 @@ const API_TTL = {
   "/api/season": 3600,
   "/api/logo": 86400,
   "/api/search": 300,
-  "/api/notice": 60,
 };
 
 async function cachedApi(request, url, env, ctx) {
@@ -3885,7 +4582,7 @@ async function cachedApi(request, url, env, ctx) {
   ) {
     ttl = 60;
   }
-  if (!ttl) return handleApi(url, env);
+  if (!ttl) return handleApi(url, env, request);
 
   const cache = caches.default;
   const key = new Request(url.toString(), { method: "GET" });
@@ -3898,7 +4595,7 @@ async function cachedApi(request, url, env, ctx) {
     }
   } catch (e) {}
 
-  const res = await handleApi(url, env);
+  const res = await handleApi(url, env, request);
   if (res.status !== 200) return res;
   const out = new Response(res.body, res);
   out.headers.set("cache-control", `public, max-age=${Math.min(ttl, 300)}, s-maxage=${ttl}`);
@@ -4192,7 +4889,10 @@ async function getAddons(env) {
   try {
     const raw = await env.BOT_USERS.get("cfg:addons");
     const a = raw ? JSON.parse(raw) : [];
-    return Array.isArray(a) ? a : [];
+    return (Array.isArray(a) ? a : []).map((x) => ({
+      ...x,
+      id: x.id || fnv(String(x.base || x.url || x.transportUrl || x.name || "")),
+    }));
   } catch (e) {
     return [];
   }
@@ -4220,33 +4920,52 @@ async function inspectAddon(base) {
   });
   if (!res.ok) throw new Error(`Couldn't open that manifest (${res.status})`);
   const text = await res.text();
-  if (text.length > 400000) throw new Error("That manifest is too large");
+  if (text.length > 1500000) throw new Error("That manifest is too large");
   let m;
   try {
     m = JSON.parse(text);
   } catch (e) {
     throw new Error("That link isn't an add-on manifest");
   }
-  const cats = (Array.isArray(m.catalogs) ? m.catalogs : (m.cats || [])).map((c) => ({
-    type: c.type,
-    id: String(c.id).slice(0, 60)
-  }));
+  const needsExtra = (c) =>
+    (Array.isArray(c.extra) && c.extra.some((x) => x && x.isRequired)) ||
+    (Array.isArray(c.extraRequired) && c.extraRequired.length > 0);
+  const seen = new Set();
+  const cats = [];
+  let skipped = 0;
+  for (const c of Array.isArray(m.catalogs) ? m.catalogs : []) {
+    if (!c || (c.type !== "movie" && c.type !== "series") || !c.id) continue;
+    if (needsExtra(c)) {
+      skipped++;
+      continue;
+    }
+    const id = String(c.id).slice(0, 60);
+    const key = `${c.type}|${id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cats.push({ type: c.type, id, name: String(c.name || id).slice(0, 60) });
+  }
   const resNames = (Array.isArray(m.resources) ? m.resources : []).map((r) => (typeof r === "string" ? r : r && r.name));
   return {
     name: String(m.name || "Add-on").slice(0, 60),
-    description: String(m.description || "").slice(0, 200),
+    description: String(m.description || "").slice(0, 300),
+    version: String(m.version || "").slice(0, 20),
     base,
     cats,
+    skipped,
     hasStreams: resNames.includes("stream"),
     resources: resNames.filter((x) => typeof x === "string").slice(0, 10),
   };
 }
 
+const catName = (c) => String((c && (c.name || c.id)) || "Catalog").replace(/[._-]+/g, " ").trim();
+
 const importedRowList = async (env, media) => {
   const out = [];
   for (const a of await getAddons(env)) {
+    if (a.enabled === false || !a.base) continue;
     for (const c of a.cats || []) {
-      if (stType(c.type) === media) out.push({ key: c.k, title: `${a.name}: ${c.name}`.slice(0, 60) });
+      if (stType(c.type) === media) out.push({ key: c.k, title: `${a.name}: ${catName(c)}`.slice(0, 60) });
     }
   }
   return out;
@@ -4255,6 +4974,7 @@ const importedRowList = async (env, media) => {
 // One imported row: reads the add-on's catalog, then matches every title to TMDB for posters and details.
 async function importedRow(env, media, key) {
   for (const a of await getAddons(env)) {
+    if (a.enabled === false || !a.base) continue;
     for (const c of a.cats || []) {
       if (c.k !== key || stType(c.type) !== media) continue;
       const res = await fetch(`${a.base}/catalog/${c.type}/${encodeURIComponent(c.id)}.json`, {
@@ -4274,11 +4994,22 @@ async function importedRow(env, media, key) {
             }
             const t = /^tmdb:(\d{1,9})$/.exec(id);
             if (t) return await tmdb(env, `/${MEDIA[media].path}/${t[1]}`, "");
+            const nm = String((m && m.name) || "").trim();
+            if (nm) {
+              const yr = String((m && (m.year || m.releaseInfo)) || "").slice(0, 4);
+              const q =
+                `include_adult=false&query=${encodeURIComponent(nm)}` +
+                (/^\d{4}$/.test(yr) ? (media === "tv" ? "&first_air_date_year=" : "&year=") + yr : "");
+              const f = await tmdb(env, `/search/${MEDIA[media].path}`, q);
+              return (f.results || [])[0] || null;
+            }
           } catch (e) {}
           return null;
         })
       );
-      return slimList(items.filter(Boolean), media);
+      const seen = new Set();
+      const uniq = items.filter((x) => x && !seen.has(x.id) && seen.add(x.id));
+      return slimList(uniq, media);
     }
   }
   return null;
@@ -4300,17 +5031,12 @@ async function adminRoute(request, url, env) {
     if (path === "/api/admin/state" && !isPost) {
       let notice = "";
       let custom = false;
+      let mediaServer = null;
       if (env.BOT_USERS) {
         notice = (await env.BOT_USERS.get("cfg:notice")) || "";
         custom = (await env.BOT_USERS.get("cfg:picks")) !== null;
-      }
-      let mediaServer = null;
-      let plugins = [];
-      if (env.BOT_USERS) {
         const msRaw = await env.BOT_USERS.get("cfg:media_server");
-        if (msRaw) try { mediaServer = JSON.parse(msRaw); } catch(e) {}
-        const plRaw = await env.BOT_USERS.get("cfg:plugins");
-        if (plRaw) try { plugins = JSON.parse(plRaw); } catch(e) {}
+        if (msRaw) try { mediaServer = JSON.parse(msRaw); } catch (e) {}
       }
       return json({
         picks: await getPicks(env),
@@ -4320,8 +5046,11 @@ async function adminRoute(request, url, env) {
         kv: !!env.BOT_USERS,
         addons: await getAddons(env),
         mediaServer,
-        plugins,
+        plugins: await getPluginRepos(env),
       });
+    }
+    if (path === "/api/admin/providers" && !isPost) {
+      return json(await providersPayload(env, url.searchParams.get("fresh") === "1"));
     }
     if (!isPost) return json({ error: "not found" }, 404);
     if (!env.BOT_USERS) return json({ error: "Storage isn't connected (BOT_USERS)" }, 503);
@@ -4342,35 +5071,82 @@ async function adminRoute(request, url, env) {
       await env.BOT_USERS.put("cfg:media_server", JSON.stringify(data));
       return json({ mediaServer: data });
     }
+    if (path === "/api/admin/test-provider") {
+      const o = {
+        url: String(body.url || "").trim(),
+        type: body.type === "tv" ? "tv" : "movie",
+        id: String(body.id || "").replace(/\D/g, "").slice(0, 9) || (body.type === "tv" ? "1399" : "550"),
+        s: Number(body.s) || 1,
+        e: Number(body.e) || 1,
+      };
+      if (!/^https:\/\//i.test(o.url)) return json({ ok: false, error: "This provider has no script link to test." });
+      if (env.STREAM_BACKEND) {
+        try {
+          const r = await fetch(
+            env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-test?u=" + encodeURIComponent(o.url) +
+              "&type=" + o.type + "&id=" + o.id + "&s=" + o.s + "&e=" + o.e,
+            { headers: { "x-stream-key": env.STREAM_KEY || "" }, signal: AbortSignal.timeout(Number(env.BACKEND_TIMEOUT_MS) || 45000) }
+          );
+          return json(await r.json());
+        } catch (err) {
+          return json({ ok: false, error: "Couldn't reach your stream server: " + ((err && err.message) || "no answer") });
+        }
+      }
+      return json(await testScraper(env, o));
+    }
     if (path === "/api/admin/plugins") {
-      let plugins = [];
-      const plRaw = await env.BOT_USERS.get("cfg:plugins");
-      if (plRaw) try { plugins = JSON.parse(plRaw); } catch(e) {}
-
-      if (body.action === "remove") {
-        const id = body.id;
-        plugins = plugins.filter(p => p.id !== id);
-      } else if (body.action === "add") {
+      let plugins = await getPluginRepos(env);
+      const act = body.action;
+      if (act === "remove") {
+        const id = String(body.id || "");
+        plugins = plugins.filter((p) => p.id !== id);
+      } else if (act === "add") {
         const pUrl = String(body.url || "").trim();
-        const pName = String(body.name || "Custom Plugin").trim();
-        if (!pUrl) return json({ error: "Plugin URL required" }, 400);
-        plugins.push({ id: "pl_" + Date.now(), name: pName, url: pUrl });
+        if (!/^https:\/\/[^\s"'<>]{4,400}$/i.test(pUrl)) return json({ error: "Paste the full https link of the repository manifest.json" }, 400);
+        let m;
+        try {
+          m = await loadManifest(pUrl, 10000, true);
+        } catch (e) {
+          return json({ error: "Couldn't open that link. Use the raw manifest.json link." }, 400);
+        }
+        if (!scraperList(m, pUrl).length) return json({ error: "No providers found in that repository" }, 400);
+        const pName = String(body.name || m.name || "Custom Plugin").trim().slice(0, 60);
+        plugins = plugins.filter((p) => p.url !== pUrl);
+        plugins.push({ id: "pl_" + fnv(pUrl), name: pName, url: pUrl, enabled: true });
+      } else if (act === "disable") {
+        const id = String(body.id || "");
+        plugins = plugins.map((p) => {
+          if (p.id !== id) return p;
+          const set = new Set((p.disabled || []).map(String));
+          set.add(String(body.provider || ""));
+          return { ...p, disabled: [...set] };
+        });
+      } else if (act === "restore") {
+        const id = String(body.id || "");
+        plugins = plugins.map((p) => (!id || p.id === id ? { ...p, disabled: [] } : p));
+      } else {
+        return json({ error: "bad action" }, 400);
       }
       await env.BOT_USERS.put("cfg:plugins", JSON.stringify(plugins));
+      MANIFEST_CACHE.clear();
+      SCRIPT_CACHE.clear();
+      STREAM_CACHE.clear();
       return json({ plugins });
     }
     if (path === "/api/admin/picks") {
       if (body.reset) {
         await env.BOT_USERS.delete("cfg:picks");
+        await bustPicks(url);
         return json({ picks: BOA_PICKS, custom: false });
       }
       if (!Array.isArray(body.picks) || body.picks.length > 30) return json({ error: "bad list" }, 400);
       const list = body.picks.map(cleanPick).filter(Boolean);
       await env.BOT_USERS.put("cfg:picks", JSON.stringify(list));
+      await bustPicks(url);
       return json({ picks: list, custom: true });
     }
     if (path === "/api/admin/addon-inspect") {
-      const base = addonBase(body.url);
+      const base = addonBase(body.url || body.base);
       if (!base) return json({ error: "Paste a full https add-on link" }, 400);
       try {
         return json(await inspectAddon(base));
@@ -4378,13 +5154,42 @@ async function adminRoute(request, url, env) {
         return json({ error: e && e.message ? e.message : "Couldn't read that add-on" }, 400);
       }
     }
+    if (path === "/api/admin/addon-preview") {
+      const base = addonBase(body.base);
+      if (!base || !/^[a-z]{2,20}$/i.test(String(body.type || ""))) return json({ error: "Bad request" }, 400);
+      try {
+        const res = await fetch(
+          `${base}/catalog/${encodeURIComponent(body.type)}/${encodeURIComponent(String(body.id || ""))}.json`,
+          { headers: { "User-Agent": "BoaCinema/1.0", accept: "application/json" }, signal: AbortSignal.timeout(8000) }
+        );
+        if (!res.ok) throw new Error("That catalog answered " + res.status);
+        const j = await res.json();
+        const metas = Array.isArray(j.metas) ? j.metas : [];
+        return json({
+          total: metas.length,
+          items: metas.slice(0, 12).map((m) => ({
+            name: String((m && (m.name || m.id)) || "").slice(0, 60),
+            year: String((m && (m.year || m.releaseInfo)) || "").slice(0, 9),
+            poster: /^https:\/\//.test((m && m.poster) || "") ? m.poster : "",
+          })),
+        });
+      } catch (e) {
+        return json({ error: e && e.message ? e.message : "Couldn't read that catalog" }, 400);
+      }
+    }
     if (path === "/api/admin/addons") {
       let list = await getAddons(env);
-      if (body.action === "remove") {
-        const base = addonBase(body.base);
-        list = list.filter((a) => a.base !== base);
-      } else if (body.action === "add") {
-        const base = addonBase(body.base);
+      const act = body.action;
+      let extra = {};
+      if (act === "remove") {
+        const id = String(body.id || "");
+        const base = body.base ? addonBase(body.base) : null;
+        list = list.filter((a) => !((id && a.id === id) || (base && a.base === base)));
+      } else if (act === "toggle") {
+        list = list.map((a) => (a.id === String(body.id || "") ? { ...a, enabled: body.enabled !== false } : a));
+      } else if (act === "add" || act === "update") {
+        const found = list.find((a) => a.id === String(body.id || ""));
+        const base = addonBase(body.base || (found && found.base));
         if (!base) return json({ error: "Bad add-on link" }, 400);
         let info;
         try {
@@ -4395,18 +5200,44 @@ async function adminRoute(request, url, env) {
         const wanted = new Set((Array.isArray(body.cats) ? body.cats : []).map((c) => `${c && c.type}|${c && c.id}`));
         const cats = info.cats
           .filter((c) => wanted.has(`${c.type}|${c.id}`))
-          .map((c) => ({ ...c, k: "x" + fnv(`${base}|${c.type}|${c.id}`) }));
+          .map((c) => ({ type: c.type, id: c.id, name: c.name, k: "x" + fnv(`${base}|${c.type}|${c.id}`) }));
         if (!cats.length) return json({ error: "Pick at least one catalog" }, 400);
-        list = list.filter((a) => a.base !== base);
-        list.push({ name: info.name, base, cats });
-        if (list.length > 6 || list.reduce((n, a) => n + (a.cats || []).length, 0) > 20) {
-          return json({ error: "Limit reached: 6 add-ons and 20 catalogs in total" }, 400);
+        const i = list.findIndex((a) => a.base === base);
+        const prev = i > -1 ? list[i] : null;
+        const entry = {
+          id: fnv(base),
+          name: info.name,
+          base,
+          version: info.version,
+          description: info.description,
+          cats,
+          enabled: prev ? prev.enabled !== false : true,
+          addedAt: (prev && prev.addedAt) || Date.now(),
+        };
+        if (i > -1) list[i] = entry;
+        else list.push(entry);
+      } else if (act === "refresh") {
+        const i = list.findIndex((a) => a.id === String(body.id || ""));
+        const a = list[i];
+        if (!a || !a.base) return json({ error: "This entry isn't a catalog add-on, so it can't be refreshed. Delete it." }, 400);
+        let info;
+        try {
+          info = await inspectAddon(a.base);
+        } catch (e) {
+          return json({ error: e && e.message ? e.message : "Couldn't read that add-on" }, 400);
         }
+        const have = new Map(info.cats.map((c) => [`${c.type}|${c.id}`, c]));
+        const kept = (a.cats || [])
+          .filter((c) => have.has(`${c.type}|${c.id}`))
+          .map((c) => ({ ...c, name: have.get(`${c.type}|${c.id}`).name }));
+        list[i] = { ...a, name: info.name, version: info.version, description: info.description, cats: kept };
+        extra = { total: info.cats.length, kept: kept.length, dropped: (a.cats || []).length - kept.length };
       } else {
         return json({ error: "bad action" }, 400);
       }
       await env.BOT_USERS.put("cfg:addons", JSON.stringify(list));
-      return json({ addons: list });
+      await bustRows(url);
+      return json({ addons: list, ...extra });
     }
     if (path === "/api/admin/notice") {
       const text = String(body.text || "").trim().slice(0, 200);
@@ -4431,6 +5262,11 @@ export default {
     if (url.protocol === "https:") {
       ORIGIN = url.origin;
       APP_URL = `${url.origin}/app`;
+    }
+    // Set APP_BASE_URL (Worker variable) to https://boa-cinema.onrender.com so bot buttons open the Render site
+    if (env.APP_BASE_URL && /^https:\/\//i.test(String(env.APP_BASE_URL))) {
+      ORIGIN = String(env.APP_BASE_URL).replace(/\/+$/, "");
+      APP_URL = `${ORIGIN}/app`;
     }
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: ADDON_CORS });
