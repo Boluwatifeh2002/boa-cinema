@@ -1688,6 +1688,9 @@ async function handleApi(url, env, request) {
       const base = ROW_ORDER[media].map((k) => ({ key: k, title: ROW_DEFS[media][k].title }));
       const extra = await importedRowList(env, media);
       // imported add-on rows go right after Trending and Boa Picks
+      let mode = "builtin";
+      try { if (env.BOT_USERS) mode = (await env.BOT_USERS.get("cfg:homemode")) || "builtin"; } catch (e) {}
+      if (mode === "addons" && extra.length) return send(extra, 200, "no-store");
       base.splice(2, 0, ...extra);
       return send(base);
     }
@@ -3906,6 +3909,21 @@ if (provs.length) {
       none.onclick = function () { boxes.forEach(function (x) { x.cb.checked = false; }); };
       return function () { return boxes.filter(function (x) { return x.cb.checked; }).map(function (x) { return { type: x.c.type, id: x.c.id }; }); };
     }
+    var cHM = h("div", "acard");
+    cHM.appendChild(h("h3", null, "Home page rows"));
+    cHM.appendChild(h("p", null, "Choose what the home page shows below the top banner. Switch back any time; nothing is deleted."));
+    var hmRow = h("div", "arow2");
+    [["addons", "Add-ons only"], ["builtin", "Original rows"]].forEach(function (o) {
+      var b = h("button", "abtn mini", o[1]);
+      b.style.opacity = (ADM.homeMode || "builtin") === o[0] ? "1" : ".5";
+      if ((ADM.homeMode || "builtin") === o[0]) b.textContent = "\u2713 " + o[1];
+      b.onclick = function () {
+        adm("/api/admin/homemode", { mode: o[0] }).then(function (r) { ADM.homeMode = r.homeMode; ADM_TAB = "ad"; renderAdmin(false); toast(o[0] === "addons" ? "Home now shows only your add-on rows" : "Original rows restored"); }).catch(function (e) { toast("Couldn't change: " + e.message); });
+      };
+      hmRow.appendChild(b);
+    });
+    cHM.appendChild(hmRow);
+    put("ad", cHM);
     var cAI = h("div", "acard");
     cAI.appendChild(h("h3", null, "Install an add-on"));
     cAI.appendChild(h("p", null, "Paste a Stremio-style add-on link (ending in manifest.json). Check it first, look inside each catalog with Preview, then install only what you want. No limit on add-ons or catalogs."));
@@ -3938,12 +3956,25 @@ if (provs.length) {
         }
         ares.appendChild(h("p", null, r.cats.length + " catalogs found. Tick the ones to install:"));
         var getPicked = catPicker(ares, r.base, r.cats, function () { return true; });
+        var repLab = h("label", "achk");
+        var repCb = h("input"); repCb.type = "checkbox";
+        repLab.appendChild(repCb);
+        repLab.appendChild(document.createTextNode("Replace everything: show only this add-on on the home page (switch back anytime)"));
+        if ((ADM.addons || []).length) ares.appendChild(repLab);
         var inst = h("button", "abtn", "Install selected");
         inst.onclick = function () {
           var picked = getPicked();
           if (!picked.length) { toast("Tick at least one catalog"); return; }
           inst.disabled = true;
-          adm("/api/admin/addons", { action: "add", base: r.base, cats: picked }).then(function (res) {
+          var chain = Promise.resolve();
+          if (repCb.checked) {
+            (ADM.addons || []).forEach(function (o) {
+              if (o.base === r.base) return;
+              chain = chain.then(function () { return adm("/api/admin/addons", { action: "remove", id: o.id, base: o.base }); });
+            });
+          }
+          if (repCb.checked) chain = chain.then(function () { return adm("/api/admin/homemode", { mode: "addons" }).then(function (m) { ADM.homeMode = m.homeMode; }); });
+          chain.then(function () { return adm("/api/admin/addons", { action: "add", base: r.base, cats: picked }); }).then(function (res) {
             ADM.addons = res.addons;
             ADM_TAB = "ad";
             renderAdmin(false);
@@ -5030,6 +5061,8 @@ async function adminRoute(request, url, env) {
   try {
     if (path === "/api/admin/state" && !isPost) {
       let notice = "";
+      let homeMode = "builtin";
+      try { if (env.BOT_USERS) homeMode = (await env.BOT_USERS.get("cfg:homemode")) || "builtin"; } catch (e) {}
       let custom = false;
       let mediaServer = null;
       if (env.BOT_USERS) {
@@ -5045,6 +5078,7 @@ async function adminRoute(request, url, env) {
         active: await activeUsers(env, true),
         kv: !!env.BOT_USERS,
         addons: await getAddons(env),
+        homeMode,
         mediaServer,
         plugins: await getPluginRepos(env),
       });
@@ -5144,6 +5178,13 @@ async function adminRoute(request, url, env) {
       await env.BOT_USERS.put("cfg:picks", JSON.stringify(list));
       await bustPicks(url);
       return json({ picks: list, custom: true });
+    }
+    if (path === "/api/admin/homemode") {
+      if (!env.BOT_USERS) return json({ error: "Storage isn't connected" }, 400);
+      const m = body && body.mode === "addons" ? "addons" : "builtin";
+      await env.BOT_USERS.put("cfg:homemode", m);
+      try { bustRows(url); } catch (e) {}
+      return json({ homeMode: m });
     }
     if (path === "/api/admin/addon-inspect") {
       const base = addonBase(body.url || body.base);
