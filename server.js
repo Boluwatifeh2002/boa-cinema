@@ -173,7 +173,7 @@ if (!onRender) {
       TMDB_KEY: CONFIG.TMDB_KEY,
       OWNER_ID: CONFIG.OWNER_ID,
       ALLOW_LOCAL_DEV: (process.env.RENDER || process.env.NODE_ENV === 'production') ? '' : '1',
-      BOT_USERS: kvstore
+      BOT_USERS: kvStore,
     };
 
     // Stream backend route: runs before the worker so nothing can intercept it
