@@ -824,6 +824,7 @@ const PWA_MANIFEST = {
   name: "Boa Cinema",
   short_name: "Boa Cinema",
   description: "Discover movies and series",
+  id: "/app",
   start_url: "/app",
   scope: "/",
   display: "standalone",
@@ -831,8 +832,9 @@ const PWA_MANIFEST = {
   background_color: "#0a0a0a",
   theme_color: "#0a0a0a",
   icons: [
-    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
   ],
 };
 function pwaResponse(path) {
@@ -2294,6 +2296,30 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 @media (hover:hover){.card:hover .poster{transform:translateY(-4px) scale(1.04);box-shadow:0 14px 30px rgba(0,0,0,.7)}}
 .prog.under{position:static;margin-top:8px;height:4px;border-radius:3px;overflow:hidden}
 .inlib{position:absolute;top:8px;left:8px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;border:1px solid rgba(255,255,255,.4);z-index:2}
+
+.wcard{position:relative;flex:0 0 74%;max-width:310px;aspect-ratio:16/9;border-radius:14px;overflow:hidden;background:var(--card);scroll-snap-align:start;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.45);transition:transform .18s ease,box-shadow .18s ease}
+.wcard img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.wshade{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.25) 0%,rgba(0,0,0,0) 40%,rgba(0,0,0,.85) 100%)}
+.wbadge{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.65);backdrop-filter:blur(6px);border-radius:8px;padding:4px 8px;font-size:11px;font-weight:800}
+.wtitle{position:absolute;left:12px;right:60px;bottom:14px;font-size:14px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wplay{position:absolute;right:10px;bottom:12px;width:40px;height:40px;border-radius:50%;border:2px solid rgba(255,255,255,.85);background:rgba(0,0,0,.45);color:#fff;display:flex;align-items:center;justify-content:center;padding:0}
+.wplay svg{width:18px;height:18px;margin-left:2px}
+.wprog{position:absolute;left:0;right:0;bottom:0;height:5px;background:rgba(255,255,255,.28)}
+.wprog i{display:block;height:100%;background:var(--accent)}
+.wcard:active{transform:scale(.97)}
+@media (hover:hover){.wcard:hover{transform:translateY(-4px) scale(1.03);box-shadow:0 14px 30px rgba(0,0,0,.7)}}
+#libgrid .grid{grid-template-columns:repeat(3,1fr)}
+.instcard{margin:0 16px 14px;background:linear-gradient(160deg,#1c1c20,#141416);border:1px solid var(--line);border-radius:18px;padding:14px;position:relative}
+.instcard h4{margin:0 0 6px;font-size:15px}
+.instcard p{margin:0 0 10px;font-size:13px;color:var(--muted);line-height:1.4}
+.instcard .pfbtn{margin:0;min-width:0;padding:10px 18px;background:var(--accent);color:var(--on-accent)}
+.instcard .cls{position:absolute;top:8px;right:10px;background:none;border:0;color:var(--muted);font-size:20px}
+#instbar{position:fixed;left:12px;right:12px;bottom:calc(var(--sab) + 84px);z-index:40;background:#1c1c20;border:1px solid var(--line);border-radius:16px;padding:12px 14px;display:none;align-items:center;gap:10px;font-size:13px;font-weight:700}
+#instbar.on{display:flex}
+#instbar span{flex:1}
+#instbar button{border:0;border-radius:999px;padding:9px 16px;font-weight:800;background:var(--accent);color:var(--on-accent)}
+#instbar button.x{background:none;color:var(--muted);padding:6px;font-size:18px}
+#smpriv .ipst{font-size:12px;margin:4px 0 0 30px;font-weight:700}
 @media (min-width:720px){
   html{background:#000}
   body{max-width:560px;margin:0 auto;background:var(--bg);min-height:100vh;box-shadow:0 0 0 1px #1b1b1d,0 0 80px rgba(var(--accent-rgb),.08)}
@@ -2375,6 +2401,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 </div>
 <div id="admin" role="dialog" aria-label="Owner panel"></div>
 <div id="profiles"></div>
+<div id="instbar"><span>Install Boa Cinema on your phone</span><button id="instgo">Install</button><button class="x" id="instx" aria-label="Dismiss">\u00D7</button></div>
 <div id="toast" class="toast"></div>
 
 <script>
@@ -2530,6 +2557,25 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     l.appendChild(cb);
     l.appendChild(document.createTextNode("Privacy relay (optional): hide my IP from the stream host"));
     b.appendChild(l);
+    var st = h("div", "ipst");
+    b.appendChild(st);
+    function status() {
+      if (!cb.checked) {
+        st.style.color = "#a3a3a8";
+        st.textContent = "Direct connection (Your IP is visible)";
+        return;
+      }
+      st.style.color = "#a3a3a8";
+      st.textContent = "Checking relay\u2026";
+      relaySign("https://api.ipify.org?format=json").then(function (u) { return fetch(u).then(function (r) { return r.json(); }); }).then(function (j) {
+        if (!cb.checked) return;
+        st.style.color = "#46d369";
+        st.textContent = "Protected \u2022 Relay IP: " + j.ip;
+      }).catch(function () { st.style.color = "#f59e0b"; st.textContent = "Relay IP could not be confirmed"; });
+    }
+    var prev = cb.onchange;
+    cb.onchange = function () { prev(); status(); };
+    status();
   }
   var LIBF = "all", LIBSORT = "recent", LIBEDIT = false;
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } }
@@ -2681,11 +2727,12 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     if (!c) return;
     var w = watchGet(c.mt, c.id);
     if (!w) {
-      w = { m: c.mt, i: c.id, t: c.base || c.title, p: (c.meta && c.meta.p) || null, y: (c.meta && c.meta.y) || "" };
+      w = { m: c.mt, i: c.id, t: c.base || c.title, p: (c.meta && c.meta.p) || null, y: (c.meta && c.meta.y) || "", b: (c.meta && c.meta.b) || null };
       if (w.p && w.p.length > 200) w.p = null;
       WATCH.unshift(w);
       if (WATCH.length > 60) { var old = WATCH.pop(); if (cloud) { try { cloud.removeItem(watchKey(old.m, old.i)); } catch (e) {} } }
     }
+    if (c.meta && c.meta.b && !w.b) w.b = c.meta.b;
     w.s = c.s || 1; w.e = c.e || 1; w.nx = 0;
     w.pos = Math.floor(pos || 0); w.dur = Math.floor(dur || 0); w.a = Date.now();
     if (c.mt === "movie" && dur > 60 && pos / dur > 0.93) { watchDrop(c.mt, c.id); return; }
@@ -2830,6 +2877,52 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     box.appendChild(back);
   }
 
+  // ---------- install app (PWA) ----------
+  var DEFER = null;
+  function isStandalone() { return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true; }
+  function isIOS() { return /iPhone|iPad|iPod/i.test(navigator.userAgent); }
+  function inTelegram() { return !!(tg && tg.initData); }
+  window.addEventListener("beforeinstallprompt", function (ev) {
+    ev.preventDefault();
+    DEFER = ev;
+    if (lsGet("boa_inst_x", "0") !== "1" && !isStandalone() && !inTelegram()) $("instbar").className = "on";
+    if (tab === "me") renderMe();
+  });
+  window.addEventListener("appinstalled", function () { DEFER = null; $("instbar").className = ""; if (tab === "me") renderMe(); toast("Boa Cinema installed"); });
+  function doInstall() {
+    if (!DEFER) return;
+    DEFER.prompt();
+    DEFER.userChoice.then(function () { DEFER = null; $("instbar").className = ""; if (tab === "me") renderMe(); });
+  }
+  $("instgo").onclick = doInstall;
+  $("instx").onclick = function () { lsSet("boa_inst_x", "1"); $("instbar").className = ""; };
+  function installCard() {
+    if (isStandalone()) return null;
+    var c = h("div", "instcard");
+    c.appendChild(h("h4", null, "Install Boa Cinema"));
+    var x = h("button", "cls", "\u00D7");
+    x.setAttribute("aria-label", "Dismiss");
+    x.onclick = function () { lsSet("boa_inst_c", "1"); renderMe(); };
+    if (lsGet("boa_inst_c", "0") === "1") return null;
+    c.appendChild(x);
+    if (inTelegram()) {
+      c.appendChild(h("p", null, "To install, open the site in your phone's browser (Chrome on Android, Safari on iPhone), then add it to your home screen."));
+      var ob = h("button", "pfbtn", "Open in browser");
+      ob.onclick = function () { openLink(location.origin + "/app"); };
+      c.appendChild(ob);
+    } else if (DEFER) {
+      c.appendChild(h("p", null, "Add Boa Cinema to your home screen for one-tap launch and a full-screen app feel."));
+      var ib = h("button", "pfbtn", "Install App");
+      ib.onclick = doInstall;
+      c.appendChild(ib);
+    } else if (isIOS()) {
+      c.appendChild(h("p", null, "Tap the Share button in Safari, then choose \"Add to Home Screen\"."));
+    } else {
+      c.appendChild(h("p", null, "Open your browser menu and choose \"Install app\" or \"Add to Home screen\". If you don't see it, reload the page once and try again."));
+    }
+    return c;
+  }
+
   // ---------- themes ----------
   var THEMES = { crimson: ["#e50914", "229,9,20", "#fff"], white: ["#ffffff", "255,255,255", "#000"], ocean: ["#0ea5e9", "14,165,233", "#fff"], emerald: ["#10b981", "16,185,129", "#fff"] };
   function hexParts(hx) {
@@ -2933,7 +3026,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     plBadge.onclick = function (ev) {
       ev.stopPropagation();
       if (unrelC) { toast("Not released yet" + (m.d ? ": " + fmtDate(m.d) : "")); return; }
-      openStreams(m.mt, m.id, m.t, 1, 1, { p: m.p, y: m.y });
+      openStreams(m.mt, m.id, m.t, 1, 1, { p: m.p, y: m.y, b: m.b });
     };
     p.appendChild(plBadge);
     b.appendChild(p);
@@ -3306,27 +3399,35 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
   }
   function watchCard(o) {
     var tv = o.m === "tv";
-    var b = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true, nolib: true });
-    var poster = b.firstChild;
+    var b = h("div", "wcard");
+    b.setAttribute("role", "button");
+    var img = o.b || o.p;
+    if (img) { var im = h("img"); im.loading = "lazy"; im.alt = ""; im.src = imgUrl(img, o.b ? "w500" : "w342"); if (!o.b) im.style.objectPosition = "center 20%"; b.appendChild(im); }
+    b.appendChild(h("div", "wshade"));
+    var badge = tv ? ((o.nx ? "Next: " : "") + "S" + (o.s || 1) + " E" + (o.e || 1)) : (o.dur > 0 ? Math.max(1, Math.round((o.dur - o.pos) / 60)) + "m left" : "Resume");
+    b.appendChild(h("span", "wbadge", badge));
+    b.appendChild(h("div", "wtitle", o.t));
+    var pl = h("button", "wplay");
+    pl.innerHTML = ICON.play;
+    pl.setAttribute("aria-label", "Resume");
+    pl.onclick = function (ev) {
+      ev.stopPropagation();
+      openStreams(o.m, o.i, o.t + (tv ? " (S" + (o.s || 1) + "E" + (o.e || 1) + ")" : ""), o.s || 1, o.e || 1, { p: o.p, y: o.y, b: o.b }, o.nx ? 0 : (o.pos || 0), !o.nx && o.pos > 0);
+    };
+    b.appendChild(pl);
     if (o.dur > 0 && o.pos > 0 && !o.nx) {
-      var pr = h("div", "prog under");
+      var pr = h("div", "wprog");
       var bar = h("i");
       bar.style.width = Math.min(100, Math.max(3, Math.round(o.pos / o.dur * 100))) + "%";
       pr.appendChild(bar);
-      b.insertBefore(pr, poster.nextSibling);
+      b.appendChild(pr);
     }
-    var cy = b.querySelector(".cy");
-    if (cy) cy.textContent = tv ? ((o.nx ? "Next: " : "") + "S" + (o.s || 1) + " E" + (o.e || 1)) : (o.dur > 0 ? Math.max(1, Math.round((o.dur - o.pos) / 60)) + "m left" : "Resume");
-    var pb = b.querySelector(".pplay");
-    if (pb) pb.onclick = function (ev) {
-      ev.stopPropagation();
-      openStreams(o.m, o.i, o.t + (tv ? " (S" + (o.s || 1) + "E" + (o.e || 1) + ")" : ""), o.s || 1, o.e || 1, { p: o.p, y: o.y }, o.nx ? 0 : (o.pos || 0));
-    };
+    b.onclick = function () { openTitle(o.m, o.i); };
     if (LIBEDIT) {
-      var x = h("button", "xbtn", "×");
+      var x = h("button", "xbtn", "\u00D7");
       x.setAttribute("aria-label", "Remove");
       x.onclick = function (ev) { ev.stopPropagation(); watchDrop(o.m, o.i); renderLib(); };
-      poster.appendChild(x);
+      b.appendChild(x);
     }
     return b;
   }
@@ -3407,6 +3508,8 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     wrap.appendChild(h("h2", null, name || "Boa Cinema"));
     wrap.appendChild(h("p", null, u && u.username ? "@" + u.username : "Guest"));
     box.appendChild(wrap);
+    var icd = installCard();
+    if (icd) box.appendChild(icd);
     box.appendChild(themeCard());
     var list = h("div", "list");
     function item(label, val, fn, cls) {
@@ -3537,10 +3640,10 @@ $("smclose").onclick = function () {
     $("smplayer").style.display = "none";
     $("smplayer").textContent = "";
   };
-  function openStreams(mt, id, title, s, e, meta, resumeAt) {
+  function openStreams(mt, id, title, s, e, meta, resumeAt, auto) {
     paintPriv();
     loadSubs(mt, id, s, e);
-    CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0 };
+    CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0, auto: !!auto };
     var slowT = setTimeout(function () {
       var f = $("smlist").firstChild;
       if (f && f.className === "note center") f.textContent = "Still searching providers… the first search for a title can take up to a minute.";
@@ -3563,6 +3666,7 @@ $("smclose").onclick = function () {
           list.appendChild(h("div", "note center", "No stream returned."));
           return;
         }
+        var streamsOrig = streams.slice();
         streams.forEach(function (st) {
           var row = h("div", "sitem");
           row.setAttribute("data-prov", st.provider || "Plugin");
@@ -3675,6 +3779,13 @@ if (provs.length) {
   });
   list.insertBefore(bar, list.firstChild);
 }
+if (CUR && CUR.auto) {
+  CUR.auto = false;
+  var bi = -1, br = 99;
+  streamsOrig.forEach(function (x, i) { var rk = streamRank(x); if (x.url && rk < br && rk <= 3) { br = rk; bi = i; } });
+  var rowsEl = list.querySelectorAll(".sitem");
+  if (bi > -1 && rowsEl[bi]) { var pbtn = rowsEl[bi].querySelector(".splaybtn"); if (pbtn) pbtn.click(); }
+}
       })
       .catch(function (e) {
   clearTimeout(slowT);
@@ -3745,14 +3856,14 @@ if (provs.length) {
     var lbl = "Play";
     if (unrel) lbl = d.d ? "Releases " + fmtDate(d.d) : "Not released yet";
     else if (d.mt === "tv") lbl = wEnt ? ((wEnt.nx ? "Next: S" : "Resume S") + (wEnt.s || 1) + " E" + (wEnt.e || 1)) : "Play S1 E1";
-    else if (wEnt && wEnt.pos > 30) lbl = "Resume";
+    else if (wEnt && !wEnt.nx) lbl = "Resume" + (wEnt.dur > 0 && wEnt.pos > 0 ? " \u2022 " + Math.max(1, Math.round((wEnt.dur - wEnt.pos) / 60)) + "m left" : "");
     streamBtn.appendChild(document.createTextNode(lbl));
     streamBtn.onclick = function () {
       if (unrel) { toast("Not released yet"); return; }
       var s1 = 1, e1 = 1, at = 0;
       if (wEnt && d.mt === "tv") { s1 = wEnt.s || 1; e1 = wEnt.e || 1; at = wEnt.nx ? 0 : (wEnt.pos || 0); }
       else if (wEnt) at = wEnt.pos || 0;
-      openStreams(d.mt, d.id, d.t + (d.mt === "tv" ? " (S" + s1 + "E" + e1 + ")" : ""), s1, e1, { p: d.p, y: d.y }, at);
+      openStreams(d.mt, d.id, d.t + (d.mt === "tv" ? " (S" + s1 + "E" + e1 + ")" : ""), s1, e1, { p: d.p, y: d.y, b: d.b }, at, at > 0);
     };
     acts.appendChild(streamBtn);
     if (d.trailer) {
@@ -3910,7 +4021,7 @@ if (provs.length) {
           c.className = "ep off";
           c.onclick = function () { toast("Airs " + fmtDate(e.d)); };
         } else {
-          c.onclick = function () { openStreams("tv", d.id, d.t + " (S" + n + "E" + e.n + ")", n, e.n, { p: d.p, y: d.y }, (epWatch && !epWatch.nx && epWatch.s === n && epWatch.e === e.n) ? epWatch.pos : 0); };
+          c.onclick = function () { openStreams("tv", d.id, d.t + " (S" + n + "E" + e.n + ")", n, e.n, { p: d.p, y: d.y, b: d.b }, (epWatch && !epWatch.nx && epWatch.s === n && epWatch.e === e.n) ? epWatch.pos : 0, !!(epWatch && !epWatch.nx && epWatch.s === n && epWatch.e === e.n && epWatch.pos > 0)); };
         }
         strip.appendChild(c);
       });
