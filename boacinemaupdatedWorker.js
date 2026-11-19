@@ -2320,10 +2320,50 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #instbar button{border:0;border-radius:999px;padding:9px 16px;font-weight:800;background:var(--accent);color:var(--on-accent)}
 #instbar button.x{background:none;color:var(--muted);padding:6px;font-size:18px}
 #smpriv .ipst{font-size:12px;margin:4px 0 0 30px;font-weight:700}
+
+#player{position:fixed;inset:0;z-index:120;background:#000;display:none;opacity:0;transition:opacity .25s ease;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+#player.open{display:block;opacity:1}
+#player .pvid{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:1}
+#player .pamb{position:absolute;inset:-10%;width:120%;height:120%;filter:blur(70px) saturate(1.6);opacity:0;transition:opacity .4s;z-index:0}
+#player.amb .pamb{opacity:.55}
+#player video::cue{background:rgba(0,0,0,.7);font-size:1.1em}
+#player .ptop,#player .pbot{position:absolute;left:0;right:0;z-index:3;transition:opacity .3s ease}
+#player .ptop{top:0;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:calc(var(--sat) + 12px) 14px 26px;background:linear-gradient(180deg,rgba(0,0,0,.85),rgba(0,0,0,0))}
+#player .ptitle{font-size:16px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+#player .pright{display:flex;gap:4px;flex:none}
+#player .pbot{bottom:0;padding:22px 16px calc(var(--sab) + 14px);background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0))}
+#player .pbot>*{position:relative}
+#player .pbot::before{content:"";position:absolute;left:10px;right:10px;bottom:calc(var(--sab) + 6px);top:18px;border-radius:18px;background:rgba(30,30,34,.45);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.08);z-index:0}
+#player.hide .ptop,#player.hide .pbot{opacity:0;pointer-events:none}
+#player.hide{cursor:none}
+#player .pbtn{background:none;border:0;padding:8px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;position:relative;color:#fff;border-radius:50%;flex:none}
+#player .pbtn:active{background:rgba(255,255,255,.14)}
+#player .pbtn svg{width:26px;height:26px}
+#player .pbtn em{position:absolute;font-style:normal;font-size:9px;font-weight:800;top:50%;left:50%;transform:translate(-50%,-42%)}
+#player .pscrub{height:22px;margin:0 6px;display:flex;align-items:center;cursor:pointer;touch-action:none}
+#player .pscrub::before{content:"";position:absolute;left:0;right:0;height:5px;border-radius:3px;background:rgba(255,255,255,.25)}
+#player .pscrub i{position:absolute;left:0;height:5px;border-radius:3px;width:0}
+#player .sbuf{background:rgba(255,255,255,.4)}
+#player .sfill{background:var(--accent)}
+#player .sthumb{position:absolute;left:0;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(0,0,0,.35)}
+#player .stip{position:absolute;bottom:26px;transform:translateX(-50%);background:rgba(0,0,0,.8);padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700;opacity:0;pointer-events:none}
+#player .prow{display:flex;align-items:center;gap:2px;padding:0 4px}
+#player .ptime{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;margin-left:8px;white-space:nowrap}
+#player .pspace{flex:1}
+#player .pvol{width:80px;accent-color:var(--accent);margin-left:2px}
+#player .pcc{background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:10px;padding:7px 8px;font-size:12px;font-weight:700;max-width:110px}
+#player .pcc option{color:#000}
+#player .pspin{position:absolute;left:50%;top:50%;width:54px;height:54px;margin:-27px 0 0 -27px;border-radius:50%;border:4px solid rgba(255,255,255,.2);border-top-color:var(--accent);animation:pspin .8s linear infinite;z-index:2;display:none;pointer-events:none}
+#player .pspin.on{display:block}
+@keyframes pspin{to{transform:rotate(360deg)}}
+#player .pmsg{position:absolute;left:24px;right:24px;top:50%;transform:translateY(-50%);text-align:center;font-size:15px;font-weight:700;z-index:2;display:none;line-height:1.5}
+#player .pmsg.on{display:block}
+@media (max-width:480px){#player .pvol{display:none}#player .ptime{font-size:12px;margin-left:4px}}
 @media (min-width:720px){
   html{background:#000}
   body{max-width:560px;margin:0 auto;background:var(--bg);min-height:100vh;box-shadow:0 0 0 1px #1b1b1d,0 0 80px rgba(var(--accent-rgb),.08)}
   #detail,#dbar,#catmenu,#admin,#profiles{left:50%;right:auto;width:560px;margin-left:-280px}
+  #player{left:0;right:0;width:auto;margin:0}
   #detail,#catmenu,#admin{top:0;bottom:0}
 }
 </style>
@@ -2401,6 +2441,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 </div>
 <div id="admin" role="dialog" aria-label="Owner panel"></div>
 <div id="profiles"></div>
+<div id="player"></div>
 <div id="instbar"><span>Install Boa Cinema on your phone</span><button id="instgo">Install</button><button class="x" id="instx" aria-label="Dismiss">\u00D7</button></div>
 <div id="toast" class="toast"></div>
 
@@ -2510,7 +2551,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
   var SUBSEL = "";
   var LANGS = { eng: "English", spa: "Spanish", fre: "French", fra: "French", por: "Portuguese", ara: "Arabic", ger: "German", deu: "German", ita: "Italian", rus: "Russian", hin: "Hindi", tur: "Turkish", chi: "Chinese", zho: "Chinese", jpn: "Japanese", kor: "Korean", dut: "Dutch", pol: "Polish", ind: "Indonesian", swa: "Swahili", yor: "Yoruba" };
   function applySub() {
-    var v = document.querySelector("#smplayer video");
+    var v = document.querySelector("#player video, #smplayer video");
     if (!v) return;
     Array.prototype.slice.call(v.querySelectorAll("track")).forEach(function (t) { t.remove(); });
     if (SUBSEL === "") return;
@@ -2540,6 +2581,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
       sel.onchange = function () { SUBSEL = sel.value; applySub(); };
       box.appendChild(sel);
       sel._def = def;
+      if (PLSUBREFRESH) PLSUBREFRESH();
     }).catch(function () {});
   }
   function RELAY_ON() { return lsGet("boa_relay", "0") === "1"; }
@@ -2922,6 +2964,326 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     }
     return c;
   }
+
+  // ---------- custom video player (Netflix style) ----------
+  var HLS_URL = "https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js";
+  var PLSUBREFRESH = null;
+  var PI = {
+    play: '<svg viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" fill="#fff"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
+    back: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg><em>10</em>',
+    fwd: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg><em>10</em>',
+    vol: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z" fill="#fff"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></svg>',
+    mute: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z" fill="#fff"/><path d="M17 9l5 6M22 9l-5 6"/></svg>',
+    pip: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1" fill="#fff"/></svg>',
+    amb: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>',
+    fs: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>'
+  };
+  function loadHls(cb) {
+    if (window.Hls) { cb(); return; }
+    var sc = document.createElement("script");
+    sc.src = HLS_URL;
+    sc.onload = function () { cb(); };
+    sc.onerror = function () { cb(); };
+    document.head.appendChild(sc);
+  }
+  function fmtT(t) {
+    if (!isFinite(t) || t < 0) t = 0;
+    var hh = Math.floor(t / 3600), mm = Math.floor((t % 3600) / 60), ss = Math.floor(t % 60);
+    var p2 = function (n) { return (n < 10 ? "0" : "") + n; };
+    return hh ? hh + ":" + p2(mm) + ":" + p2(ss) : p2(mm) + ":" + p2(ss);
+  }
+  function pbtn(html, label) {
+    var b = h("button", "pbtn");
+    b.innerHTML = html;
+    b.setAttribute("aria-label", label);
+    return b;
+  }
+  function detailLabel(d) {
+    var w = watchGet(d.mt, d.id);
+    if (isUnreleased(d)) return d.d ? "Releases " + fmtDate(d.d) : "Not released yet";
+    if (d.mt === "tv") return w ? ((w.nx ? "Next: S" : "Resume S") + (w.s || 1) + " E" + (w.e || 1)) : "Play S1 E1";
+    if (w && !w.nx) return "Resume" + (w.dur > 0 && w.pos > 0 ? " • " + Math.max(1, Math.round((w.dur - w.pos) / 60)) + "m left" : "");
+    return "Play";
+  }
+  function openPlayer(url, st) {
+    var ctx = CUR;
+    var root = $("player");
+    root.textContent = "";
+    root.className = "open";
+    document.body.style.overflow = "hidden";
+    try { if (tg && tg.expand) tg.expand(); } catch (e) {}
+    var hls = null, relayed = false, retried = false, hideT = null, saveT = null, seeking = false, closed = false, ambT = null, finished = false;
+
+    var amb = document.createElement("canvas");
+    amb.className = "pamb"; amb.width = 32; amb.height = 18;
+    root.appendChild(amb);
+    var v = document.createElement("video");
+    v.className = "pvid";
+    v.setAttribute("playsinline", "");
+    v.setAttribute("webkit-playsinline", "");
+    v.preload = "auto";
+    v.crossOrigin = null;
+    root.appendChild(v);
+
+    var spin = h("div", "pspin");
+    root.appendChild(spin);
+    var msg = h("div", "pmsg");
+    root.appendChild(msg);
+
+    // top bar
+    var top = h("div", "ptop");
+    var ttl = h("div", "ptitle", ctx && ctx.title ? ctx.title : (st && st.title) || "Now playing");
+    top.appendChild(ttl);
+    var tr = h("div", "pright");
+    var bPip = pbtn(PI.pip, "Picture in picture");
+    var bAmb = pbtn(PI.amb, "Ambient light");
+    var bFs = pbtn(PI.fs, "Fullscreen");
+    var bX = pbtn(PI.x, "Close");
+    var canPip = !!(document.pictureInPictureEnabled || (v.webkitSupportsPresentationMode && v.webkitSetPresentationMode));
+    if (canPip) tr.appendChild(bPip);
+    tr.appendChild(bAmb); tr.appendChild(bFs); tr.appendChild(bX);
+    top.appendChild(tr);
+    root.appendChild(top);
+
+    // bottom bar
+    var bot = h("div", "pbot");
+    var scrub = h("div", "pscrub");
+    var sbuf = h("i", "sbuf"), sfill = h("i", "sfill"), sthumb = h("b", "sthumb"), stip = h("span", "stip");
+    scrub.appendChild(sbuf); scrub.appendChild(sfill); scrub.appendChild(sthumb); scrub.appendChild(stip);
+    bot.appendChild(scrub);
+    var row = h("div", "prow");
+    var bPlay = pbtn(PI.play, "Play");
+    var bBack = pbtn(PI.back, "Back 10 seconds");
+    var bFwd = pbtn(PI.fwd, "Forward 10 seconds");
+    var bMute = pbtn(PI.vol, "Mute");
+    var vol = h("input", "pvol");
+    vol.type = "range"; vol.min = "0"; vol.max = "1"; vol.step = "0.05";
+    vol.value = lsGet("boa_vol", "1");
+    var tim = h("span", "ptime", "00:00 / 00:00");
+    var sp = h("span", "pspace");
+    var cc = h("select", "pcc");
+    row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bFwd); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(cc);
+    bot.appendChild(row);
+    root.appendChild(bot);
+
+    function fillCC() {
+      cc.textContent = "";
+      if (!SUBS || !SUBS.length) { cc.style.display = "none"; return; }
+      cc.style.display = "";
+      var o0 = h("option", null, "CC: Off"); o0.value = ""; cc.appendChild(o0);
+      SUBS.forEach(function (x, i) { var o = h("option", null, "CC: " + (LANGS[x.lang] || x.lang) + (x.n > 1 ? " " + x.n : "")); o.value = String(i); cc.appendChild(o); });
+      cc.value = SUBSEL;
+    }
+    fillCC();
+    PLSUBREFRESH = fillCC;
+    cc.onchange = function () { SUBSEL = cc.value; applySub(); };
+
+    // ----- controls visibility (hides after 3 seconds of inactivity) -----
+    function showCtl() {
+      root.classList.remove("hide");
+      clearTimeout(hideT);
+      hideT = setTimeout(function () { if (!v.paused && !seeking) root.classList.add("hide"); }, 3000);
+    }
+    ["mousemove", "touchstart", "keydown"].forEach(function (ev) { root.addEventListener(ev, showCtl, { passive: true }); });
+
+    // ----- source -----
+    function fail(text) { spin.className = "pspin"; msg.textContent = text; msg.className = "pmsg on"; }
+    function startSource(src0, useRelay) {
+      var isHls = /\.m3u8(\?|$)/i.test(src0);
+      function go(src) {
+        if (closed) return;
+        if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
+        msg.className = "pmsg";
+        spin.className = "pspin on";
+        var onFatal = function () {
+          if (!relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
+          fail("This stream can't play in the app player. Close it and try another stream or the VLC button.");
+        };
+        if (isHls && window.Hls && window.Hls.isSupported()) {
+          hls = new window.Hls({ maxBufferLength: 40, enableWorker: true, lowLatencyMode: false });
+          hls.on(window.Hls.Events.ERROR, function (ev, d) {
+            if (!d || !d.fatal) return;
+            if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch (e) {} }
+            onFatal();
+          });
+          hls.loadSource(src);
+          hls.attachMedia(v);
+          var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
+        } else {
+          v.src = src;
+          v.onerror = onFatal;
+          var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
+        }
+      }
+      if (useRelay || RELAY_ON()) {
+        relayed = true;
+        relaySign(src0).then(go);
+      } else go(src0);
+    }
+    if (/\.m3u8(\?|$)/i.test(url)) loadHls(function () { startSource(url, false); });
+    else startSource(url, false);
+
+    // ----- state -> UI -----
+    function paintPlay() { bPlay.innerHTML = v.paused ? PI.play : PI.pause; bPlay.setAttribute("aria-label", v.paused ? "Play" : "Pause"); }
+    function paintTime() {
+      var d = v.duration || 0, c = v.currentTime || 0;
+      tim.textContent = fmtT(c) + " / " + fmtT(d);
+      if (!seeking) {
+        var pc = d ? Math.min(100, c / d * 100) : 0;
+        sfill.style.width = pc + "%"; sthumb.style.left = pc + "%";
+      }
+      try { if (v.buffered && v.buffered.length && d) sbuf.style.width = Math.min(100, v.buffered.end(v.buffered.length - 1) / d * 100) + "%"; } catch (e) {}
+    }
+    function save(force) {
+      if (!ctx || finished || !(v.currentTime > 1)) return;
+      recordWatch(ctx, v.currentTime, v.duration || 0, !!force);
+    }
+    v.addEventListener("play", function () { paintPlay(); showCtl(); });
+    v.addEventListener("pause", function () { paintPlay(); root.classList.remove("hide"); save(true); });
+    v.addEventListener("waiting", function () { spin.className = "pspin on"; });
+    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; });
+    v.addEventListener("canplay", function () { spin.className = "pspin"; });
+    v.addEventListener("timeupdate", paintTime);
+    v.addEventListener("progress", paintTime);
+    v.addEventListener("durationchange", paintTime);
+    v.addEventListener("seeking", function () { if (v.currentTime < (v.duration || 1) * 0.9) finished = false; });
+    v.addEventListener("ended", function () { finished = true; if (ctx) recordWatch(ctx, v.duration || 1, v.duration || 1, true); root.classList.remove("hide"); paintPlay(); });
+    v.addEventListener("loadedmetadata", function () {
+      if (ctx && ctx.resumeAt > 10 && v.duration && ctx.resumeAt < v.duration - 30) { try { v.currentTime = ctx.resumeAt; } catch (e) {} ctx.resumeAt = 0; }
+      applySub();
+      paintTime();
+    });
+    v.volume = +vol.value;
+    paintPlay();
+    saveT = setInterval(function () { if (!v.paused) save(false); }, 5000);
+
+    // ----- actions -----
+    function toggle() { if (v.paused) { var q = v.play(); if (q && q.catch) q.catch(function () {}); } else v.pause(); }
+    function seekBy(n) { if (v.duration) v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + n)); showCtl(); }
+    function paintVol() { bMute.innerHTML = (v.muted || v.volume === 0) ? PI.mute : PI.vol; }
+    bPlay.onclick = toggle;
+    bBack.onclick = function () { seekBy(-10); };
+    bFwd.onclick = function () { seekBy(10); };
+    bMute.onclick = function () { v.muted = !v.muted; paintVol(); };
+    vol.oninput = function () { v.volume = +vol.value; v.muted = v.volume === 0; lsSet("boa_vol", vol.value); paintVol(); };
+    bPip.onclick = function () {
+      try {
+        if (document.pictureInPictureElement) document.exitPictureInPicture();
+        else if (v.requestPictureInPicture) v.requestPictureInPicture();
+        else if (v.webkitSetPresentationMode) v.webkitSetPresentationMode(v.webkitPresentationMode === "picture-in-picture" ? "inline" : "picture-in-picture");
+      } catch (e) { toast("Picture in picture isn't available"); }
+    };
+    function ambDraw() {
+      try { amb.getContext("2d").drawImage(v, 0, 0, 32, 18); } catch (e) {}
+    }
+    var ambOn = lsGet("boa_amb", "0") === "1";
+    function paintAmb() {
+      root.classList.toggle("amb", ambOn);
+      bAmb.style.opacity = ambOn ? "1" : ".6";
+      clearInterval(ambT);
+      if (ambOn) { ambDraw(); ambT = setInterval(ambDraw, 400); }
+    }
+    bAmb.onclick = function () { ambOn = !ambOn; lsSet("boa_amb", ambOn ? "1" : "0"); paintAmb(); toast(ambOn ? "Ambient light on" : "Ambient light off"); };
+    paintAmb();
+    function isFs() { return document.fullscreenElement || document.webkitFullscreenElement; }
+    bFs.onclick = function () {
+      try {
+        if (isFs()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
+        if (root.requestFullscreen) root.requestFullscreen();
+        else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+        else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+        else if (tg && tg.requestFullscreen) tg.requestFullscreen();
+      } catch (e) {}
+    };
+
+    // tap on the picture: first tap shows controls, next tap play/pause; double tap sides skips 10s
+    var lastTap = 0;
+    root.addEventListener("click", function (ev) {
+      if (ev.target !== v && ev.target !== root && ev.target !== spin) return;
+      var now = Date.now();
+      if (now - lastTap < 300) {
+        var r = root.getBoundingClientRect();
+        seekBy(ev.clientX < r.left + r.width / 2 ? -10 : 10);
+        lastTap = 0;
+        return;
+      }
+      lastTap = now;
+      var wasHidden = root.classList.contains("hide");
+      showCtl();
+      if (!wasHidden) setTimeout(function () { if (lastTap === now) { toggle(); } }, 310);
+    });
+
+    // scrubbing
+    function pos(ev) {
+      var r = scrub.getBoundingClientRect();
+      var x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
+      return Math.max(0, Math.min(1, x / r.width));
+    }
+    function dragMove(ev) {
+      var f = pos(ev), d = v.duration || 0;
+      sfill.style.width = f * 100 + "%"; sthumb.style.left = f * 100 + "%";
+      stip.textContent = fmtT(f * d); stip.style.left = f * 100 + "%"; stip.style.opacity = "1";
+      tim.textContent = fmtT(f * d) + " / " + fmtT(d);
+      return f;
+    }
+    var dragging = false;
+    scrub.addEventListener("pointerdown", function (ev) { dragging = true; seeking = true; try { scrub.setPointerCapture(ev.pointerId); } catch (e) {} dragMove(ev); showCtl(); });
+    scrub.addEventListener("pointermove", function (ev) { if (dragging) dragMove(ev); });
+    scrub.addEventListener("pointerup", function (ev) {
+      if (!dragging) return;
+      dragging = false;
+      var f = dragMove(ev);
+      if (v.duration) v.currentTime = f * v.duration;
+      seeking = false;
+      stip.style.opacity = "0";
+      showCtl();
+    });
+    scrub.addEventListener("pointercancel", function () { dragging = false; seeking = false; stip.style.opacity = "0"; });
+
+    // ----- close (saves progress first) -----
+    function onKey(ev) {
+      if (ev.key === " " || ev.key === "k") { ev.preventDefault(); toggle(); }
+      else if (ev.key === "ArrowLeft") seekBy(-10);
+      else if (ev.key === "ArrowRight") seekBy(10);
+      else if (ev.key === "f") bFs.onclick();
+      else if (ev.key === "m") bMute.onclick();
+      else if (ev.key === "Escape" && !isFs()) closeP();
+    }
+    function onHide() { if (document.hidden) save(true); }
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
+    function closeP() {
+      if (closed) return;
+      closed = true;
+      save(true);
+      clearInterval(saveT); clearInterval(ambT); clearTimeout(hideT);
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
+      PLSUBREFRESH = null;
+      try { if (isFs()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {}
+      try { if (document.pictureInPictureElement) document.exitPictureInPicture(); } catch (e) {}
+      if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
+      try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {}
+      root.className = "";
+      root.textContent = "";
+      document.body.style.overflow = "";
+      // update the Library and the detail button right away
+      if (tab === "lib") renderLib();
+      if (tab === "me") renderMe();
+      syncLibBadges();
+      if (DETAILREF && ctx && String(DETAILREF.d.id) === String(ctx.id)) {
+        DETAILREF.btn.innerHTML = ICON.play;
+        DETAILREF.btn.appendChild(document.createTextNode(detailLabel(DETAILREF.d)));
+      }
+    }
+    bX.onclick = closeP;
+    showCtl();
+  }
+  var DETAILREF = null;
 
   // ---------- themes ----------
   var THEMES = { crimson: ["#e50914", "229,9,20", "#fff"], white: ["#ffffff", "255,255,255", "#000"], ocean: ["#0ea5e9", "14,165,233", "#fff"], emerald: ["#10b981", "16,185,129", "#fff"] };
@@ -3687,20 +4049,9 @@ $("smclose").onclick = function () {
     return;
   }
   if (!/\/embed\/|\.html?($|\?)/i.test(st.url)) {
-    note.textContent = "Loading stream...";
-    var v = document.createElement("video");
-    if (RELAY_ON()) { relaySign(st.url).then(function (ru) { v.src = ru; var pp = v.play && v.play(); if (pp && pp.catch) pp.catch(function () {}); }); } else { v.src = st.url; }
-    v.controls = true;
-    v.autoplay = true;
-    v.setAttribute("playsinline", "");
-    trackVideo(v, CUR);
-    v.addEventListener("loadedmetadata", applySub);
-    v.onwaiting = function () { note.textContent = "Buffering..."; };
-    v.onplaying = function () { note.textContent = ""; };
-    v.onerror = function () {
-      note.textContent = "Can't play in the browser (error " + (v.error ? v.error.code : "?") + "). Use the VLC button.";
-    };
-    player.appendChild(v);
+    note.textContent = "";
+    player.style.display = "none";
+    openPlayer(st.url, st);
   } else {
     var ifr = document.createElement("iframe");
     ifr.src = st.url;
@@ -3865,6 +4216,7 @@ if (CUR && CUR.auto) {
       else if (wEnt) at = wEnt.pos || 0;
       openStreams(d.mt, d.id, d.t + (d.mt === "tv" ? " (S" + s1 + "E" + e1 + ")" : ""), s1, e1, { p: d.p, y: d.y, b: d.b }, at, at > 0);
     };
+    DETAILREF = { btn: streamBtn, d: d };
     acts.appendChild(streamBtn);
     if (d.trailer) {
       var pb = h("button", "btn ghost");
