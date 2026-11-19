@@ -707,6 +707,17 @@ function detectSong(text) {
 // PRIVACY RELAY (optional, user-chosen): the stream host sees this Worker, not the viewer.
 // Links are signed (HMAC) and expire after 6 hours, so this can't be used as an open proxy.
 // ============================================================================
+// ---- memory guards: capped caches and a small concurrency pool ----
+function capSet(map, key, val, max) {
+  map.delete(key);
+  map.set(key, val);
+  while (map.size > max) map.delete(map.keys().next().value);
+}
+async function runPool(fns, limit) {
+  let i = 0;
+  const worker = async () => { while (i < fns.length) { const f = fns[i++]; try { await f(); } catch (e) {} } };
+  await Promise.all(Array.from({ length: Math.min(limit, fns.length) }, worker));
+}
 async function relayHmac(env, msg) {
   const secret = env.RELAY_SECRET || env.BOT_TOKEN || "boa-relay";
   const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -736,14 +747,15 @@ async function relayHandle(request, url, env) {
   const rg = request.headers.get("range");
   if (rg) h.set("Range", rg);
   let res;
-  try { res = await fetch(u, { headers: h, redirect: "follow", method: request.method === "HEAD" ? "HEAD" : "GET" }); }
+  try { res = await fetch(u, { headers: h, redirect: "follow", method: request.method === "HEAD" ? "HEAD" : "GET", signal: request.signal }); }
   catch (err) { return new Response("relay failed", { status: 502 }); }
   const out = new Headers();
   ["content-type", "content-length", "content-range", "accept-ranges"].forEach((k) => { const v = res.headers.get(k); if (v) out.set(k, v); });
   out.set("Access-Control-Allow-Origin", "*");
   out.set("Cache-Control", "no-store");
   const ct = res.headers.get("content-type") || "";
-  if (/mpegurl/i.test(ct) || /\.m3u8(\?|$)/i.test(u)) {
+  const clen = Number(res.headers.get("content-length")) || 0;
+  if ((/mpegurl/i.test(ct) || /\.m3u8(\?|$)/i.test(u)) && clen < 1500000) {
     const base = res.url || u;
     const lines = (await res.text()).split("\n");
     const fix = async (ref) => { try { const abs = new URL(ref.trim(), base).href; return relayAllowed(abs) ? await relaySign(env, abs) : ref; } catch (err) { return ref; } };
@@ -799,7 +811,7 @@ async function findSubs(env, mt, id, sNum, eNum) {
     out.push({ lang: x.lang, n: seen[x.lang], from: x.from, u: "/api/sub?u=" + encodeURIComponent(x.url) + "&e=" + e + "&s=" + (await relayHmac(env, "sub|" + x.url + "|" + e)) });
   }
   out.sort((a, b) => (a.lang === "eng" ? 0 : 1) - (b.lang === "eng" ? 0 : 1) || a.lang.localeCompare(b.lang));
-  SUBS_CACHE.set(key, { at: Date.now(), v: out });
+  capSet(SUBS_CACHE, key, { at: Date.now(), v: out }, 100);
   if (SUBS_CACHE.size > 300) SUBS_CACHE.delete(SUBS_CACHE.keys().next().value);
   return out;
 }
@@ -904,8 +916,7 @@ async function analyticsPing(request, env) {
     m.mon = dayIdx;
     jobs.push(env.BOT_USERS.put("mon_" + h, "1", { expirationTtl: 2592000, metadata: { d: dayIdx } }));
   }
-  anMemo.set(h, m);
-  if (anMemo.size > 4000) anMemo.delete(anMemo.keys().next().value);
+  capSet(anMemo, h, m, 500);
   if (now - anLastVisit > 120000) { anLastVisit = now; jobs.push(env.BOT_USERS.put("cfg:lastvisit", String(now))); }
   try { await Promise.all(jobs); } catch (e) {}
   if (now - anLastRoll > 600000) { anLastRoll = now; try { await analyticsRoll(env); } catch (e) {} }
@@ -1717,8 +1728,7 @@ const MANIFEST_CACHE = new Map();
 const SCRIPT_CACHE = new Map();
 
 function cacheSetStreams(key, list) {
-  STREAM_CACHE.set(key, { at: Date.now(), list });
-  if (STREAM_CACHE.size > 300) STREAM_CACHE.delete(STREAM_CACHE.keys().next().value);
+  capSet(STREAM_CACHE, key, { at: Date.now(), list }, 100);
 }
 
 // Plugin repositories live ONLY in cfg:plugins. (Older versions also read cfg:addons, which is
@@ -1768,8 +1778,7 @@ async function streamVideoIds(env, mediaType, tmdbId, season, episode) {
   let imdb = IDS_MEMO.get(mediaType + tmdbId);
   if (imdb === undefined) {
     imdb = await imdbFor(env, mediaType, tmdbId);
-    IDS_MEMO.set(mediaType + tmdbId, imdb);
-    if (IDS_MEMO.size > 500) IDS_MEMO.delete(IDS_MEMO.keys().next().value);
+    capSet(IDS_MEMO, mediaType + tmdbId, imdb, 100);
   }
   if (imdb) ids.push(imdb + suffix);
   ids.push("tmdb:" + tmdbId + suffix);
@@ -1822,7 +1831,7 @@ async function loadManifest(url, timeoutMs, fresh) {
   const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs || 8000), headers: { "user-agent": "BoaCinema/1.0" } });
   if (!r.ok) throw new Error("manifest " + r.status);
   const m = await r.json();
-  MANIFEST_CACHE.set(url, { at: Date.now(), m });
+  capSet(MANIFEST_CACHE, url, { at: Date.now(), m }, 40);
   return m;
 }
 
@@ -1858,7 +1867,7 @@ async function loadScraperFn(url, timeoutMs, fresh) {
   if (!r.ok) throw new Error("script " + r.status);
   const fn = compileScraper(await r.text(), 9000);
   if (!fn) throw new Error("no getStreams function in that script");
-  SCRIPT_CACHE.set(url, { at: Date.now(), fn });
+  capSet(SCRIPT_CACHE, url, { at: Date.now(), fn }, 100);
   return fn;
 }
 
@@ -1875,7 +1884,7 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
   const seen = new Set();
   const job = { bag, done: null };
   job.done = (async () => {
-    const perScraper = Number(env.SCRAPER_TIMEOUT_MS) || 9000;
+    const perScraper = Math.min(Number(env.SCRAPER_TIMEOUT_MS) || 4000, 4000);
     const only = String(env.ONLY_SCRAPERS || "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
     const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false);
     const tasks = [];
@@ -1884,7 +1893,7 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
         if (repo.kind === "stremio") {
           if ((repo.disabled || []).includes("stremio")) return;
           tasks.push(
-            (async () => {
+            async () => {
               const res = await stremioStreams(repo, env, mediaType, tmdbId, season, episode, perScraper).catch(() => []);
               for (const st of res) {
                 const k = String(st.url);
@@ -1893,7 +1902,7 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
                 bag.push(st);
               }
               console.log("Collected " + res.length + " streams from " + (repo.name || repo.url));
-            })()
+            }
           );
           return;
         }
@@ -1913,9 +1922,9 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
           const types = sc.supportedTypes || sc.types;
           if (Array.isArray(types) && types.length && !types.includes(mediaType)) continue;
           tasks.push(
-            (async () => {
+            async () => {
               try {
-                const fn = await loadScraperFn(sc.url, 12000);
+                const fn = await loadScraperFn(sc.url, 4000);
                 const res = await withTimeout(
                   Promise.resolve().then(() => fn(String(tmdbId), mediaType, season, episode)),
                   perScraper,
@@ -1934,12 +1943,12 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
               } catch (err) {
                 console.log("Skipped scraper " + label + ": " + (err && err.message));
               }
-            })()
+            }
           );
         }
       })
     );
-    await Promise.allSettled(tasks);
+    await runPool(tasks, 6);
   })();
   job.done
     .then(() => cacheSetStreams(key, bag.slice()))

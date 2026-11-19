@@ -218,8 +218,21 @@ if (!onRender) {
       res.setHeader(key, value);
     }
 
-    const responseBuffer = Buffer.from(await response.arrayBuffer());
-    res.end(responseBuffer);
+    if (!response.body) {
+      res.end();
+    } else {
+      const reader = response.body.getReader();
+      res.on('close', () => { reader.cancel().catch(() => {}); });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (res.destroyed) break;
+        if (!res.write(value)) {
+          await new Promise((r) => res.once('drain', r).once('close', r));
+        }
+      }
+      res.end();
+    }
   } catch (err) {
     console.error('Server execution error:', err);
     res.statusCode = 500;
