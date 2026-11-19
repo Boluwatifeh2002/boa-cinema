@@ -883,21 +883,23 @@ async function anHash(env, request) {
   const dig = await crypto.subtle.digest("SHA-256", new TextEncoder().encode((ip || ua || "?") + "|" + salt));
   return [...new Uint8Array(dig)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-async function anList(env, prefix) {
-  const out = [];
+// Walks a KV prefix page by page (1000 keys max in memory at a time) and hands each key name to fn.
+async function anEach(env, prefix, fn) {
   let cursor;
-  for (let i = 0; i < 12; i++) {
-    const page = await env.BOT_USERS.list({ prefix, cursor });
-    for (const k of page.keys) out.push(k);
+  for (let i = 0; i < 60; i++) {
+    const page = await env.BOT_USERS.list({ prefix, cursor, limit: 1000 });
+    for (const k of page.keys) fn(k.name);
     if (page.list_complete || !page.cursor) break;
     cursor = page.cursor;
   }
-  return out;
 }
-// Keys never depend on KV metadata (some KV back-ends drop it): everything is encoded in the key name.
-//   live_<hash>_<b|p|w>  presence, TTL 180s       lst_<hash>  "is streaming", TTL 180s
-//   day_<hash>           TTL 24h                   wk_<dayIdx>_<hash>  TTL 8 days      mon_<hash>  TTL 30 days
+async function anCount(env, prefix) { let n = 0; await anEach(env, prefix, () => { n++; }); return n; }
+// Compact keys (names carry the data, so tallying never needs to read values):
+//   s:<sessionId>:<b|p|w><0|1>  one per open app/tab, TTL 75s  value {s,t,ts}   (3 phones = 3 keys, even behind one Wi-Fi)
+//   d:<dayIdx>:<visitorId>      TTL 8 days   unique visitor per UTC day (Active Today + the 7-day chart)
+//   v:<visitorId>               TTL 7 days   "seen this week"        m:<visitorId>  TTL 30 days
 const AN_SRC = { bot: "b", bot_mini_app: "b", app: "p", pwa_installed: "p", web: "w", browser: "w" };
+const AN_ID = /^[a-z0-9]{6,24}$/;
 async function analyticsPing(request, env) {
   const nope = new Response(null, { status: 204 });
   if (!env.BOT_USERS) return nope;
@@ -905,35 +907,29 @@ async function analyticsPing(request, env) {
   try { b = await request.json(); } catch (e) {}
   const src = AN_SRC[b.source] || "w";
   const st = b.streaming === true ? 1 : 0;
-  const h = await anHash(env, request);
   const now = Date.now();
   const dayIdx = Math.floor(now / 86400000);
-  const m = anMemo.get(h) || {};
+  let vid = AN_ID.test(String(b.vid || "")) ? String(b.vid) : "";
+  if (!vid) vid = await anHash(env, request);          // old clients: fall back to a salted IP hash
+  const sid = AN_ID.test(String(b.sid || "")) ? String(b.sid) : vid;
   const jobs = [];
-  const lk = "live_" + h + "_" + src;
-  if (m.lk !== lk || !m.live || now - m.live > 45000) {
-    m.lk = lk; m.live = now;
-    jobs.push(env.BOT_USERS.put(lk, "1", { expirationTtl: 180 }));
+  const ms = anMemo.get("s" + sid) || {};
+  const sk = "s:" + sid + ":" + src + st;
+  if (ms.k !== sk || now - ms.at > 45000) {
+    jobs.push(env.BOT_USERS.put(sk, JSON.stringify({ s: src, t: st, ts: now }), { expirationTtl: 75 }));
+    if (ms.k && ms.k !== sk) jobs.push(env.BOT_USERS.delete(ms.k));
+    else if (!ms.k && b.edge === true) jobs.push(env.BOT_USERS.delete("s:" + sid + ":" + src + (1 - st)));
+    ms.k = sk; ms.at = now;
   }
-  if (st) {
-    if (!m.lst || m.st !== 1 || now - m.lst > 45000) { m.lst = now; jobs.push(env.BOT_USERS.put("lst_" + h, "1", { expirationTtl: 180 })); }
-  } else if (m.st === 1 || (m.st === undefined && b.edge === true)) {
-    m.lst = 0; jobs.push(env.BOT_USERS.delete("lst_" + h));
+  capSet(anMemo, "s" + sid, ms, 1000);
+  const mv = anMemo.get("v" + vid) || {};
+  if (mv.day !== dayIdx) {
+    mv.day = dayIdx;
+    jobs.push(env.BOT_USERS.put("d:" + dayIdx + ":" + vid, "1", { expirationTtl: 691200 }));
+    jobs.push(env.BOT_USERS.put("v:" + vid, "1", { expirationTtl: 604800 }));
+    jobs.push(env.BOT_USERS.put("m:" + vid, "1", { expirationTtl: 2592000 }));
   }
-  m.st = st;
-  if (!m.day || now - m.day > 82800000) {
-    m.day = now;
-    jobs.push((async () => { if (!(await env.BOT_USERS.get("day_" + h))) await env.BOT_USERS.put("day_" + h, "1", { expirationTtl: 86400 }); })());
-  }
-  if (m.wk !== dayIdx) {
-    m.wk = dayIdx;
-    jobs.push(env.BOT_USERS.put("wk_" + dayIdx + "_" + h, "1", { expirationTtl: 691200 }));
-  }
-  if (m.mon !== dayIdx) {
-    m.mon = dayIdx;
-    jobs.push(env.BOT_USERS.put("mon_" + h, "1", { expirationTtl: 2592000 }));
-  }
-  capSet(anMemo, h, m, 500);
+  capSet(anMemo, "v" + vid, mv, 1000);
   if (now - anLastVisit > 120000) { anLastVisit = now; jobs.push(env.BOT_USERS.put("cfg:lastvisit", String(now))); }
   try { await Promise.all(jobs); } catch (e) {}
   if (now - anLastRoll > 600000) { anLastRoll = now; try { await analyticsRoll(env); } catch (e) {} }
@@ -945,7 +941,7 @@ async function analyticsRoll(env, liveCount, dayCount) {
   let agg = {};
   try { agg = JSON.parse((await env.BOT_USERS.get("agg")) || "{}") || {}; } catch (e) {}
   if (!liveCount && agg.t && now - agg.t < 540000) return agg;
-  if (liveCount == null) liveCount = (await anList(env, "live_")).length;
+  if (liveCount == null) liveCount = await anCount(env, "s:");
   const slot = Math.floor(now / 600000);
   const s = Array.isArray(agg.s) && agg.s.length === 144 ? agg.s : new Array(144).fill(0);
   if (agg.se != null) { for (let i = agg.se + 1; i <= Math.min(slot, agg.se + 144); i++) s[i % 144] = 0; }
@@ -953,44 +949,43 @@ async function analyticsRoll(env, liveCount, dayCount) {
   const dayIdx = Math.floor(now / 86400000);
   const d = Array.isArray(agg.d) && agg.d.length === 7 ? agg.d : new Array(7).fill(0);
   if (agg.de != null) { for (let i = agg.de + 1; i <= Math.min(dayIdx, agg.de + 7); i++) d[i % 7] = 0; }
-  if (dayCount == null && (!agg.dt || now - agg.dt > 3600000)) dayCount = (await anList(env, "day_")).length;
+  if (dayCount == null && (!agg.dt || now - agg.dt > 3600000)) dayCount = await anCount(env, "d:" + dayIdx + ":");
   if (dayCount != null) { d[dayIdx % 7] = Math.max(d[dayIdx % 7] || 0, dayCount); agg.dt = now; }
   const out = { s, se: slot, d, de: dayIdx, dt: agg.dt || 0, t: now };
   await env.BOT_USERS.put("agg", JSON.stringify(out));
   return out;
 }
 async function analyticsStats(env) {
-  const breakdown0 = () => ({ streaming: 0, bot: 0, app: 0, web: 0 });
-  const empty = { active: null, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, breakdown: breakdown0(), hours: [], days: [] };
+  const empty = { active: null, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, breakdown: { streaming: 0, bot: 0, app: 0, web: 0 }, hours: [], days: [], first: 0 };
   if (!env.BOT_USERS) return empty;
-  if (anStatsCache && Date.now() - anStatsAt < 25000) return anStatsCache;
+  if (anStatsCache && Date.now() - anStatsAt < 10000) return anStatsCache;
   try {
     const nowMs = Date.now();
     const dayIdx = Math.floor(nowMs / 86400000);
-    const [live, lst, day, wk, mon] = await Promise.all([anList(env, "live_"), anList(env, "lst_"), anList(env, "day_"), anList(env, "wk_"), anList(env, "mon_")]);
-    const hid = (k, pre) => k.name.slice(pre.length, pre.length + 16);
-    const liveSrc = new Map();   // hash -> source (bot beats app beats web when one person has several tabs)
-    const rank = { b: 3, p: 2, w: 1 };
-    live.forEach((k) => {
-      const hh = hid(k, "live_"), sc = k.name.length > 5 + 17 ? k.name.slice(5 + 17, 5 + 18) : "w";
-      const cur = liveSrc.get(hh);
-      if (!cur || (rank[sc] || 1) > (rank[cur] || 1)) liveSrc.set(hh, sc);
+    const out = { ...empty, first: dayIdx - 6, days: [0, 0, 0, 0, 0, 0, 0] };
+    const seen = new Set();            // one entry per active session id (tiny strings, bounded by who is online)
+    const tally = anEach(env, "s:", (name) => {
+      const c = name.lastIndexOf(":");
+      const sid = name.slice(2, c), tail = name.slice(c + 1);
+      if (seen.has(sid)) return;
+      seen.add(sid);
+      if (out.src[tail[0]] != null) out.src[tail[0]]++;
+      if (tail[1] === "1") out.streaming++;
     });
-    const today = new Set(day.map((k) => hid(k, "day_")));
-    const week = new Set(today);                       // This Week always includes everyone seen today
-    wk.forEach((k) => { const parts = k.name.split("_"); const d = Number(parts[1]); if (dayIdx - d < 7 && parts[2]) week.add(parts[2]); });
-    liveSrc.forEach((_, hh) => { today.add(hh); week.add(hh); });
-    const month = new Set(week);
-    mon.forEach((k) => month.add(hid(k, "mon_")));
-    const out = { ...empty, active: month.size, today: today.size, week: week.size, now: liveSrc.size };
-    liveSrc.forEach((sc) => { if (out.src[sc] != null) out.src[sc]++; });
-    lst.forEach((k) => { if (liveSrc.has(hid(k, "lst_"))) out.streaming++; });
+    const dayT = anEach(env, "d:", (name) => {
+      const d = Number(name.slice(2, name.indexOf(":", 2))), i = d - (dayIdx - 6);
+      if (i >= 0 && i < 7) out.days[i]++;
+    });
+    const [, , wk, mo] = await Promise.all([tally, dayT, anCount(env, "v:"), anCount(env, "m:")]);
+    out.now = seen.size;
+    out.today = out.days[6];
+    out.week = Math.max(wk, out.today);            // This Week can never be lower than Active Today
+    out.active = Math.max(mo, out.week);
     out.breakdown = { streaming: out.streaming, bot: out.src.b, app: out.src.p, web: out.src.w };
     out.lastVisit = Number(await env.BOT_USERS.get("cfg:lastvisit")) || 0;
-    const agg = await analyticsRoll(env, liveSrc.size, today.size);
+    const agg = await analyticsRoll(env, out.now, out.today);
     const slot = Math.floor(nowMs / 600000);
     for (let i = 143; i >= 0; i--) out.hours.push(slot - i > agg.se ? 0 : agg.s[(slot - i) % 144] || 0);
-    for (let i = 6; i >= 0; i--) out.days.push(dayIdx - i > agg.de ? 0 : agg.d[(dayIdx - i) % 7] || 0);
     anStatsCache = out; anStatsAt = nowMs;
     return out;
   } catch (e) { return empty; }
@@ -3468,6 +3463,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     var hls = null, relayed = false, retried = false, hideT = null, saveT = null, seeking = false, closed = false, ambT = null, finished = false, adActive = false, adcfg = null, midAt = 0, midDone = false, midPlanned = false, prefetch = null, startAt = ctx ? ctx.resumeAt : 0;
 
     if (root.parentNode !== document.body) document.body.appendChild(root);
+    window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
     var dash = null, menuEl = null, seekAfter = 0, BRI = 1, gestEnd = 0, rate = 1, fitI = 0, mqL = null;
     var dimEl = h("div", "pdim"), hud = h("div", "phud"), hudT = null;
     var amb = document.createElement("canvas");
@@ -3997,7 +3993,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       document.removeEventListener("visibilitychange", onHide);
       window.removeEventListener("pagehide", onHide);
       PLSUBREFRESH = null;
-      setStreaming(false);
+      setStreaming(false); window.__vPlaying = null;
       unlockO(); closeMenu();
       try { if (mqL) { if (mqL.removeEventListener) mqL.removeEventListener("change", mqL._f); else if (mqL.removeListener) mqL.removeListener(mqL._f); } } catch (e) {}
       if (dash) { try { dash.reset(); } catch (e) {} dash = null; }
@@ -4037,14 +4033,28 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     STREAMING = on;
     pingNow(true);
   }
+  function rid() {
+    var a = "", cs = "abcdefghijklmnopqrstuvwxyz0123456789";
+    try { var u = new Uint8Array(12); crypto.getRandomValues(u); for (var i = 0; i < 12; i++) a += cs[u[i] % 36]; }
+    catch (e) { for (var j = 0; j < 12; j++) a += cs[Math.floor(Math.random() * 36)]; }
+    return a;
+  }
+  var VID = "", SID = "";
+  try { VID = localStorage.getItem("boa_vid") || ""; if (!VID) { VID = rid(); localStorage.setItem("boa_vid", VID); } } catch (e) {}
+  try { SID = sessionStorage.getItem("boa_sid") || ""; if (!SID) { SID = rid(); sessionStorage.setItem("boa_sid", SID); } } catch (e) {}
+  if (!VID) VID = rid();
+  if (!SID) SID = VID;
   function pingNow(edge) {
     try {
-      fetch("/api/analytics/ping", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: sourceName(), streaming: !!STREAMING, edge: edge === true }), keepalive: true }).catch(function () {});
+      fetch("/api/analytics/ping", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: sourceName(), streaming: !!STREAMING, edge: edge === true, vid: VID, sid: SID }), keepalive: true }).catch(function () {});
     } catch (e) {}
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", pingNow); else pingNow();
   setInterval(function () { if (document.visibilityState === "visible") pingNow(); }, 60000);
-  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") pingNow(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") { if (window.__vPlaying && window.__vPlaying()) setStreaming(true); else pingNow(); }
+    else setStreaming(false);
+  });
 
   // ---------- themes ----------
   var THEMES = { crimson: ["#e50914", "229,9,20", "#fff"], white: ["#ffffff", "255,255,255", "#000"], ocean: ["#0ea5e9", "14,165,233", "#fff"], emerald: ["#10b981", "16,185,129", "#fff"] };
@@ -5440,11 +5450,18 @@ if (CUR && CUR.auto) {
     chartCard.appendChild(ch1); chartCard.appendChild(cap1);
     chartCard.appendChild(h("p", null, "Last 7 days (unique visitors per day)"));
     chartCard.appendChild(ch2); chartCard.appendChild(cap2);
+    var WD = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     function paintCharts(x) {
-      var hv = x.hours && x.hours.length ? x.hours : [0, 0], dv = x.days && x.days.length ? x.days : [0, 0];
+      var hv = x.hours && x.hours.length ? x.hours : [0, 0], dv = x.days && x.days.length ? x.days : [0, 0, 0, 0, 0, 0, 0];
       ch1.innerHTML = areaSvg(hv); ch2.innerHTML = barsSvg(dv);
+      var f = x.first || 0, bi = 0, lab = '<div style="display:flex;margin-top:4px">';
+      dv.forEach(function (n, i) {
+        if (n > dv[bi]) bi = i;
+        lab += '<span style="flex:1;text-align:center;font-size:11px;color:#a1a1aa">' + WD[new Date((f + i) * 86400000).getUTCDay()].slice(0, 3) + "</span>";
+      });
+      ch2.innerHTML += lab + "</div>";
       cap1.textContent = "Peak " + Math.max.apply(null, hv) + " online";
-      cap2.textContent = "Best day " + Math.max.apply(null, dv) + " visitors";
+      cap2.textContent = dv[bi] > 0 ? "Best day: " + WD[new Date((f + bi) * 86400000).getUTCDay()] + " (" + dv[bi] + " visitors)" : "No visitors yet this week";
     }
     paintCharts(stt);
     put("ov", chartCard);
@@ -5452,7 +5469,7 @@ if (CUR && CUR.auto) {
     if (window.__admPoll) clearInterval(window.__admPoll);
     window.__admPoll = setInterval(function () {
       if (!document.body.contains(live) || document.hidden || ADM_TAB !== "ov") return;
-      adm("/api/admin/analytics").then(function (x) { paintLive(x); paintStats(x); paintCharts(x); }).catch(function () {});
+      adm("/api/admin/metrics").then(function (x) { paintLive(x); paintStats(x); paintCharts(x); }).catch(function () {});
     }, 30000);
     if (!ADM.kv) put("ov", h("div", "acard", "Storage isn't connected, so picks, notices and member stats can't be saved yet."));
 
@@ -6890,7 +6907,7 @@ async function adminRoute(request, url, env) {
   const isPost = request.method === "POST";
 
   try {
-    if (path === "/api/admin/analytics" && !isPost) return json(await analyticsStats(env));
+    if ((path === "/api/admin/metrics" || path === "/api/admin/analytics") && !isPost) return json(await analyticsStats(env));
     if (path === "/api/admin/state" && !isPost) {
       let notice = "";
       let homeMode = "builtin";
