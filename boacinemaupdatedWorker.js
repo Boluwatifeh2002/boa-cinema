@@ -852,6 +852,179 @@ function pwaResponse(path) {
   return null;
 }
 
+
+// ============================================================================
+// VISITOR ANALYTICS: hashed-IP presence keys with TTLs (self-cleaning, no raw IPs, no event logs)
+//   live_<hash>  3 min   -> "Active Now"
+//   day_<hash>   24 h    -> "Active Today"
+//   mon_<hash>   30 days -> "Active Users (30 days)"  (metadata keeps the last-seen day for "This Week")
+//   agg          one small JSON: 144 ten-minute samples (24 h) + 7 daily counts
+// ============================================================================
+const anMemo = new Map();
+let anStatsCache = null, anStatsAt = 0, anLastRoll = 0, anLastVisit = 0;
+async function anHash(env, request) {
+  const ip = request.headers.get("cf-connecting-ip") || (request.headers.get("x-forwarded-for") || "").split(",")[0].trim() || request.headers.get("x-real-ip") || "";
+  const ua = request.headers.get("user-agent") || "";
+  const salt = (env.ANALYTICS_SALT || env.BOT_TOKEN || "boa") + "|" + new Date().toISOString().slice(0, 7);
+  const dig = await crypto.subtle.digest("SHA-256", new TextEncoder().encode((ip || ua || "?") + "|" + salt));
+  return [...new Uint8Array(dig)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function anList(env, prefix) {
+  const out = [];
+  let cursor;
+  for (let i = 0; i < 12; i++) {
+    const page = await env.BOT_USERS.list({ prefix, cursor });
+    for (const k of page.keys) out.push(k);
+    if (page.list_complete || !page.cursor) break;
+    cursor = page.cursor;
+  }
+  return out;
+}
+async function analyticsPing(request, env) {
+  const nope = new Response(null, { status: 204 });
+  if (!env.BOT_USERS) return nope;
+  let b = {};
+  try { b = await request.json(); } catch (e) {}
+  const src = b.source === "bot_mini_app" ? "b" : b.source === "pwa_installed" ? "p" : "w";
+  const st = b.streaming === true ? 1 : 0;
+  const h = await anHash(env, request);
+  const now = Date.now();
+  const dayIdx = Math.floor(now / 86400000);
+  const m = anMemo.get(h) || {};
+  const jobs = [];
+  if (!m.live || now - m.live > 45000 || m.st !== st) {
+    m.live = now; m.st = st;
+    jobs.push(env.BOT_USERS.put("live_" + h, "1", { expirationTtl: 180, metadata: { s: src, t: st } }));
+  }
+  if (!m.day || now - m.day > 82800000) {
+    m.day = now;
+    jobs.push((async () => { if (!(await env.BOT_USERS.get("day_" + h))) await env.BOT_USERS.put("day_" + h, "1", { expirationTtl: 86400 }); })());
+  }
+  if (m.mon !== dayIdx) {
+    m.mon = dayIdx;
+    jobs.push(env.BOT_USERS.put("mon_" + h, "1", { expirationTtl: 2592000, metadata: { d: dayIdx } }));
+  }
+  anMemo.set(h, m);
+  if (anMemo.size > 4000) anMemo.delete(anMemo.keys().next().value);
+  if (now - anLastVisit > 120000) { anLastVisit = now; jobs.push(env.BOT_USERS.put("cfg:lastvisit", String(now))); }
+  try { await Promise.all(jobs); } catch (e) {}
+  if (now - anLastRoll > 600000) { anLastRoll = now; try { await analyticsRoll(env); } catch (e) {} }
+  return nope;
+}
+// fixed-size history: 144 x 10-minute "active now" peaks and 7 daily "active today" counts
+async function analyticsRoll(env, liveCount, dayCount) {
+  const now = Date.now();
+  let agg = {};
+  try { agg = JSON.parse((await env.BOT_USERS.get("agg")) || "{}") || {}; } catch (e) {}
+  if (!liveCount && agg.t && now - agg.t < 540000) return agg;
+  if (liveCount == null) liveCount = (await anList(env, "live_")).length;
+  const slot = Math.floor(now / 600000);
+  const s = Array.isArray(agg.s) && agg.s.length === 144 ? agg.s : new Array(144).fill(0);
+  if (agg.se != null) { for (let i = agg.se + 1; i <= Math.min(slot, agg.se + 144); i++) s[i % 144] = 0; }
+  s[slot % 144] = Math.max(agg.se === slot ? s[slot % 144] : 0, liveCount);
+  const dayIdx = Math.floor(now / 86400000);
+  const d = Array.isArray(agg.d) && agg.d.length === 7 ? agg.d : new Array(7).fill(0);
+  if (agg.de != null) { for (let i = agg.de + 1; i <= Math.min(dayIdx, agg.de + 7); i++) d[i % 7] = 0; }
+  if (dayCount == null && (!agg.dt || now - agg.dt > 3600000)) dayCount = (await anList(env, "day_")).length;
+  if (dayCount != null) { d[dayIdx % 7] = Math.max(d[dayIdx % 7] || 0, dayCount); agg.dt = now; }
+  const out = { s, se: slot, d, de: dayIdx, dt: agg.dt || 0, t: now };
+  await env.BOT_USERS.put("agg", JSON.stringify(out));
+  return out;
+}
+async function analyticsStats(env) {
+  const empty = { active: null, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, hours: [], days: [] };
+  if (!env.BOT_USERS) return empty;
+  if (anStatsCache && Date.now() - anStatsAt < 25000) return anStatsCache;
+  try {
+    const nowMs = Date.now();
+    const dayIdx = Math.floor(nowMs / 86400000);
+    const [live, day, mon] = await Promise.all([anList(env, "live_"), anList(env, "day_"), anList(env, "mon_")]);
+    const out = { ...empty, active: mon.length, today: day.length, now: live.length };
+    mon.forEach((k) => { const d = k.metadata && k.metadata.d; if (d != null && dayIdx - d < 7) out.week++; });
+    live.forEach((k) => { const md = k.metadata || {}; if (md.t) out.streaming++; if (out.src[md.s] != null) out.src[md.s]++; });
+    out.lastVisit = Number(await env.BOT_USERS.get("cfg:lastvisit")) || 0;
+    const agg = await analyticsRoll(env, live.length, day.length);
+    const slot = Math.floor(nowMs / 600000);
+    for (let i = 143; i >= 0; i--) out.hours.push(slot - i > agg.se ? 0 : agg.s[(slot - i) % 144] || 0);
+    for (let i = 6; i >= 0; i--) out.days.push(dayIdx - i > agg.de ? 0 : agg.d[(dayIdx - i) % 7] || 0);
+    anStatsCache = out; anStatsAt = nowMs;
+    return out;
+  } catch (e) { return empty; }
+}
+
+
+// ============================================================================
+// VAST ADS: tag is kept in KV (cfg:ads); the Worker fetches + parses VAST (wrappers included) so the browser never needs CORS access
+// ============================================================================
+const ADS_DEFAULT = { on: false, tag: "", midTag: "", pre: true, mid: true, skip: 5, movie: [35, 40], tv: [20, 25] };
+async function getAds(env) {
+  let c = {};
+  try { if (env.BOT_USERS) c = JSON.parse((await env.BOT_USERS.get("cfg:ads")) || "{}") || {}; } catch (e) {}
+  return { ...ADS_DEFAULT, ...c };
+}
+function adNum(v, lo, hi, d) { const n = Number(v); return isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; }
+function cleanAds(b) {
+  const tag = String(b.tag || "").trim(), midTag = String(b.midTag || "").trim();
+  const ok = (u) => !u || /^https:\/\/[^\s"'<>]{8,2000}$/i.test(u);
+  if (!ok(tag) || !ok(midTag)) return null;
+  const rng = (a, d) => { const x = adNum(a && a[0], 1, 600, d[0]), y = adNum(a && a[1], 1, 600, d[1]); return [Math.min(x, y), Math.max(x, y)]; };
+  return { on: !!b.on, tag, midTag, pre: b.pre !== false, mid: b.mid !== false, skip: adNum(b.skip, 0, 30, 5), movie: rng(b.movie, [35, 40]), tv: rng(b.tv, [20, 25]) };
+}
+function adMacros(tag, request) {
+  const ip = (request && (request.headers.get("cf-connecting-ip") || (request.headers.get("x-forwarded-for") || "").split(",")[0].trim())) || "";
+  const ua = (request && request.headers.get("user-agent")) || "";
+  const ts = String(Date.now());
+  return tag
+    .replace(/\[(CACHEBUSTER|TIMESTAMP|RANDOM)\]|\{\{?(CACHEBUSTER|TIMESTAMP|RANDOM)\}?\}/gi, ts)
+    .replace(/\[IP\]|\{\{?IP\}?\}/gi, encodeURIComponent(ip))
+    .replace(/\[UA\]|\{\{?UA\}?\}/gi, encodeURIComponent(ua));
+}
+function xmlText(v) { return String(v || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/&amp;/g, "&").trim(); }
+function xmlAttr(attrs, name) { const m = new RegExp(name + '\\s*=\\s*"([^"]*)"', "i").exec(attrs || ""); return m ? m[1] : ""; }
+function vastSecs(t) { const m = /(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(t || ""); return m ? +m[1] * 3600 + +m[2] * 60 + +m[3] : 0; }
+async function fetchVast(tag, request, depth, acc) {
+  acc = acc || { imp: [], trk: {}, click: [], clickTrk: [] };
+  const ip = (request && (request.headers.get("cf-connecting-ip") || (request.headers.get("x-forwarded-for") || "").split(",")[0].trim())) || "";
+  const headers = { accept: "application/xml,text/xml,*/*", "user-agent": (request && request.headers.get("user-agent")) || "Mozilla/5.0" };
+  if (ip) headers["x-forwarded-for"] = ip;
+  const r = await fetch(adMacros(tag, request), { headers, signal: AbortSignal.timeout(6000), redirect: "follow" });
+  if (!r.ok) throw new Error("ad server answered " + r.status);
+  const xml = await r.text();
+  if (xml.length > 600000) throw new Error("VAST too large");
+  if (!/<VAST\b/i.test(xml)) throw new Error("not a VAST response");
+  let m;
+  const imp = /<Impression\b[^>]*>([\s\S]*?)<\/Impression>/gi;
+  while ((m = imp.exec(xml))) { const u = xmlText(m[1]); if (/^https?:/i.test(u)) acc.imp.push(u); }
+  const trk = /<Tracking\b([^>]*)>([\s\S]*?)<\/Tracking>/gi;
+  while ((m = trk.exec(xml))) { const ev = xmlAttr(m[1], "event"), u = xmlText(m[2]); if (ev && /^https?:/i.test(u)) (acc.trk[ev] = acc.trk[ev] || []).push(u); }
+  const ct = /<ClickTracking\b[^>]*>([\s\S]*?)<\/ClickTracking>/gi;
+  while ((m = ct.exec(xml))) { const u = xmlText(m[1]); if (/^https?:/i.test(u)) acc.clickTrk.push(u); }
+  const er = /<Error\b[^>]*>([\s\S]*?)<\/Error>/gi;
+  while ((m = er.exec(xml))) { const u = xmlText(m[1]); if (/^https?:/i.test(u)) (acc.trk.error = acc.trk.error || []).push(u); }
+  const wrap = /<VASTAdTagURI\b[^>]*>([\s\S]*?)<\/VASTAdTagURI>/i.exec(xml);
+  if (wrap) {
+    if (depth >= 4) throw new Error("too many wrapper redirects");
+    return fetchVast(xmlText(wrap[1]), request, depth + 1, acc);
+  }
+  const files = [];
+  const mf = /<MediaFile\b([^>]*)>([\s\S]*?)<\/MediaFile>/gi;
+  while ((m = mf.exec(xml))) {
+    const type = xmlAttr(m[1], "type");
+    let u = xmlText(m[2]);
+    if (!/^https?:/i.test(u) || !/^video\/(mp4|webm)/i.test(type)) continue;
+    u = u.replace(/^http:/i, "https:");
+    files.push({ url: u, type, w: Number(xmlAttr(m[1], "width")) || 0 });
+  }
+  if (!files.length) throw new Error("no playable video file in the ad (needs MP4 or WebM)");
+  files.sort((a, b) => Math.abs((a.w || 640) - 640) - Math.abs((b.w || 640) - 640) + ((/mp4/i.test(b.type) ? 1 : 0) - (/mp4/i.test(a.type) ? 1 : 0)) * 1000);
+  const dur = /<Duration>\s*([\d:.]+)\s*<\/Duration>/i.exec(xml);
+  const click = /<ClickThrough\b[^>]*>([\s\S]*?)<\/ClickThrough>/i.exec(xml);
+  return {
+    media: files[0].url, type: files[0].type, duration: vastSecs(dur && dur[1]),
+    imp: acc.imp.slice(0, 20), trk: acc.trk, click: click && /^https?:/i.test(xmlText(click[1])) ? xmlText(click[1]) : "", clickTrk: acc.clickTrk.slice(0, 10),
+  };
+}
+
 const ACTIVE_DAYS = 30;
 let usersCache = { n: null, at: 0 };
 
@@ -2014,6 +2187,17 @@ async function handleApi(url, env, request) {
       if (!/^\d{1,9}$/.test(id)) return send([], 200, "no-store");
       return send(await findSubs(env, mt, id, url.searchParams.get("s"), url.searchParams.get("e")), 200, "no-store");
     }
+    if (path === "/api/ads/config") {
+      const a = await getAds(env);
+      return send({ on: !!(a.on && a.tag), pre: a.pre, mid: a.mid, skip: a.skip, movie: a.movie, tv: a.tv }, 200, "no-store");
+    }
+    if (path === "/api/ads/vast") {
+      const a = await getAds(env);
+      const tag = url.searchParams.get("kind") === "mid" && a.midTag ? a.midTag : a.tag;
+      if (!a.on || !tag) return send({ ad: null }, 200, "no-store");
+      try { return send({ ad: await fetchVast(tag, request, 0) }, 200, "no-store"); }
+      catch (e) { return send({ ad: null, why: String((e && e.message) || e).slice(0, 120) }, 200, "no-store"); }
+    }
     if (path === "/api/relay-sign") {
       const u = url.searchParams.get("u") || "";
       if (!relayAllowed(u)) return send({ error: "bad link" }, 400, "no-store");
@@ -2470,6 +2654,27 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .pmsg{position:absolute;left:24px;right:24px;top:50%;transform:translateY(-50%);text-align:center;font-size:15px;font-weight:700;z-index:2;display:none;line-height:1.5}
 #player .pmsg.on{display:block}
 @media (max-width:480px){#player .pvol{display:none}#player .ptime{font-size:12px;margin-left:4px}}
+
+.livecard{margin:0 16px 12px;background:linear-gradient(160deg,#10231a,#0d1a14);border:1px solid #1f4d36;border-radius:16px;padding:14px 16px;display:flex;align-items:center;gap:14px}
+.livedot{width:12px;height:12px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 0 rgba(34,197,94,.7);animation:livepulse 1.8s infinite;flex:none}
+@keyframes livepulse{70%{box-shadow:0 0 0 10px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+.livecard b{font-size:34px;font-weight:800;letter-spacing:-1px;color:#4ade80}
+.livetxt{display:flex;flex-direction:column;gap:2px}
+.livetxt span{font-size:14px;font-weight:800}
+.livetxt em{font-style:normal;font-size:11px;color:#86efac}
+.chart{margin:4px 0 2px}
+.adlab{display:flex;flex-direction:column;gap:6px;margin:12px 0;font-size:13px;color:var(--muted);font-weight:700}
+.adlab .arow2{align-items:center;color:var(--text)}
+#player .padbox{position:absolute;inset:0;z-index:6;background:#000}
+#player .padbox video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+#player .adtag{position:absolute;top:calc(var(--sat) + 14px);left:14px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.35);border-radius:8px;padding:5px 10px;font-size:12px;font-weight:800;z-index:7}
+#player .adskip{position:absolute;right:14px;bottom:calc(var(--sab) + 30px);z-index:7;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.6);color:#fff;border-radius:6px;padding:11px 16px;font-size:14px;font-weight:800}
+#player .adskip.ready{background:#fff;color:#000}
+#player .adlearn{position:absolute;left:14px;bottom:calc(var(--sab) + 30px);z-index:7;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.35);color:#fff;border-radius:6px;padding:11px 16px;font-size:13px;font-weight:700}
+#player .adbar{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.25);z-index:7}
+#player .adbar i{display:block;height:100%;width:0;background:#facc15}
+#player .adclose{position:absolute;top:calc(var(--sat) + 8px);right:8px;z-index:7;background:none;border:0;width:44px;height:44px;padding:8px}
+#player.adon .ptop,#player.adon .pbot{display:none}
 @media (min-width:720px){
   html{background:#000}
   body{max-width:560px;margin:0 auto;background:var(--bg);min-height:100vh;box-shadow:0 0 0 1px #1b1b1d,0 0 80px rgba(var(--accent-rgb),.08)}
@@ -3125,7 +3330,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     root.className = "open";
     document.body.style.overflow = "hidden";
     try { if (tg && tg.expand) tg.expand(); } catch (e) {}
-    var hls = null, relayed = false, retried = false, hideT = null, saveT = null, seeking = false, closed = false, ambT = null, finished = false;
+    var hls = null, relayed = false, retried = false, hideT = null, saveT = null, seeking = false, closed = false, ambT = null, finished = false, adActive = false, adcfg = null, midAt = 0, midDone = false, midPlanned = false, prefetch = null, startAt = ctx ? ctx.resumeAt : 0;
 
     var amb = document.createElement("canvas");
     amb.className = "pamb"; amb.width = 32; amb.height = 18;
@@ -3233,8 +3438,123 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
         relaySign(src0).then(go);
       } else go(src0);
     }
-    if (/\.m3u8(\?|$)/i.test(url)) loadHls(function () { startSource(url, false); });
-    else startSource(url, false);
+    // ----- VAST ads (pre-roll, mid-roll) -----
+    function pixel(u) { try { var im = new Image(); im.src = String(u).replace(/\[(CACHEBUSTER|TIMESTAMP|RANDOM)\]/gi, String(Date.now())); } catch (e) {} }
+    function fire(list) { (list || []).forEach(pixel); }
+    function getAdCfg(cb) {
+      var done = false;
+      var t = setTimeout(function () { if (!done) { done = true; cb({ on: false }); } }, 3000);
+      api("/api/ads/config", 0, 3000).then(function (c) { if (!done) { done = true; clearTimeout(t); cb(c || { on: false }); } }).catch(function () { if (!done) { done = true; clearTimeout(t); cb({ on: false }); } });
+    }
+    function fetchAd(kind) { return api("/api/ads/vast?kind=" + kind, 0, 9000).then(function (r) { return r && r.ad ? r.ad : null; }).catch(function () { return null; }); }
+    function playAd(ad, finish) {
+      var over = false, startedAt = 0, q = { 25: 0, 50: 0, 75: 0 };
+      var box = h("div", "padbox");
+      var av = document.createElement("video");
+      av.setAttribute("playsinline", ""); av.setAttribute("webkit-playsinline", "");
+      av.preload = "auto"; av.volume = +vol.value;
+      box.appendChild(av);
+      var tagEl = h("div", "adtag", "Ad");
+      box.appendChild(tagEl);
+      var bar = h("div", "adbar"), barI = h("i"); bar.appendChild(barI); box.appendChild(bar);
+      var xb = pbtn(PI.x, "Close"); xb.className = "adclose pbtn"; xb.onclick = function () { closeP(); stop(false); }; box.appendChild(xb);
+      var skipSecs = adcfg && adcfg.skip > 0 ? adcfg.skip : 0;
+      var sk = null;
+      if (skipSecs) { sk = h("button", "adskip", "Skip in " + skipSecs); box.appendChild(sk); }
+      if (ad.click) {
+        var lb = h("button", "adlearn", "Learn more");
+        lb.onclick = function () { fire(ad.clickTrk); openLink(ad.click); av.pause(); };
+        box.appendChild(lb);
+      }
+      root.appendChild(box);
+      root.classList.add("adon");
+      adActive = true; STREAMING = false;
+      var guard = setTimeout(function () { if (!startedAt) { fire(ad.trk.error); stop(false); } }, 9000);
+      function stop(skipped) {
+        if (over) return;
+        over = true;
+        clearTimeout(guard);
+        if (skipped === true) fire(ad.trk.skip);
+        else if (skipped === "done") fire(ad.trk.complete);
+        try { av.pause(); av.removeAttribute("src"); av.load(); } catch (e) {}
+        if (box.parentNode) box.parentNode.removeChild(box);
+        root.classList.remove("adon");
+        adActive = false;
+        if (!closed) finish();
+      }
+      if (sk) sk.onclick = function () { if (sk.className.indexOf("ready") > -1) stop(true); };
+      av.addEventListener("playing", function () {
+        spin.className = "pspin";
+        if (startedAt) return;
+        startedAt = Date.now();
+        fire(ad.imp); fire(ad.trk.creativeView); fire(ad.trk.start);
+      });
+      av.addEventListener("timeupdate", function () {
+        var d = av.duration || ad.duration || 0, t = av.currentTime;
+        if (d) barI.style.width = Math.min(100, t / d * 100) + "%";
+        tagEl.textContent = "Ad • " + fmtT(Math.max(0, d - t));
+        if (d) {
+          if (!q[25] && t >= d * 0.25) { q[25] = 1; fire(ad.trk.firstQuartile); }
+          if (!q[50] && t >= d * 0.5) { q[50] = 1; fire(ad.trk.midpoint); }
+          if (!q[75] && t >= d * 0.75) { q[75] = 1; fire(ad.trk.thirdQuartile); }
+        }
+        if (sk) {
+          var left = Math.ceil(skipSecs - t);
+          if (left > 0) sk.textContent = "Skip in " + left; else { sk.textContent = "Skip Ad ▶"; sk.className = "adskip ready"; }
+        }
+      });
+      av.addEventListener("ended", function () { stop("done"); });
+      av.addEventListener("error", function () { fire(ad.trk.error); stop(false); });
+      av.src = ad.media;
+      var pr = av.play();
+      if (pr && pr.catch) pr.catch(function () { av.muted = true; var p2 = av.play(); if (p2 && p2.catch) p2.catch(function () { stop(false); }); });
+    }
+    function runAd(kind, done) {
+      if (closed) return;
+      if (!adcfg || !adcfg.on || (kind === "pre" && !adcfg.pre) || (kind === "mid" && !adcfg.mid)) { done(); return; }
+      spin.className = "pspin on";
+      var pending = kind === "mid" && prefetch ? prefetch : fetchAd(kind);
+      prefetch = null;
+      pending.then(function (ad) {
+        spin.className = "pspin";
+        if (closed) return;
+        if (!ad) { done(); return; }
+        playAd(ad, done);
+      });
+    }
+    function planMid() {
+      if (midPlanned || !adcfg || !adcfg.on || !adcfg.mid) return;
+      var d = v.duration;
+      if (!isFinite(d) || d <= 0) return;
+      midPlanned = true;
+      var mins = d / 60;
+      if (mins < 25) { midDone = true; return; }
+      var rng = mins >= 120 ? adcfg.movie : adcfg.tv;
+      var a = rng[0], b = Math.max(rng[1], rng[0]);
+      midAt = (a + Math.random() * (b - a)) * 60;
+      if (midAt > d - 300) { midDone = true; return; }
+      if (startAt > midAt) midDone = true;
+    }
+    function midCheck() {
+      if (midDone || !midAt || adActive || closed) return;
+      var t = v.currentTime;
+      if (!prefetch && t >= midAt - 15) prefetch = fetchAd("mid");
+      if (t >= midAt) {
+        midDone = true;
+        save(true);               // progress is saved at the exact timestamp before the ad
+        v.pause();
+        adActive = true;          // keeps progress frozen while the ad plays
+        runAd("mid", function () {
+          adActive = false;
+          var pp = v.play(); if (pp && pp.catch) pp.catch(function () {});
+        });
+      }
+    }
+    function beginMain() {
+      if (/\.m3u8(\?|$)/i.test(url)) loadHls(function () { startSource(url, false); });
+      else startSource(url, false);
+    }
+    getAdCfg(function (c) { adcfg = c; runAd("pre", beginMain); });
 
     // ----- state -> UI -----
     function paintPlay() { bPlay.innerHTML = v.paused ? PI.play : PI.pause; bPlay.setAttribute("aria-label", v.paused ? "Play" : "Pause"); }
@@ -3248,21 +3568,23 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
       try { if (v.buffered && v.buffered.length && d) sbuf.style.width = Math.min(100, v.buffered.end(v.buffered.length - 1) / d * 100) + "%"; } catch (e) {}
     }
     function save(force) {
-      if (!ctx || finished || !(v.currentTime > 1)) return;
+      if (!ctx || finished || adActive || !(v.currentTime > 1)) return;
       recordWatch(ctx, v.currentTime, v.duration || 0, !!force);
     }
     v.addEventListener("play", function () { paintPlay(); showCtl(); });
     v.addEventListener("pause", function () { paintPlay(); root.classList.remove("hide"); save(true); });
     v.addEventListener("waiting", function () { spin.className = "pspin on"; });
-    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; });
+    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; STREAMING = !adActive; });
+    v.addEventListener("pause", function () { STREAMING = false; });
     v.addEventListener("canplay", function () { spin.className = "pspin"; });
-    v.addEventListener("timeupdate", paintTime);
+    v.addEventListener("timeupdate", function () { paintTime(); midCheck(); });
     v.addEventListener("progress", paintTime);
     v.addEventListener("durationchange", paintTime);
     v.addEventListener("seeking", function () { if (v.currentTime < (v.duration || 1) * 0.9) finished = false; });
     v.addEventListener("ended", function () { finished = true; if (ctx) recordWatch(ctx, v.duration || 1, v.duration || 1, true); root.classList.remove("hide"); paintPlay(); });
     v.addEventListener("loadedmetadata", function () {
       if (ctx && ctx.resumeAt > 10 && v.duration && ctx.resumeAt < v.duration - 30) { try { v.currentTime = ctx.resumeAt; } catch (e) {} ctx.resumeAt = 0; }
+      planMid();
       applySub();
       paintTime();
     });
@@ -3395,6 +3717,18 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     showCtl();
   }
   var DETAILREF = null;
+
+  // ---------- visitor heartbeat (anonymous; the server hashes the IP) ----------
+  var STREAMING = false;
+  function sourceName() { return inTelegram() ? "bot_mini_app" : (isStandalone() ? "pwa_installed" : "browser"); }
+  function pingNow() {
+    try {
+      fetch("/api/analytics/ping", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: sourceName(), streaming: !!STREAMING }), keepalive: true }).catch(function () {});
+    } catch (e) {}
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", pingNow); else pingNow();
+  setInterval(function () { if (document.visibilityState === "visible") pingNow(); }, 60000);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") pingNow(); });
 
   // ---------- themes ----------
   var THEMES = { crimson: ["#e50914", "229,9,20", "#fff"], white: ["#ffffff", "255,255,255", "#000"], ocean: ["#0ea5e9", "14,165,233", "#fff"], emerald: ["#10b981", "16,185,129", "#fff"] };
@@ -4702,7 +5036,7 @@ if (CUR && CUR.auto) {
     head.appendChild(h("h1", null, "Owner panel"));
     box.appendChild(head);
     var tabBar = h("div", "atabs");
-    [["ov", "Overview"], ["ad", "Add-ons"], ["pl", "Plugins"]].forEach(function (t) {
+    [["ov", "Overview"], ["ad", "Add-ons"], ["pl", "Plugins"], ["ads", "Ads"]].forEach(function (t) {
       var b = h("button", "atab" + (ADM_TAB === t[0] ? " on" : ""), t[1]);
       b.onclick = function () { ADM_TAB = t[0]; showAdmTab(); };
       b.setAttribute("data-tb", t[0]);
@@ -4725,21 +5059,84 @@ if (CUR && CUR.auto) {
       return Math.round(m / 1440) + " d ago";
     }
     var stt = ADM.stats || {};
+    var live = h("div", "livecard");
+    var dot = h("i", "livedot");
+    var liveNum = h("b", null, stt.active == null ? "–" : String(stt.now || 0));
+    var liveTxt = h("div", "livetxt");
+    liveTxt.appendChild(h("span", null, "Active Now"));
+    var liveSub = h("em", null, "");
+    liveTxt.appendChild(liveSub);
+    live.appendChild(dot); live.appendChild(liveNum); live.appendChild(liveTxt);
+    function paintLive(x) {
+      liveNum.textContent = x.active == null ? "–" : String(x.now || 0);
+      var sr = x.src || {};
+      liveSub.textContent = (x.streaming || 0) + " streaming • Bot " + (sr.b || 0) + " • App " + (sr.p || 0) + " • Web " + (sr.w || 0);
+    }
+    paintLive(stt);
+    put("ov", live);
     var c1 = h("div", "stats");
+    var statVals = {};
     [
-      ["M17 20v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M10 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8", stt.active == null ? "\u2013" : fmtN(stt.active), "Active Users", "30 days"],
-      ["M3 12h4l3-9 4 18 3-9h4", stt.active == null ? "\u2013" : fmtN(stt.today || 0), "Active Today", "24 hours"],
-      ["M3 4h18v16H3zM3 10h18M8 2v4M16 2v4", stt.active == null ? "\u2013" : fmtN(stt.week || 0), "This Week", "7 days"],
-      ["M12 6v6l4 2M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20", ago(stt.lastVisit), "Last Visit", "most recent"]
+      ["M17 20v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M10 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8", "active", "Active Users", "30 days"],
+      ["M3 12h4l3-9 4 18 3-9h4", "today", "Active Today", "24 hours"],
+      ["M3 4h18v16H3zM3 10h18M8 2v4M16 2v4", "week", "This Week", "7 days"],
+      ["M12 6v6l4 2M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20", "lastVisit", "Last Visit", "most recent"]
     ].forEach(function (c) {
       var card = h("div", "stat");
       card.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#e50914" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="' + c[0] + '"/></svg>';
-      card.appendChild(h("b", null, c[1]));
+      var val = h("b", null, "");
+      card.appendChild(val);
       card.appendChild(h("span", null, c[2]));
       card.appendChild(h("i", null, c[3]));
+      statVals[c[1]] = val;
       c1.appendChild(card);
     });
+    function paintStats(x) {
+      statVals.active.textContent = x.active == null ? "–" : fmtN(x.active);
+      statVals.today.textContent = x.active == null ? "–" : fmtN(x.today || 0);
+      statVals.week.textContent = x.active == null ? "–" : fmtN(x.week || 0);
+      statVals.lastVisit.textContent = ago(x.lastVisit);
+    }
+    paintStats(stt);
     put("ov", c1);
+    // compact charts (plain SVG, no library)
+    function areaSvg(vals, label) {
+      var W = 320, H = 90, mx = Math.max.apply(null, vals.concat([1]));
+      var step = W / Math.max(1, vals.length - 1);
+      var pts = vals.map(function (v, i) { return (i * step).toFixed(1) + "," + (H - 8 - (v / mx) * (H - 20)).toFixed(1); });
+      return '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" style="width:100%;height:90px;display:block"><defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e50914" stop-opacity=".45"/><stop offset="1" stop-color="#e50914" stop-opacity="0"/></linearGradient></defs><polygon points="0,' + H + " " + pts.join(" ") + " " + W + "," + H + '" fill="url(#ag)"/><polyline points="' + pts.join(" ") + '" fill="none" stroke="#e50914" stroke-width="2" stroke-linejoin="round"/></svg>';
+    }
+    function barsSvg(vals) {
+      var W = 320, H = 90, mx = Math.max.apply(null, vals.concat([1])), bw = W / vals.length;
+      var out = '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" style="width:100%;height:90px;display:block">';
+      vals.forEach(function (v, i) {
+        var bh = Math.max(2, (v / mx) * (H - 22));
+        out += '<rect x="' + (i * bw + 6).toFixed(1) + '" y="' + (H - 6 - bh).toFixed(1) + '" width="' + (bw - 12).toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="5" fill="#e50914" fill-opacity="' + (i === vals.length - 1 ? "1" : ".55") + '"/>';
+      });
+      return out + "</svg>";
+    }
+    var chartCard = h("div", "acard");
+    chartCard.appendChild(h("h3", null, "Activity"));
+    var ch1 = h("div", "chart"), ch2 = h("div", "chart");
+    var cap1 = h("p", null, ""), cap2 = h("p", null, "");
+    chartCard.appendChild(h("p", null, "Last 24 hours (people online, 10-minute peaks)"));
+    chartCard.appendChild(ch1); chartCard.appendChild(cap1);
+    chartCard.appendChild(h("p", null, "Last 7 days (unique visitors per day)"));
+    chartCard.appendChild(ch2); chartCard.appendChild(cap2);
+    function paintCharts(x) {
+      var hv = x.hours && x.hours.length ? x.hours : [0, 0], dv = x.days && x.days.length ? x.days : [0, 0];
+      ch1.innerHTML = areaSvg(hv); ch2.innerHTML = barsSvg(dv);
+      cap1.textContent = "Peak " + Math.max.apply(null, hv) + " online";
+      cap2.textContent = "Best day " + Math.max.apply(null, dv) + " visitors";
+    }
+    paintCharts(stt);
+    put("ov", chartCard);
+    // live refresh every 30s while the Overview is open
+    if (window.__admPoll) clearInterval(window.__admPoll);
+    window.__admPoll = setInterval(function () {
+      if (!document.body.contains(live) || document.hidden || ADM_TAB !== "ov") return;
+      adm("/api/admin/analytics").then(function (x) { paintLive(x); paintStats(x); paintCharts(x); }).catch(function () {});
+    }, 30000);
     if (!ADM.kv) put("ov", h("div", "acard", "Storage isn't connected, so picks, notices and member stats can't be saved yet."));
 
     var c2 = h("div", "acard");
@@ -4827,6 +5224,56 @@ if (CUR && CUR.auto) {
       c3.appendChild(rs);
     }
     put("ov", c3);
+    // ===== ADS TAB (VAST pre-roll and mid-roll) =====
+    var A = ADM.ads || { on: false, tag: "", midTag: "", pre: true, mid: true, skip: 5, movie: [35, 40], tv: [20, 25] };
+    var cAd = h("div", "acard");
+    cAd.appendChild(h("h3", null, "Video ads (VAST)"));
+    cAd.appendChild(h("p", null, "Show a short ad before a stream starts and one in the middle of long videos. Paste the VAST tag from your ad network (for example ExoClick). Ads play inside the player. If an ad fails to load, the video simply starts."));
+    var adOn = !!A.on;
+    var adTog = h("button", "abtn", "");
+    function paintAdTog() { adTog.textContent = "Ads: " + (adOn ? "ON" : "OFF"); adTog.style.background = adOn ? "#16a34a" : ""; adTog.style.color = adOn ? "#fff" : ""; }
+    paintAdTog();
+    adTog.onclick = function () { adOn = !adOn; paintAdTog(); };
+    cAd.appendChild(adTog);
+    function labeled(txt, el) { var w = h("label", "adlab"); w.appendChild(h("span", null, txt)); w.appendChild(el); cAd.appendChild(w); return el; }
+    var tagIn = h("input", "ainp"); tagIn.type = "url"; tagIn.placeholder = "https://... VAST tag URL"; tagIn.value = A.tag || "";
+    labeled("Pre-roll VAST tag", tagIn);
+    var midIn = h("input", "ainp"); midIn.type = "url"; midIn.placeholder = "Optional: separate mid-roll tag (blank = same tag)"; midIn.value = A.midTag || "";
+    labeled("Mid-roll VAST tag (optional)", midIn);
+    function chk(txt, on) {
+      var l = h("label", "achk"), cb = h("input"); cb.type = "checkbox"; cb.checked = on;
+      l.appendChild(cb); l.appendChild(document.createTextNode(txt)); cAd.appendChild(l); return cb;
+    }
+    var preCb = chk("Pre-roll ad before the stream starts", A.pre !== false);
+    var midCb = chk("Mid-roll ad during long videos", A.mid !== false);
+    function num(v) { var n = h("input", "ainp"); n.type = "number"; n.min = "0"; n.value = String(v); n.style.width = "90px"; return n; }
+    var skipIn = num(A.skip);
+    labeled("Skip button appears after (seconds, 0 = no skip)", skipIn);
+    var mvA = num(A.movie[0]), mvB = num(A.movie[1]), tvA = num(A.tv[0]), tvB = num(A.tv[1]);
+    var rowM = h("div", "arow2"); rowM.appendChild(mvA); rowM.appendChild(h("span", null, "to")); rowM.appendChild(mvB); rowM.appendChild(h("span", null, "min"));
+    var wM = h("label", "adlab"); wM.appendChild(h("span", null, "Movies (2 hours or longer): mid-roll between")); wM.appendChild(rowM); cAd.appendChild(wM);
+    var rowT = h("div", "arow2"); rowT.appendChild(tvA); rowT.appendChild(h("span", null, "to")); rowT.appendChild(tvB); rowT.appendChild(h("span", null, "min"));
+    var wT = h("label", "adlab"); wT.appendChild(h("span", null, "Series and other videos 25 min to 2 h: mid-roll between")); wT.appendChild(rowT); cAd.appendChild(wT);
+    cAd.appendChild(h("p", null, "Videos under 25 minutes never get a mid-roll."));
+    var adOut = h("div", "tout");
+    var adSave = h("button", "abtn", "Save ad settings");
+    adSave.onclick = function () {
+      adm("/api/admin/ads", { on: adOn, tag: tagIn.value, midTag: midIn.value, pre: preCb.checked, mid: midCb.checked, skip: +skipIn.value, movie: [+mvA.value, +mvB.value], tv: [+tvA.value, +tvB.value] }).then(function (r) {
+        ADM.ads = r.ads; ADM_TAB = "ads"; toast("Ad settings saved. Live now");
+      }).catch(function (e) { toast("Couldn't save: " + e.message); });
+    };
+    var adTest = h("button", "abtn", "Test ad tag");
+    adTest.onclick = function () {
+      adOut.textContent = "Testing…";
+      adm("/api/admin/ads-test", { tag: tagIn.value }).then(function (r) {
+        adOut.textContent = r.ok ? ("Working: " + r.seconds + "s " + r.type + ", " + r.impressions + " impression pixel(s), " + (r.clickable ? "clickable" : "not clickable") + ". Tracking: " + (r.events.join(", ") || "none")) : ("Problem: " + r.error);
+      }).catch(function (e) { adOut.textContent = "Test failed: " + e.message; });
+    };
+    var adRow = h("div", "arow2"); adRow.appendChild(adSave); adRow.appendChild(adTest);
+    cAd.appendChild(adRow);
+    cAd.appendChild(adOut);
+    put("ads", cAd);
+
     // ===== ADD-ONS TAB (install, inspect, refresh, settings, delete) =====
     function confirmThen(msg, go) {
       if (tg && tg.showConfirm) { try { tg.showConfirm(msg, function (ok) { if (ok) go(); }); return; } catch (e) {} }
@@ -6080,12 +6527,14 @@ async function adminRoute(request, url, env) {
   const isPost = request.method === "POST";
 
   try {
+    if (path === "/api/admin/analytics" && !isPost) return json(await analyticsStats(env));
     if (path === "/api/admin/state" && !isPost) {
       let notice = "";
       let homeMode = "builtin";
       let noticePri = false;
       try { if (env.BOT_USERS) noticePri = (await env.BOT_USERS.get("cfg:notice_pri")) === "1"; } catch (e) {}
-      const stats = await activityStats(env);
+      const stats = await analyticsStats(env);
+      const adsCfg = await getAds(env);
       try { if (env.BOT_USERS) homeMode = (await env.BOT_USERS.get("cfg:homemode")) || "builtin"; } catch (e) {}
       let custom = false;
       let mediaServer = null;
@@ -6105,6 +6554,7 @@ async function adminRoute(request, url, env) {
         homeMode,
         noticePri,
         stats,
+        ads: adsCfg,
         mediaServer,
         plugins: await getPluginRepos(env),
       });
@@ -6224,6 +6674,22 @@ async function adminRoute(request, url, env) {
       await env.BOT_USERS.put("cfg:picks", JSON.stringify(list));
       await bustPicks(url);
       return json({ picks: list, custom: true });
+    }
+    if (path === "/api/admin/ads") {
+      if (!env.BOT_USERS) return json({ error: "Storage isn't connected" }, 400);
+      const c = cleanAds(body || {});
+      if (!c) return json({ error: "Ad tag links must be full https:// URLs" }, 400);
+      if (c.on && !c.tag) return json({ error: "Paste a VAST tag URL before turning ads on" }, 400);
+      await env.BOT_USERS.put("cfg:ads", JSON.stringify(c));
+      return json({ ads: c });
+    }
+    if (path === "/api/admin/ads-test") {
+      const tag = String((body && body.tag) || "").trim();
+      if (!/^https:\/\//i.test(tag)) return json({ ok: false, error: "Paste an https VAST tag URL first" });
+      try {
+        const ad = await fetchVast(tag, request, 0);
+        return json({ ok: true, seconds: Math.round(ad.duration), type: ad.type, impressions: ad.imp.length, events: Object.keys(ad.trk), clickable: !!ad.click, media: ad.media.slice(0, 80) });
+      } catch (e) { return json({ ok: false, error: String((e && e.message) || e).slice(0, 160) }); }
     }
     if (path === "/api/admin/homemode") {
       if (!env.BOT_USERS) return json({ error: "Storage isn't connected" }, 400);
@@ -6361,6 +6827,7 @@ export default {
       APP_URL = `${ORIGIN}/app`;
     }
 
+    if (url.pathname === "/api/analytics/ping" && request.method === "POST") return analyticsPing(request, env);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: ADDON_CORS });
     if (url.pathname.startsWith("/api/admin/")) return adminRoute(request, url, env);
 
