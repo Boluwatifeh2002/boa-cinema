@@ -2710,6 +2710,53 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 </style>
 </head>
 <body>
+<style>
+html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overscroll-behavior:none}
+#bsplash{position:fixed;inset:0;z-index:999999;background:#000;display:flex;align-items:center;justify-content:center;transition:opacity .7s ease;touch-action:none;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+#bsplash.out{opacity:0;pointer-events:none}
+#bsplash .bs-word{position:relative;display:flex;align-items:center;font:900 22vw/1.15 "Helvetica Neue",Helvetica,Arial,sans-serif;letter-spacing:-.04em;isolation:isolate;overflow:hidden;padding:.06em .1em}
+#bsplash .bs-B{color:#E50914;display:inline-block;opacity:0;transform:translateY(-55vh) scale(1.15);animation:bsDrop 1.3s cubic-bezier(.34,1.56,.64,1) .15s forwards,bsGlow 2.4s ease-in-out .5s 2}
+#bsplash .bs-oa{display:inline-block;width:1.2em;overflow:hidden;margin-left:-.02em}
+#bsplash .bs-oa i{display:block;font-style:normal;color:#fff;transform:translateX(-105%);animation:bsOa 1.3s cubic-bezier(.22,1,.36,1) 1.5s forwards}
+#bsplash .bs-shine{position:absolute;top:0;bottom:0;left:0;width:40%;background:linear-gradient(100deg,transparent 0,rgba(255,255,255,.95) 50%,transparent 100%);mix-blend-mode:overlay;transform:translateX(-120%) skewX(-18deg);animation:bsShine 1.3s ease-in-out 2.3s forwards;pointer-events:none}
+#bsplash .bs-halo{position:absolute;width:70vw;height:70vw;max-width:420px;max-height:420px;border-radius:50%;background:radial-gradient(circle,rgba(229,9,20,.28),rgba(229,9,20,0) 65%);opacity:0;animation:bsHalo 2.6s ease-in-out .4s forwards}
+@keyframes bsDrop{0%{opacity:0;transform:translateY(-55vh) scale(1.15)}55%{opacity:1}100%{opacity:1;transform:none}}
+@keyframes bsGlow{0%,100%{text-shadow:0 0 0 rgba(229,9,20,0)}50%{text-shadow:0 0 .35em rgba(229,9,20,.75)}}
+@keyframes bsOa{from{transform:translateX(-105%)}to{transform:none}}
+@keyframes bsShine{from{transform:translateX(-120%) skewX(-18deg)}to{transform:translateX(320%) skewX(-18deg)}}
+@keyframes bsHalo{0%{opacity:0;transform:scale(.7)}40%{opacity:1}100%{opacity:.35;transform:scale(1)}}
+@media (min-width:600px){#bsplash .bs-word{font-size:132px}}
+@media (prefers-reduced-motion:reduce){#bsplash .bs-B{animation-duration:.01s}}
+#profiles{background:#000!important;transition:opacity .45s ease}
+#profiles.fade{opacity:0;pointer-events:none}
+#profiles.open h1{animation:pfUp .6s ease both}
+#profiles.open .pfgrid{animation:pfUp .6s ease .12s both}
+@keyframes pfUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+</style>
+<div id="bsplash" aria-hidden="true"><div class="bs-halo"></div><div class="bs-word"><span class="bs-B">B</span><span class="bs-oa"><i>oa</i></span><span class="bs-shine"></span></div></div>
+<script>
+(function () {
+  var d = document, root = d.documentElement, el = d.getElementById("bsplash");
+  var pwa = false;
+  try { pwa = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true; } catch (e) {}
+  root.className += pwa ? " is-pwa" : " is-web";
+  var seen = false;
+  try { seen = !!sessionStorage.getItem("boa_sp"); sessionStorage.setItem("boa_sp", "1"); } catch (e) {}
+  if (seen) { if (el && el.parentNode) el.parentNode.removeChild(el); window.__boaGate = false; return; }
+  window.__boaGate = true;
+  root.className += " splashlock";
+  window.__boaUnlock = function () { root.className = root.className.replace(/\s*splashlock/g, ""); };
+  var t0 = Date.now(), tries = 0;
+  function finish() {
+    if (typeof window.__boaOpenGate !== "function" && tries++ < 40) { setTimeout(finish, 150); return; }
+    try { if (window.__boaOpenGate) window.__boaOpenGate(); } catch (e) {}
+    el.className = "out";
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 800);
+  }
+  setTimeout(finish, 5500);
+  setTimeout(function () { if (window.__boaUnlock && !window.__boaGateOpen) window.__boaUnlock(); }, 20000);
+})();
+</script>
 <div id="streammodal" role="dialog" aria-label="Streams">
   <div class="shead">
     <h2 id="smtitle">Streams</h2>
@@ -3164,12 +3211,23 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
     refreshAll();
     toast("Watching as " + curProfile().n);
   }
-  function closeProfiles() { $("profiles").className = ""; }
+  var GATE_ON = false;
+  function closeProfiles() {
+    var b = $("profiles");
+    if (GATE_ON) {
+      GATE_ON = false; window.__boaGateOpen = false;
+      b.className = "open fade";
+      if (window.__boaUnlock) window.__boaUnlock();
+      setTimeout(function () { if (b.className.indexOf("fade") > -1) b.className = ""; }, 480);
+      return;
+    }
+    b.className = "";
+  }
   function openProfiles(manage) {
     var box = $("profiles");
     box.textContent = "";
     box.className = "open";
-    box.appendChild(h("h1", null, manage === "edit" ? "Manage profiles" : "Who's watching?"));
+    box.appendChild(h("h1", null, manage === "edit" ? "Manage profiles" : "Who's Watching?"));
     var grid = h("div", "pfgrid");
     PROFILES.forEach(function (p) {
       var b = h("button", "who");
@@ -6101,7 +6159,8 @@ if (CUR && CUR.auto) {
   paintNavAvatar();
   paintSeg();
   loadHome();
-  if (PROFILES.length > 1) openProfiles(false);
+  window.__boaOpenGate = function () { GATE_ON = true; window.__boaGateOpen = true; openProfiles(false); };
+  if (window.__boaGate === false) { /* not a fresh launch: no gate */ }
   api("/api/me", 0).then(function (r) {
     if (r && r.country) { myCC = String(r.country).toUpperCase(); if (tab === "me") renderMe(); }
   }).catch(function () {});
