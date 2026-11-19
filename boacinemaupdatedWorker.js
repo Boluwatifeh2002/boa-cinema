@@ -2545,6 +2545,24 @@ textarea.ainp{min-height:72px;resize:vertical}
 .shead h2{margin:0;font-size:20px;font-weight:800}
 .splayer{width:100%;aspect-ratio:16/9;background:#000;border-radius:16px;overflow:hidden;margin-bottom:16px;display:none}
 .splayer video,.splayer iframe{width:100%;height:100%;border:0}
+
+.srv{background:var(--card);border-radius:16px;padding:14px;margin-bottom:12px;border:1px solid #232328}
+.srvtop{display:flex;align-items:center;gap:12px}
+.srvdot{width:12px;height:12px;border-radius:50%;flex:none}
+.srvtx{flex:1;min-width:0}
+.srvtx b{display:block;font-size:15px;letter-spacing:.2px}
+.srvtx span{display:block;font-size:12.5px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+.srvact{display:flex;gap:8px;flex:none}
+.splaybtn.vlc{background:#2a2a2e;color:#fff}
+.splaybtn.vlcon{background:#ff8800;color:#000}
+.srvhint{font-size:12px;color:#fca5a5;margin-top:10px;line-height:1.4}
+.srvmore{background:none;border:0;color:#a1a1aa;font-size:12.5px;font-weight:700;margin-top:10px;padding:4px 0}
+.srvalts{margin-top:8px;border-top:1px solid #2a2a2e;padding-top:8px}
+.srvalt{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 0}
+.srvalt span{flex:1 1 100%;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.srvalt .splaybtn{padding:7px 14px;font-size:12px}
+.srvalt .note{flex:1 1 100%}
+.srvdisc{font-size:11.5px;color:#71717a;text-align:center;padding:14px 8px 6px;line-height:1.5}
 .sitem{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card);border-radius:14px;padding:13px 15px;margin-bottom:10px}
 .sitem b{display:block;font-size:15px}
 .sitem span{font-size:12.5px;color:var(--muted)}
@@ -2746,7 +2764,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overscroll-behavior:none}
 #bsplash{position:fixed;inset:0;z-index:999999;background:#000;display:flex;align-items:center;justify-content:center;transition:opacity .7s ease;touch-action:none;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
 #bsplash.out{opacity:0;pointer-events:none}
-#bsplash .bs-word{position:relative;display:flex;align-items:center;font:900 22vw/1.15 "Helvetica Neue",Helvetica,Arial,sans-serif;letter-spacing:-.04em;isolation:isolate;overflow:hidden;padding:.06em .1em}
+#bsplash .bs-word{position:relative;display:flex;align-items:center;font:900 22vw/1.15 "Helvetica Neue",Helvetica,Arial,sans-serif;letter-spacing:-.04em;overflow:hidden;padding:.06em .1em}
 #bsplash .bs-B{color:#E50914;display:inline-block;opacity:0;transform:translateY(-55vh) scale(1.15);animation:bsDrop 1.3s cubic-bezier(.34,1.56,.64,1) .15s forwards,bsGlow 2.4s ease-in-out .5s 2}
 #bsplash .bs-oa{display:inline-block;width:1.2em;overflow:hidden;margin-left:-.02em}
 #bsplash .bs-oa i{display:block;font-style:normal;color:#fff;transform:translateX(-105%);animation:bsOa 1.3s cubic-bezier(.22,1,.36,1) 1.5s forwards}
@@ -3939,7 +3957,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       var list = ((ctx && ctx.streams) || []).filter(function (x) { return x && x.url && !/^magnet:/i.test(x.url) && !/\/embed\/|\.html?($|\?)/i.test(x.url); });
       if (list.length < 2) { toast("No other streams available"); return; }
       popMenu("Switch stream", list.slice(0, 40).map(function (x) {
-        return { label: (x.provider || "Plugin") + " • " + (x.quality || "HD") + (x.title ? " • " + String(x.title).slice(0, 40) : ""), on: x.url === url, fn: function () {
+        return { label: x.label || ((x.provider || "Plugin") + " \u2022 " + (x.quality || "HD")), on: x.url === url, fn: function () {
           if (x.url === url) return;
           seekAfter = v.currentTime || 0; url = x.url; relayed = false; retried = false;
           startSource(url, false);
@@ -4802,116 +4820,176 @@ $("smclose").onclick = function () {
           list.appendChild(h("div", "note center", "No stream returned."));
           return;
         }
-        var streamsOrig = streams.slice();
-        if (CUR) CUR.streams = streams;
-        streams.forEach(function (st) {
-          var row = h("div", "sitem");
-          row.setAttribute("data-prov", st.provider || "Plugin");
-          var meta = h("div");
-          meta.appendChild(h("b", null, st.title || "Stream"));
-          meta.appendChild(h("span", null, (st.provider || "Plugin") + " \u2022 " + (st.quality || "HD")));
-          row.appendChild(meta);
-          var btn = h("button", "splaybtn", "Play");
-          btn.onclick = function () {
-  player.style.display = "block";
-  player.textContent = "";
-  if (btn._msg) { btn._msg.remove(); btn._msg = null; }
-  var note = h("div", "note", "");
-  btn._msg = note;
-  meta.appendChild(note);
-  if (!st.url || /^magnet:/i.test(st.url)) {
-    note.textContent = "Torrent result with no direct link. It needs a debrid service.";
-    return;
-  }
-  if (!/\/embed\/|\.html?($|\?)/i.test(st.url)) {
-    note.textContent = "";
-    player.style.display = "none";
-    openPlayer(st.url, st);
-  } else {
-    var ifr = document.createElement("iframe");
-    ifr.src = st.url;
-    ifr.allow = "autoplay; fullscreen; encrypted-media";
-    ifr.setAttribute("allowfullscreen", "");
-    player.appendChild(ifr);
-  }
-  modal.scrollTo({ top: 0, behavior: "smooth" });
-  var w0 = CUR && watchGet(CUR.mt, CUR.id);
-  if (CUR && (!w0 || w0.nx || w0.e !== CUR.e || w0.s !== CUR.s)) recordWatch(CUR, 1, 0, true);
-};
-          row.appendChild(btn);
-          var acts = h("div");
-acts.style.cssText = "display:flex;gap:8px;align-items:center;flex:none";
-acts.appendChild(btn);
-          var rk = streamRank(st);
-if (rk >= 3) {
-  var badge = h("span", null, rk === 9 ? "Torrent (needs debrid)" : "Large file: best in VLC or the app");
-  badge.style.cssText = "display:block;opacity:.7;font-size:12px";
-  meta.appendChild(badge);
-}
-var vb = h("button", "splaybtn", "VLC");
-vb.style.marginLeft = "8px";
-vb.onclick = function () {
-  var u = st.url || "";
-  if (RELAY_ON() && u && !vb._r && !/^magnet:/i.test(u)) { relaySign(u).then(function (ru) { st = Object.assign({}, st, { url: ru }); vb._r = 1; vb.onclick(); }); return; }
-  if (!u || /^magnet:/i.test(u)) return;
-  var ua = navigator.userAgent;
-  if (/Android/i.test(ua)) {
-    var sch = /^https:/i.test(u) ? "https" : "http";
-    location.href = "intent://" + u.replace(/^https?:\/\//i, "") + "#Intent;scheme=" + sch + ";package=org.videolan.vlc;type=video/*;end";
-  } else if (/iPhone|iPad|iPod/i.test(ua)) {
-    location.href = "vlc://" + u;
-  } else {
-    var txt = "#EXTM3U\n#EXTINF:-1," + String(st.title || "Stream").replace(/[\r\n]+/g, " ") + "\n" + u + "\n";
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([txt], { type: "audio/x-mpegurl" }));
-    a.download = "stream.m3u";
-    a.click();
-  }
-};
-acts.appendChild(vb);
-row.appendChild(acts);
-          list.appendChild(row);
+        // ---- Provider-to-Server pipeline: score every stream, drop duplicates, show SERVER 1-4 with signal lights ----
+        function fmtOf(x) {
+          var u = String(x.url || ""), t = String(x.title || "") + " " + String(x.name || "");
+          if (!u || /^magnet:/i.test(u)) return "torrent";
+          if (/\/embed\/|\.html?($|\?)/i.test(u)) return "embed";
+          if (/\.m3u8(\?|$)/i.test(u)) return "hls";
+          if (/\.mp4(\?|$)/i.test(u)) return "mp4";
+          if (/\.mkv(\?|$)/i.test(u)) return "mkv";
+          if (/\.avi(\?|$)/i.test(u)) return "avi";
+          if (/\.mpd(\?|$)/i.test(u)) return "dash";
+          if (/\bmkv\b/i.test(t)) return "mkv";
+          return "file";
+        }
+        function sizeGB(x) {
+          var m = /(\d+(?:\.\d+)?)\s?(GB|MB)/i.exec(String(x.title || "") + " " + String(x.size || ""));
+          return m ? (/GB/i.test(m[2]) ? +m[1] : +m[1] / 1024) : 0;
+        }
+        function scoreOf(x) {
+          var f = fmtOf(x), t = String(x.title || "") + " " + String(x.name || "");
+          var heavy = f === "mkv" || f === "avi" || /hevc|x265|h\.?265|remux|dts|ac3|e-?ac-?3|dd\+?5|truehd|atmos|2160p|\b4k\b/i.test(t) || sizeGB(x) > 3;
+          var qm = /(\d{3,4})p/i.exec(String(x.quality || "") + " " + t), q = qm ? +qm[1] : (/4k|uhd/i.test(String(x.quality || "") + t) ? 2160 : 0);
+          var sc = f === "hls" ? 100 : f === "mp4" ? 95 : f === "dash" ? 70 : f === "file" ? 60 : f === "embed" ? 40 : 30;
+          if (heavy) sc = Math.min(sc, 25);
+          sc += q >= 1080 && q < 2160 ? 8 : q >= 720 ? 6 : q >= 480 ? 3 : 0;
+          if (/cam|hdcam|telesync|\bts\b/i.test(t)) sc -= 40;
+          return { f: f, heavy: heavy, q: q, sc: sc };
+        }
+        var pool = [], seenU = {};
+        streams.forEach(function (x) {
+          if (!x || !x.url) return;
+          var sd = scoreOf(x);
+          if (sd.f === "torrent") return;                         // needs a debrid service, never a server
+          var key = String(x.url).replace(/[?#].*$/, "");
+          if (seenU[key]) return;
+          seenU[key] = 1;
+          pool.push({ st: x, sd: sd });
         });
-        var provs = [];
-        function streamRank(s) {
-  var u = String(s.url || ""), t = String(s.title || "");
-  if (!u || /^magnet:/i.test(u)) return 9;
-  var heavy = /hevc|x265|h\.?265|remux|dts|2160p|\b4k\b/i.test(t);
-  if (/\.mp4(\?|$)/i.test(u) && !heavy) return 0;
-  if (/\.m3u8(\?|$)/i.test(u) && !heavy) return 1;
-  if (/\.mkv(\?|$)/i.test(u) || heavy) return 3;
-  return 2;
-}
-streams = streams.slice().sort(function (a, b) { return streamRank(a) - streamRank(b); });
-streams.forEach(function (s) {
-  var p = s.provider || "Plugin";
-  if (provs.indexOf(p) < 0) provs.push(p);
-});
-if (provs.length) {
-  var bar = document.createElement("div");
-  bar.style.cssText = "display:flex;gap:8px;overflow-x:auto;padding:4px 0 10px";
-  ["All"].concat(provs).forEach(function (name) {
-    var c = document.createElement("button");
-    c.textContent = name;
-    c.style.cssText = "flex:none;padding:6px 14px;border-radius:999px;border:0;cursor:pointer;background:#2a2a2e;color:#fff";
-    c.onclick = function () {
-      Array.prototype.forEach.call(bar.children, function (x) { x.style.background = "#2a2a2e"; x.style.color = "#fff"; });
-      c.style.background = "#fff"; c.style.color = "#000";
-      Array.prototype.forEach.call(list.querySelectorAll(".sitem"), function (r) {
-        r.style.display = (name === "All" || r.getAttribute("data-prov") === name) ? "" : "none";
-      });
-    };
-    bar.appendChild(c);
-  });
-  list.insertBefore(bar, list.firstChild);
-}
-if (CUR && CUR.auto) {
-  CUR.auto = false;
-  var bi = -1, br = 99;
-  streamsOrig.forEach(function (x, i) { var rk = streamRank(x); if (x.url && rk < br && rk <= 3) { br = rk; bi = i; } });
-  var rowsEl = list.querySelectorAll(".sitem");
-  if (bi > -1 && rowsEl[bi]) { var pbtn = rowsEl[bi].querySelector(".splaybtn"); if (pbtn) pbtn.click(); }
-}
+        pool.sort(function (a, b) { return b.sd.sc - a.sd.sc; });
+        var light = pool.filter(function (e) { return !e.sd.heavy; });
+        var heavyL = pool.filter(function (e) { return e.sd.heavy; });
+        var servers = [];
+        function take(list, wantNewProv) {
+          var pick = null;
+          for (var k = 0; k < list.length; k++) {
+            var e = list[k];
+            if (e._used) continue;
+            if (!pick) pick = e;
+            if (!wantNewProv || !servers.some(function (sv) { return sv.main.st.provider === e.st.provider; })) { pick = e; break; }
+          }
+          if (pick) pick._used = true;
+          return pick;
+        }
+        for (var n = 0; n < 3; n++) {
+          var e1 = take(light, n > 0);
+          if (!e1) break;
+          servers.push({ main: e1, alts: [], tier: n === 0 && e1.sd.sc >= 90 ? "g" : "y" });
+        }
+        var h1 = take(heavyL, false);
+        if (h1) servers.push({ main: h1, alts: [], tier: "r" });
+        if (!servers.length && heavyL.length) { var h0 = take(heavyL, false); if (h0) servers.push({ main: h0, alts: [], tier: "r" }); }
+        // leftovers become hidden "more links" under the closest server of the same kind
+        pool.forEach(function (e) {
+          if (e._used) return;
+          var targ = null;
+          for (var q = 0; q < servers.length; q++) { if ((servers[q].tier === "r") === e.sd.heavy) { targ = servers[q]; break; } }
+          if (!targ) targ = servers[servers.length - 1];
+          if (targ && targ.alts.length < 12) targ.alts.push(e);
+        });
+        if (!servers.length) {
+          list.appendChild(h("div", "note center", "No playable stream found yet. Try again in a moment, or install a plugin in Add-ons."));
+          return;
+        }
+        var LAB = { g: "Strong / Web Ready", y: ["Backup", "Alt Backup"], r: "Heavy / VLC" };
+        var COL = { g: "#22c55e", y: "#facc15", r: "#ef4444" };
+        function fmtName(sd) { return sd.f === "hls" ? "HLS" : sd.f === "mp4" ? "MP4" : sd.f === "dash" ? "DASH" : sd.f === "embed" ? "Embed" : sd.f.toUpperCase(); }
+        servers.forEach(function (sv, i) {
+          sv.n = i + 1;
+          sv.label = sv.tier === "y" ? (i === 0 ? "Best available" : (i === 1 ? LAB.y[0] : LAB.y[1])) : LAB[sv.tier];
+          sv.main.st.label = "SERVER " + sv.n + " · " + sv.label;
+        });
+        CUR.streams = servers.map(function (sv) { return sv.main.st; });
+        function openVlc(st0) {
+          var u = st0.url || "";
+          if (RELAY_ON() && u && !/^magnet:/i.test(u)) { relaySign(u).then(function (ru) { goVlc(ru, st0); }); return; }
+          goVlc(u, st0);
+        }
+        function goVlc(u, st0) {
+          if (!u || /^magnet:/i.test(u)) return;
+          var ua = navigator.userAgent;
+          if (/Android/i.test(ua)) {
+            var sch = /^https:/i.test(u) ? "https" : "http";
+            location.href = "intent://" + u.replace(/^https?:\/\//i, "") + "#Intent;scheme=" + sch + ";package=org.videolan.vlc;type=video/*;end";
+          } else if (/iPhone|iPad|iPod/i.test(ua)) {
+            location.href = "vlc://" + u;
+          } else {
+            var txt = "#EXTM3U\n#EXTINF:-1," + String(st0.title || "Stream").replace(/[\r\n]+/g, " ") + "\n" + u + "\n";
+            var a = document.createElement("a");
+            a.href = URL.createObjectURL(new Blob([txt], { type: "audio/x-mpegurl" }));
+            a.download = "stream.m3u";
+            a.click();
+          }
+        }
+        function playStream(st0, noteEl) {
+          player.style.display = "block";
+          player.textContent = "";
+          noteEl.textContent = "";
+          if (!/\/embed\/|\.html?($|\?)/i.test(st0.url)) {
+            player.style.display = "none";
+            openPlayer(st0.url, st0);
+          } else {
+            var ifr = document.createElement("iframe");
+            ifr.src = st0.url;
+            ifr.allow = "autoplay; fullscreen; encrypted-media";
+            ifr.setAttribute("allowfullscreen", "");
+            player.appendChild(ifr);
+          }
+          modal.scrollTo({ top: 0, behavior: "smooth" });
+          var w0 = CUR && watchGet(CUR.mt, CUR.id);
+          if (CUR && (!w0 || w0.nx || w0.e !== CUR.e || w0.s !== CUR.s)) recordWatch(CUR, 1, 0, true);
+        }
+        var firstPlay = null;
+        servers.forEach(function (sv) {
+          var card = h("div", "srv");
+          var top = h("div", "srvtop");
+          var dot = h("i", "srvdot"); dot.style.background = COL[sv.tier]; dot.style.boxShadow = "0 0 10px " + COL[sv.tier];
+          var tx = h("div", "srvtx");
+          tx.appendChild(h("b", null, "SERVER " + sv.n + " · " + sv.label));
+          var st = sv.main.st, sd = sv.main.sd;
+          tx.appendChild(h("span", null, (sd.q ? sd.q + "p • " : "") + fmtName(sd) + " • " + (st.provider || "Plugin") + (sd.f === "embed" ? " • opens inline" : "")));
+          var note = h("div", "note", "");
+          tx.appendChild(note);
+          top.appendChild(dot); top.appendChild(tx);
+          var acts = h("div", "srvact");
+          var pb = h("button", "splaybtn", sv.tier === "r" ? "Try" : "Play");
+          pb.onclick = function () { playStream(st, note); };
+          var vb = h("button", sv.tier === "r" ? "splaybtn vlcon" : "splaybtn vlc", "VLC");
+          vb.onclick = function () { openVlc(st); };
+          acts.appendChild(pb); acts.appendChild(vb);
+          top.appendChild(acts);
+          card.appendChild(top);
+          if (sv.tier === "r") card.appendChild(h("div", "srvhint", "Large or non-web format (MKV, HEVC, AC3/DTS). Best in VLC or a capable device."));
+          if (sv.alts.length) {
+            var more = h("button", "srvmore", "More links (" + sv.alts.length + ")");
+            var box = h("div", "srvalts"); box.style.display = "none";
+            more.onclick = function () {
+              var open = box.style.display === "none";
+              box.style.display = open ? "block" : "none";
+              if (open && !box.firstChild) {
+                sv.alts.forEach(function (al) {
+                  var r = h("div", "srvalt");
+                  var tt = h("span", null, (al.st.provider || "Plugin") + " • " + (al.sd.q ? al.sd.q + "p " : "") + fmtName(al.sd) + (al.st.title ? " • " + String(al.st.title).slice(0, 48) : ""));
+                  var nn = h("div", "note", "");
+                  var b1 = h("button", "splaybtn", "Play"); b1.onclick = function () { playStream(al.st, nn); };
+                  var b2 = h("button", "splaybtn vlc", "VLC"); b2.onclick = function () { openVlc(al.st); };
+                  r.appendChild(tt); r.appendChild(b1); r.appendChild(b2); r.appendChild(nn);
+                  box.appendChild(r);
+                });
+              }
+              more.textContent = (open ? "Hide links (" : "More links (") + sv.alts.length + ")";
+            };
+            card.appendChild(more); card.appendChild(box);
+          }
+          list.appendChild(card);
+          if (!firstPlay && sv.tier !== "r") firstPlay = pb;
+        });
+        list.appendChild(h("div", "srvdisc", "Boa Cinema does not host any media files. Streams and metadata come from online sources, TMDB and your installed plugins."));
+        if (CUR && CUR.auto) {
+          CUR.auto = false;
+          if (firstPlay) firstPlay.click();
+        }
       })
       .catch(function (e) {
   clearTimeout(slowT);
