@@ -894,29 +894,44 @@ async function anList(env, prefix) {
   }
   return out;
 }
+// Keys never depend on KV metadata (some KV back-ends drop it): everything is encoded in the key name.
+//   live_<hash>_<b|p|w>  presence, TTL 180s       lst_<hash>  "is streaming", TTL 180s
+//   day_<hash>           TTL 24h                   wk_<dayIdx>_<hash>  TTL 8 days      mon_<hash>  TTL 30 days
+const AN_SRC = { bot: "b", bot_mini_app: "b", app: "p", pwa_installed: "p", web: "w", browser: "w" };
 async function analyticsPing(request, env) {
   const nope = new Response(null, { status: 204 });
   if (!env.BOT_USERS) return nope;
   let b = {};
   try { b = await request.json(); } catch (e) {}
-  const src = b.source === "bot_mini_app" ? "b" : b.source === "pwa_installed" ? "p" : "w";
+  const src = AN_SRC[b.source] || "w";
   const st = b.streaming === true ? 1 : 0;
   const h = await anHash(env, request);
   const now = Date.now();
   const dayIdx = Math.floor(now / 86400000);
   const m = anMemo.get(h) || {};
   const jobs = [];
-  if (!m.live || now - m.live > 45000 || m.st !== st) {
-    m.live = now; m.st = st;
-    jobs.push(env.BOT_USERS.put("live_" + h, "1", { expirationTtl: 180, metadata: { s: src, t: st } }));
+  const lk = "live_" + h + "_" + src;
+  if (m.lk !== lk || !m.live || now - m.live > 45000) {
+    m.lk = lk; m.live = now;
+    jobs.push(env.BOT_USERS.put(lk, "1", { expirationTtl: 180 }));
   }
+  if (st) {
+    if (!m.lst || m.st !== 1 || now - m.lst > 45000) { m.lst = now; jobs.push(env.BOT_USERS.put("lst_" + h, "1", { expirationTtl: 180 })); }
+  } else if (m.st === 1 || (m.st === undefined && b.edge === true)) {
+    m.lst = 0; jobs.push(env.BOT_USERS.delete("lst_" + h));
+  }
+  m.st = st;
   if (!m.day || now - m.day > 82800000) {
     m.day = now;
     jobs.push((async () => { if (!(await env.BOT_USERS.get("day_" + h))) await env.BOT_USERS.put("day_" + h, "1", { expirationTtl: 86400 }); })());
   }
+  if (m.wk !== dayIdx) {
+    m.wk = dayIdx;
+    jobs.push(env.BOT_USERS.put("wk_" + dayIdx + "_" + h, "1", { expirationTtl: 691200 }));
+  }
   if (m.mon !== dayIdx) {
     m.mon = dayIdx;
-    jobs.push(env.BOT_USERS.put("mon_" + h, "1", { expirationTtl: 2592000, metadata: { d: dayIdx } }));
+    jobs.push(env.BOT_USERS.put("mon_" + h, "1", { expirationTtl: 2592000 }));
   }
   capSet(anMemo, h, m, 500);
   if (now - anLastVisit > 120000) { anLastVisit = now; jobs.push(env.BOT_USERS.put("cfg:lastvisit", String(now))); }
@@ -945,18 +960,34 @@ async function analyticsRoll(env, liveCount, dayCount) {
   return out;
 }
 async function analyticsStats(env) {
-  const empty = { active: null, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, hours: [], days: [] };
+  const breakdown0 = () => ({ streaming: 0, bot: 0, app: 0, web: 0 });
+  const empty = { active: null, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, breakdown: breakdown0(), hours: [], days: [] };
   if (!env.BOT_USERS) return empty;
   if (anStatsCache && Date.now() - anStatsAt < 25000) return anStatsCache;
   try {
     const nowMs = Date.now();
     const dayIdx = Math.floor(nowMs / 86400000);
-    const [live, day, mon] = await Promise.all([anList(env, "live_"), anList(env, "day_"), anList(env, "mon_")]);
-    const out = { ...empty, active: mon.length, today: day.length, now: live.length };
-    mon.forEach((k) => { const d = k.metadata && k.metadata.d; if (d != null && dayIdx - d < 7) out.week++; });
-    live.forEach((k) => { const md = k.metadata || {}; if (md.t) out.streaming++; if (out.src[md.s] != null) out.src[md.s]++; });
+    const [live, lst, day, wk, mon] = await Promise.all([anList(env, "live_"), anList(env, "lst_"), anList(env, "day_"), anList(env, "wk_"), anList(env, "mon_")]);
+    const hid = (k, pre) => k.name.slice(pre.length, pre.length + 16);
+    const liveSrc = new Map();   // hash -> source (bot beats app beats web when one person has several tabs)
+    const rank = { b: 3, p: 2, w: 1 };
+    live.forEach((k) => {
+      const hh = hid(k, "live_"), sc = k.name.length > 5 + 17 ? k.name.slice(5 + 17, 5 + 18) : "w";
+      const cur = liveSrc.get(hh);
+      if (!cur || (rank[sc] || 1) > (rank[cur] || 1)) liveSrc.set(hh, sc);
+    });
+    const today = new Set(day.map((k) => hid(k, "day_")));
+    const week = new Set(today);                       // This Week always includes everyone seen today
+    wk.forEach((k) => { const parts = k.name.split("_"); const d = Number(parts[1]); if (dayIdx - d < 7 && parts[2]) week.add(parts[2]); });
+    liveSrc.forEach((_, hh) => { today.add(hh); week.add(hh); });
+    const month = new Set(week);
+    mon.forEach((k) => month.add(hid(k, "mon_")));
+    const out = { ...empty, active: month.size, today: today.size, week: week.size, now: liveSrc.size };
+    liveSrc.forEach((sc) => { if (out.src[sc] != null) out.src[sc]++; });
+    lst.forEach((k) => { if (liveSrc.has(hid(k, "lst_"))) out.streaming++; });
+    out.breakdown = { streaming: out.streaming, bot: out.src.b, app: out.src.p, web: out.src.w };
     out.lastVisit = Number(await env.BOT_USERS.get("cfg:lastvisit")) || 0;
-    const agg = await analyticsRoll(env, live.length, day.length);
+    const agg = await analyticsRoll(env, liveSrc.size, today.size);
     const slot = Math.floor(nowMs / 600000);
     for (let i = 143; i >= 0; i--) out.hours.push(slot - i > agg.se ? 0 : agg.s[(slot - i) % 144] || 0);
     for (let i = 6; i >= 0; i--) out.days.push(dayIdx - i > agg.de ? 0 : agg.d[(dayIdx - i) % 7] || 0);
@@ -3621,7 +3652,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       }
       root.appendChild(box);
       root.classList.add("adon");
-      adActive = true; STREAMING = false;
+      adActive = true; setStreaming(false);
       var guard = setTimeout(function () { if (!startedAt) { fire(ad.trk.error); stop(false); } }, 9000);
       function stop(skipped) {
         if (over) return;
@@ -3727,8 +3758,10 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     v.addEventListener("play", function () { paintPlay(); showCtl(); });
     v.addEventListener("pause", function () { paintPlay(); root.classList.remove("hide"); save(true); });
     v.addEventListener("waiting", function () { spin.className = "pspin on"; });
-    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; STREAMING = !adActive; });
-    v.addEventListener("pause", function () { STREAMING = false; });
+    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; setStreaming(!adActive); });
+    v.addEventListener("pause", function () { setStreaming(false); });
+    v.addEventListener("ended", function () { setStreaming(false); });
+    v.addEventListener("error", function () { setStreaming(false); });
     v.addEventListener("canplay", function () { spin.className = "pspin"; });
     v.addEventListener("timeupdate", function () { paintTime(); midCheck(); });
     v.addEventListener("progress", paintTime);
@@ -3963,6 +3996,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       document.removeEventListener("visibilitychange", onHide);
       window.removeEventListener("pagehide", onHide);
       PLSUBREFRESH = null;
+      setStreaming(false);
       unlockO(); closeMenu();
       try { if (mqL) { if (mqL.removeEventListener) mqL.removeEventListener("change", mqL._f); else if (mqL.removeListener) mqL.removeListener(mqL._f); } } catch (e) {}
       if (dash) { try { dash.reset(); } catch (e) {} dash = null; }
@@ -3989,10 +4023,22 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
 
   // ---------- visitor heartbeat (anonymous; the server hashes the IP) ----------
   var STREAMING = false;
-  function sourceName() { return inTelegram() ? "bot_mini_app" : (isStandalone() ? "pwa_installed" : "browser"); }
-  function pingNow() {
+  function sourceName() {
     try {
-      fetch("/api/analytics/ping", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: sourceName(), streaming: !!STREAMING }), keepalive: true }).catch(function () {});
+      if (inTelegram() || (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData)) return "bot";
+      if (isStandalone() || (window.matchMedia && (window.matchMedia("(display-mode: standalone)").matches || window.matchMedia("(display-mode: fullscreen)").matches)) || window.navigator.standalone === true) return "app";
+    } catch (e) {}
+    return "web";
+  }
+  function setStreaming(on) {
+    on = !!on;
+    if (STREAMING === on) return;
+    STREAMING = on;
+    pingNow(true);
+  }
+  function pingNow(edge) {
+    try {
+      fetch("/api/analytics/ping", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: sourceName(), streaming: !!STREAMING, edge: edge === true }), keepalive: true }).catch(function () {});
     } catch (e) {}
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", pingNow); else pingNow();
