@@ -2273,6 +2273,7 @@ const APP_HTML = String.raw`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="6a97888e-site-verification" content="acee0ca6c8a0ec3ecb19dcc815119b9f">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0a0a0a">
 <link rel="manifest" href="/manifest.webmanifest">
