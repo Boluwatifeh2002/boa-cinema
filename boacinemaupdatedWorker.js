@@ -1571,6 +1571,78 @@ async function getPluginRepos(env) {
     .filter(Boolean);
 }
 
+// ============================================================================
+// MULTI-FORMAT PLUGINS: Nuvio repositories (JS scrapers) + Stremio stream add-ons (HTTP)
+// ============================================================================
+function manifestBase(url) {
+  return String(url || "").replace(/[?#].*$/, "").replace(/\/manifest\.json$/i, "").replace(/\/+$/, "");
+}
+function stremioHasStream(m) {
+  const r = m && Array.isArray(m.resources) ? m.resources : [];
+  return r.some((x) => (typeof x === "string" ? x : x && x.name) === "stream");
+}
+function looksStremio(m) {
+  return !!(m && typeof m === "object" && !Array.isArray(m) && m.id && m.name && Array.isArray(m.resources));
+}
+function hasScrapers(m, url) {
+  const raw = m && (m.scrapers || m.plugins || m.providers);
+  return Array.isArray(raw) && scraperList(m, url).length > 0;
+}
+const IDS_MEMO = new Map();
+async function streamVideoIds(env, mediaType, tmdbId, season, episode) {
+  const ids = [];
+  const suffix = mediaType === "tv" ? ":" + season + ":" + episode : "";
+  let imdb = IDS_MEMO.get(mediaType + tmdbId);
+  if (imdb === undefined) {
+    imdb = await imdbFor(env, mediaType, tmdbId);
+    IDS_MEMO.set(mediaType + tmdbId, imdb);
+    if (IDS_MEMO.size > 500) IDS_MEMO.delete(IDS_MEMO.keys().next().value);
+  }
+  if (imdb) ids.push(imdb + suffix);
+  ids.push("tmdb:" + tmdbId + suffix);
+  return ids;
+}
+function qualityOf(text) {
+  const t = String(text || "");
+  if (/2160p|\b4k\b|\buhd\b/i.test(t)) return "4K";
+  const m = /(1080|720|480|360)p/i.exec(t);
+  return m ? m[1] + "p" : "";
+}
+function normStremio(repo, x) {
+  if (!x || typeof x !== "object") return null;
+  const url = x.url || "";
+  if (!/^https?:\/\//i.test(url)) return null; // torrents/external links can't play in the app
+  const bh = x.behaviorHints || {};
+  const label = [x.name, x.title, x.description, bh.filename].filter(Boolean).join(" ");
+  const first = String(x.title || x.description || x.name || bh.filename || "Stream").split("\n")[0].trim();
+  const out = { title: first.slice(0, 120), url, quality: qualityOf(label), provider: repo.name || "Stremio" };
+  if (bh.videoSize) out.size = bh.videoSize;
+  if (bh.notWebReady) out.notWebReady = true;
+  return out;
+}
+async function stremioStreams(repo, env, mediaType, tmdbId, season, episode, timeoutMs) {
+  const base = repo.base || manifestBase(repo.url);
+  const ids = await streamVideoIds(env, mediaType, tmdbId, season, episode);
+  for (const vid of ids) {
+    try {
+      const r = await fetch(base + "/stream/" + (mediaType === "tv" ? "series" : "movie") + "/" + encodeURIComponent(vid).replace(/%3A/g, ":") + ".json", {
+        headers: { "user-agent": "BoaCinema/1.0" },
+        signal: AbortSignal.timeout(timeoutMs || 9000),
+      });
+      if (!r.ok) continue;
+      const j = await r.json();
+      const list = (Array.isArray(j.streams) ? j.streams : []).map((x) => normStremio(repo, x)).filter(Boolean);
+      if (list.length) return list;
+    } catch (e) {}
+  }
+  return [];
+}
+async function stremioOnly(env, mediaType, tmdbId, season, episode) {
+  const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false && r.kind === "stremio" && !(r.disabled || []).includes("stremio"));
+  const lists = await Promise.all(repos.map((r) => stremioStreams(r, env, mediaType, tmdbId, season, episode, Number(env.SCRAPER_TIMEOUT_MS) || 9000).catch(() => [])));
+  return lists.flat();
+}
+
 async function loadManifest(url, timeoutMs, fresh) {
   const hit = MANIFEST_CACHE.get(url);
   if (!fresh && hit && Date.now() - hit.at < CODE_TTL_MS) return hit.m;
@@ -1636,6 +1708,22 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
     const tasks = [];
     await Promise.all(
       repos.map(async (repo) => {
+        if (repo.kind === "stremio") {
+          if ((repo.disabled || []).includes("stremio")) return;
+          tasks.push(
+            (async () => {
+              const res = await stremioStreams(repo, env, mediaType, tmdbId, season, episode, perScraper).catch(() => []);
+              for (const st of res) {
+                const k = String(st.url);
+                if (seen.has(k)) continue;
+                seen.add(k);
+                bag.push(st);
+              }
+              console.log("Collected " + res.length + " streams from " + (repo.name || repo.url));
+            })()
+          );
+          return;
+        }
         let manifest;
         try {
           manifest = await loadManifest(repo.url, 8000);
@@ -1688,9 +1776,17 @@ function startScrapers(env, tmdbId, mediaType, season, episode, key) {
 }
 
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
-  if (globalThis.__fastStreams) return globalThis.__fastStreams(env, tmdbId, mediaType, season, episode);
   const s = Number(season) || 1;
   const e = Number(episode) || 1;
+  if (globalThis.__fastStreams) {
+    // your faststream.js stays the main path; installed Stremio add-ons run alongside it and get merged in
+    const [fast, extra] = await Promise.all([
+      Promise.resolve(globalThis.__fastStreams(env, tmdbId, mediaType, season, episode)).catch(() => []),
+      withTimeout(stremioOnly(env, mediaType, tmdbId, s, e), (Number(env.SCRAPER_TIMEOUT_MS) || 9000) + 1000, "stremio").catch(() => []),
+    ]);
+    const seenU = new Set();
+    return (Array.isArray(fast) ? fast : []).concat(extra).filter((x) => x && x.url && !seenU.has(x.url) && seenU.add(x.url));
+  }
   const key = [mediaType, tmdbId, mediaType === "tv" ? s : 0, mediaType === "tv" ? e : 0].join(":");
   const cached = STREAM_CACHE.get(key);
   if (cached && Date.now() - cached.at < (cached.list.length ? STREAM_TTL_MS : EMPTY_TTL_MS)) return cached.list;
@@ -1727,6 +1823,14 @@ async function testScraper(env, o) {
   const t0 = Date.now();
   const type = o.type === "tv" ? "tv" : "movie";
   if (!/^https:\/\//i.test(o.url || "")) return { ok: false, error: "This provider has no script link to test." };
+  if (o.kind === "stremio") {
+    try {
+      const list = await stremioStreams({ base: manifestBase(o.url), name: "Stremio" }, env, type, String(o.id), Number(o.s) || 1, Number(o.e) || 1, 15000);
+      return { ok: true, count: list.length, ms: Date.now() - t0, sample: list.slice(0, 5).map((x) => ({ title: x.title, quality: x.quality })) };
+    } catch (err) {
+      return { ok: false, ms: Date.now() - t0, error: String((err && err.message) || err) };
+    }
+  }
   try {
     const fn = await loadScraperFn(o.url, 15000, true);
     const res = await withTimeout(
@@ -1764,11 +1868,17 @@ async function providersPayload(env, fresh) {
   await Promise.all(
     saved.map(async (repo, idx) => {
       const dis = new Set((repo.disabled || []).map(String));
+      if (repo.kind === "stremio") {
+        const base = repo.base || manifestBase(repo.url);
+        repos[idx] = { id: repo.id, name: repo.name || "Stremio add-on", version: repo.version || "", url: repo.url, providerCount: 1, kind: "stremio", forced: !!repo.forced };
+        providers[idx] = [{ id: "stremio", name: repo.name || "Stremio add-on", description: "Stremio stream endpoint", version: repo.version || "", types: "movie | tv", repoId: repo.id, repoName: repo.name, url: base + "/manifest.json", kind: "stremio", enabled: !dis.has("stremio") }];
+        return;
+      }
       try {
         const m = await loadManifest(repo.url, 8000, fresh);
         const items = scraperList(m, repo.url);
         const rname = m.name || repo.name || "Repository";
-        repos[idx] = { id: repo.id, name: rname, version: m.version || "1.0.0", url: repo.url, providerCount: items.length };
+        repos[idx] = { id: repo.id, name: rname, version: m.version || "1.0.0", url: repo.url, providerCount: items.length, kind: "nuvio", forced: !!repo.forced };
         providers[idx] = items.map((p) => {
           const t = p.supportedTypes || p.types;
           const pid = String(p.id || p.name || "");
@@ -1829,6 +1939,7 @@ async function handleApi(url, env, request) {
           id: url.searchParams.get("id") || "550",
           s: url.searchParams.get("s") || 1,
           e: url.searchParams.get("e") || 1,
+          kind: url.searchParams.get("kind") || "",
         });
         return send(r, 200, "no-store");
       }
@@ -4999,6 +5110,17 @@ if (CUR && CUR.auto) {
         var countBadge = h("span", null, (repo.providerCount || 0) + " providers");
         countBadge.style.cssText = "align-self:flex-start;background:#27272a;color:#d4d4d8;font-size:11px;padding:4px 10px;border-radius:6px;margin-top:4px;";
         card.appendChild(countBadge);
+        var kindRow = h("div");
+        kindRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;";
+        var kb = h("span", null, repo.kind === "stremio" ? "Stremio add-on" : "Nuvio repository");
+        kb.style.cssText = "background:#1e293b;color:#93c5fd;font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;";
+        kindRow.appendChild(kb);
+        if (repo.forced) {
+          var fb = h("span", null, "Custom / Forced");
+          fb.style.cssText = "background:#451a03;color:#fbbf24;font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;";
+          kindRow.appendChild(fb);
+        }
+        card.appendChild(kindRow);
 
         nuvioListWrap.appendChild(card);
       });
@@ -5090,7 +5212,7 @@ if (CUR && CUR.auto) {
           go.onclick = function () {
             out.textContent = "Testing… can take up to 20 seconds";
             go.disabled = true;
-            adm("/api/admin/test-provider", { url: p.url, type: sel.value, id: tid.value.trim(), s: 1, e: 1 }).then(function (r) {
+            adm("/api/admin/test-provider", { url: p.url, type: sel.value, id: tid.value.trim(), s: 1, e: 1, kind: p.kind || "" }).then(function (r) {
               out.textContent = "";
               out.appendChild(h("b", null, r.ok ? "Working: " + r.count + " stream(s) in " + (r.ms / 1000).toFixed(1) + "s" : "No result" + (r.ms ? " after " + (r.ms / 1000).toFixed(1) + "s" : "")));
               if (r.error) out.appendChild(h("div", null, r.error));
@@ -5216,17 +5338,23 @@ if (CUR && CUR.auto) {
 
 
       // 2. Render Expanded Providers Section
-    var plName = h("input", "ainp"); plName.placeholder = "Plugin Name";
+    var plName = h("input", "ainp"); plName.placeholder = "Plugin Name (optional)";
     var plUrl = h("input", "ainp"); plUrl.type = "url"; plUrl.placeholder = "Repository URL (https://...)";
     cPl.insertBefore(plName, nuvioListWrap); cPl.insertBefore(plUrl, nuvioListWrap);
+    var plForceLab = h("label", "achk");
+    var plForce = h("input"); plForce.type = "checkbox";
+    plForceLab.appendChild(plForce);
+    plForceLab.appendChild(document.createTextNode("Force Install (save it even if the format isn't recognised)"));
+    cPl.insertBefore(plForceLab, nuvioListWrap);
     var plAdd = h("button", "abtn", "Install Plugin");
     plAdd.onclick = function() {
-      adm("/api/admin/plugins", { action: "add", name: plName.value, url: plUrl.value }).then(function(r) {
+      plAdd.disabled = true;
+      adm("/api/admin/plugins", { action: "add", name: plName.value, url: plUrl.value, force: plForce.checked }).then(function(r) {
         ADM.plugins = r.plugins;
         ADM_TAB = "pl";
         renderAdmin(false);
         toast("Plugin installed");
-      }).catch(function(e) { toast("Error: " + e.message); });
+      }).catch(function(e) { plAdd.disabled = false; toast("Error: " + e.message); });
     };
     cPl.insertBefore(plAdd, nuvioListWrap);
     put("pl", cPl);
@@ -6010,13 +6138,14 @@ async function adminRoute(request, url, env) {
         id: String(body.id || "").replace(/\D/g, "").slice(0, 9) || (body.type === "tv" ? "1399" : "550"),
         s: Number(body.s) || 1,
         e: Number(body.e) || 1,
+        kind: body.kind === "stremio" ? "stremio" : "",
       };
       if (!/^https:\/\//i.test(o.url)) return json({ ok: false, error: "This provider has no script link to test." });
       if (env.STREAM_BACKEND) {
         try {
           const r = await fetch(
             env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-test?u=" + encodeURIComponent(o.url) +
-              "&type=" + o.type + "&id=" + o.id + "&s=" + o.s + "&e=" + o.e,
+              "&type=" + o.type + "&id=" + o.id + "&s=" + o.s + "&e=" + o.e + (o.kind ? "&kind=" + o.kind : ""),
             { headers: { "x-stream-key": env.STREAM_KEY || "" }, signal: AbortSignal.timeout(Number(env.BACKEND_TIMEOUT_MS) || 45000) }
           );
           return json(await r.json());
@@ -6034,17 +6163,36 @@ async function adminRoute(request, url, env) {
         plugins = plugins.filter((p) => p.id !== id);
       } else if (act === "add") {
         const pUrl = String(body.url || "").trim();
-        if (!/^https:\/\/[^\s"'<>]{4,400}$/i.test(pUrl)) return json({ error: "Paste the full https link of the repository manifest.json" }, 400);
-        let m;
-        try {
-          m = await loadManifest(pUrl, 10000, true);
-        } catch (e) {
-          return json({ error: "Couldn't open that link. Use the raw manifest.json link." }, 400);
+        const force = !!body.force;
+        if (!/^https:\/\/[^\s"'<>]{4,400}$/i.test(pUrl)) return json({ error: "Paste the full https link of the manifest.json" }, 400);
+        const given = String(body.name || "").trim().slice(0, 60);
+        let m = null, why = "";
+        try { m = await loadManifest(pUrl, 10000, true); } catch (e) { why = (e && e.message) || "no answer"; }
+        let host = "";
+        try { host = new URL(pUrl).hostname; } catch (e) {}
+        let entry;
+        if (m && hasScrapers(m, pUrl)) {
+          entry = { id: "pl_" + fnv(pUrl), name: given || String(m.name || host || "Plugin").slice(0, 60), url: pUrl, kind: "nuvio", enabled: true, forced: force && undefined };
+        } else if (m && looksStremio(m) && stremioHasStream(m)) {
+          entry = { id: "pl_" + fnv(pUrl), name: given || String(m.name).slice(0, 60), url: pUrl, kind: "stremio", base: manifestBase(pUrl), version: String(m.version || "").slice(0, 20), enabled: true };
+        } else if (force) {
+          if (!m) {
+            // not JSON: accept it if the base address answers at all
+            let ok = false;
+            try { const r0 = await fetch(manifestBase(pUrl) || pUrl, { signal: AbortSignal.timeout(8000), headers: { "user-agent": "BoaCinema/1.0" } }); ok = r0.status < 500; } catch (e) {}
+            if (!ok) return json({ error: "Force install needs a link that returns JSON or a reachable address (" + why + ")" }, 400);
+          }
+          entry = { id: "pl_" + fnv(pUrl), name: given || String((m && m.name) || host || "Custom plugin").slice(0, 60), url: pUrl, kind: "stremio", base: manifestBase(pUrl), version: String((m && m.version) || "").slice(0, 20), enabled: true, forced: true };
+        } else if (!m) {
+          return json({ error: "Couldn't open that link (" + why + "). Check it, or tick Force Install." }, 400);
+        } else if (looksStremio(m)) {
+          return json({ error: "This add-on has no streams (it offers " + ((m.resources || []).map((x) => (typeof x === "string" ? x : x && x.name)).join(", ") || "other things") + "). Install it from the Add-ons tab, or tick Force Install." }, 400);
+        } else {
+          return json({ error: "Unrecognised manifest format. Tick Force Install to save it anyway." }, 400);
         }
-        if (!scraperList(m, pUrl).length) return json({ error: "No providers found in that repository" }, 400);
-        const pName = String(body.name || m.name || "Custom Plugin").trim().slice(0, 60);
-        plugins = plugins.filter((p) => p.url !== pUrl);
-        plugins.push({ id: "pl_" + fnv(pUrl), name: pName, url: pUrl, enabled: true });
+        if (entry.forced === undefined) delete entry.forced;
+        plugins = plugins.filter((x) => x.url !== pUrl);
+        plugins.push(entry);
       } else if (act === "disable") {
         const id = String(body.id || "");
         plugins = plugins.map((p) => {
