@@ -930,7 +930,7 @@ async function analyticsPing(request, env) {
     jobs.push(env.BOT_USERS.put("m:" + vid, "1", { expirationTtl: 2592000 }));
   }
   capSet(anMemo, "v" + vid, mv, 1000);
-  if (now - anLastVisit > 120000) { anLastVisit = now; jobs.push(env.BOT_USERS.put("cfg:lastvisit", String(now))); }
+  if (now - anLastVisit > 600000) { anLastVisit = now; jobs.push(env.BOT_USERS.put("cfg:lastvisit", String(now))); }
   try { await Promise.all(jobs); } catch (e) {}
   if (now - anLastRoll > 600000) { anLastRoll = now; try { await analyticsRoll(env); } catch (e) {} }
   return nope;
@@ -958,7 +958,7 @@ async function analyticsRoll(env, liveCount, dayCount) {
 async function analyticsStats(env) {
   const empty = { active: null, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, breakdown: { streaming: 0, bot: 0, app: 0, web: 0 }, hours: [], days: [], first: 0 };
   if (!env.BOT_USERS) return empty;
-  if (anStatsCache && Date.now() - anStatsAt < 10000) return anStatsCache;
+  if (anStatsCache && Date.now() - anStatsAt < 30000) return anStatsCache;
   try {
     const nowMs = Date.now();
     const dayIdx = Math.floor(nowMs / 86400000);
@@ -1072,17 +1072,20 @@ async function trackUser(env, userId) {
   try {
     const key = `u:${userId}`;
     const today = Math.floor(Date.now() / 86400000);
+    if (userDayMemo.get(userId) === today) return;
     const last = await env.BOT_USERS.get(key);
-    if (last !== null && Number(last) === today) return; // already counted today, no write
+    if (last !== null && Number(last) === today) { capSet(userDayMemo, userId, today, 400); return; } // already counted today, no write
     await env.BOT_USERS.put(key, String(today), { expirationTtl: ACTIVE_DAYS * 86400, metadata: { d: today } });
+    capSet(userDayMemo, userId, today, 400);
     const now = Date.now();
-    if (now - lastVisitWrite > 120000) {
+    if (now - lastVisitWrite > 600000) {
       lastVisitWrite = now;
       await env.BOT_USERS.put("cfg:lastvisit", String(now));
     }
   } catch (e) {}
 }
 let lastVisitWrite = 0;
+const userDayMemo = new Map();
 async function activityStats(env) {
   const out = { active: null, today: 0, week: 0, lastVisit: 0 };
   if (!env.BOT_USERS) return out;
@@ -7185,8 +7188,72 @@ async function adminRoute(request, url, env) {
     }
     return json({ error: "not found" }, 404);
   } catch (e) {
+    if (e instanceof KvLimit) return json({ error: e.message, kv: true }, 429);
     return json({ error: "server error" }, 500);
   }
+}
+
+// ============================================================================
+// KV GUARD: streaming must never fail because Cloudflare KV is rate-limited or down.
+//  - reads: short in-memory cache (30s); errors/429 -> cached value or null
+//  - writes: swallowed on public routes, reported as a clear message on admin routes
+//  - circuit breaker: after a 429/limit error KV is skipped for 60s instead of being hammered
+// ============================================================================
+class KvLimit extends Error {}
+const KV_MSG = "Cloudflare KV daily write limit reached — resets at 00:00 UTC. Your change was not saved; please try again after the reset.";
+let kvBad = 0;
+const kvRead = new Map();            // key -> { at, t: text|null }   (max 120 small entries)
+const kvGuards = new WeakMap();
+function kvTrip(e) { if (/429|limit|too many|rate|exceed|quota/i.test(String((e && e.message) || e))) kvBad = Date.now() + 60000; }
+function kvEnv(env, strict) {
+  const raw = env && env.BOT_USERS;
+  if (!raw) return env;
+  let g = kvGuards.get(raw);
+  if (!g) { g = {}; kvGuards.set(raw, g); }
+  const k = strict ? "s" : "o";
+  if (!g[k]) {
+    g[k] = {
+      async get(key, opts) {
+        const tk = typeof opts === "string" ? opts : (opts && opts.type) || "text";
+        if (tk !== "text" && tk !== "json") { try { return await raw.get(key, opts); } catch (e) { kvTrip(e); return null; } }
+        const now = Date.now(), c = kvRead.get(key);
+        let t;
+        if (c && now - c.at < 30000) t = c.t;
+        else if (now < kvBad) t = c ? c.t : null;
+        else {
+          try {
+            t = await raw.get(key);
+            if (t == null || t.length < 150000) capSet(kvRead, key, { at: now, t }, 120);
+          } catch (e) { kvTrip(e); t = c ? c.t : null; }
+        }
+        if (tk === "json") { try { return t == null ? null : JSON.parse(t); } catch (e) { return null; } }
+        return t;
+      },
+      async list(opts) {
+        if (Date.now() < kvBad) return { keys: [], list_complete: true };
+        try { return await raw.list(opts); } catch (e) { kvTrip(e); return { keys: [], list_complete: true }; }
+      },
+      async put(key, val, opts) {
+        if (Date.now() < kvBad) { if (strict) throw new KvLimit(KV_MSG); return; }
+        try {
+          await raw.put(key, val, opts);
+          if (typeof val === "string" && val.length < 150000) capSet(kvRead, key, { at: Date.now(), t: val }, 120); else kvRead.delete(key);
+        } catch (e) {
+          kvTrip(e);
+          if (strict) throw new KvLimit(Date.now() < kvBad ? KV_MSG : "Could not save to Cloudflare KV right now: " + String((e && e.message) || e).slice(0, 120));
+        }
+      },
+      async delete(key) {
+        kvRead.delete(key);
+        if (Date.now() < kvBad) { if (strict) throw new KvLimit(KV_MSG); return; }
+        try { await raw.delete(key); }
+        catch (e) { kvTrip(e); if (strict) throw new KvLimit(Date.now() < kvBad ? KV_MSG : "Could not update Cloudflare KV right now: " + String((e && e.message) || e).slice(0, 120)); }
+      },
+    };
+  }
+  const e2 = Object.create(env);
+  Object.defineProperty(e2, "BOT_USERS", { value: g[k], enumerable: true });
+  return e2;
 }
 
 // ============================================================================
@@ -7196,6 +7263,7 @@ async function adminRoute(request, url, env) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    env = kvEnv(env, url.pathname.startsWith("/api/admin/"));
     // The Mini App and trailer player must open from this Worker's own https address
     if (url.protocol === "https:") {
       ORIGIN = url.origin;
