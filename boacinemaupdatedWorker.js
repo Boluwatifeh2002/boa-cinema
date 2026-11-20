@@ -2680,7 +2680,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .pvid{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:1}
 #player .pamb{position:absolute;inset:-10%;width:120%;height:120%;filter:blur(70px) saturate(1.6);opacity:0;transition:opacity .4s;z-index:0}
 #player.amb .pamb{opacity:.55}
-#player video::cue{background:rgba(0,0,0,.7);font-size:1.1em}
+#player video::cue{background:rgba(0,0,0,.72);color:#fff;font-size:1.15em;text-shadow:none}
 #player .ptop,#player .pbot{position:absolute;left:0;right:0;z-index:3;transition:opacity .3s ease}
 #player .ptop{top:0;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:calc(var(--sat) + 12px) 14px 26px;background:linear-gradient(180deg,rgba(0,0,0,.85),rgba(0,0,0,0))}
 #player .ptitle{font-size:16px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
@@ -2734,6 +2734,35 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .adbar i{display:block;height:100%;width:0;background:#facc15}
 #player .adclose{position:absolute;top:calc(var(--sat) + 8px);right:8px;z-index:7;background:none;border:0;width:44px;height:44px;padding:8px}
 #player.adon .ptop,#player.adon .pbot{display:none}
+#player.adon .pnext,#player.adon .srvroom{display:none}
+#player .pwhy{font-size:13px;font-weight:600;color:#d4d4d8;margin:8px 0 4px;line-height:1.45}
+#player .pfrow{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:10px}
+#player .pvlc{margin-top:0;pointer-events:auto}
+#player .pvlc.pgrey{background:#3a3a40;color:#fff}
+#player .srvroom{position:absolute;left:10px;right:10px;bottom:calc(var(--sab) + 128px);max-width:460px;max-height:52%;overflow:auto;margin:0 auto;background:rgba(12,12,14,.97);border:1px solid #2c2c31;border-radius:16px;padding:10px;z-index:9;touch-action:pan-y;box-shadow:0 10px 40px rgba(0,0,0,.7)}
+#player .srhd{display:flex;align-items:center;justify-content:space-between;padding:2px 4px 8px}
+#player .srhd b{font-size:12px;letter-spacing:.18em;color:#a1a1aa}
+#player .srx{background:none;border:0;color:#a1a1aa;font-size:22px;line-height:1;padding:2px 8px}
+#player .srrow{display:flex;align-items:center;gap:10px;background:#18181b;border:1px solid #26262b;border-radius:12px;padding:10px 10px;margin-bottom:8px}
+#player .srrow.on{border-color:#e50914;background:#1f1214}
+#player .srn{font:800 13px/1 ui-monospace,Menlo,monospace;color:#71717a;width:22px}
+#player .srdot{width:12px;height:12px;border-radius:50%;flex:none}
+#player .srmid{flex:1;min-width:0}
+#player .srt1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#player .srt1 b{font-size:14px}
+#player .sbadge{font-size:10.5px;font-weight:800;background:#2a2a2e;border-radius:999px;padding:3px 8px;color:#e4e4e7}
+#player .srlive{font-size:10px;font-weight:900;letter-spacing:.1em;background:#e50914;color:#fff;border-radius:6px;padding:3px 6px}
+#player .srbad{font-size:10px;font-weight:900;letter-spacing:.1em;background:#3f1d1d;color:#fca5a5;border-radius:6px;padding:3px 6px}
+#player .srsub{display:block;font-size:12px;color:#a1a1aa;margin-top:3px;overflow-wrap:anywhere}
+#player .srcp{background:#2a2a2e;color:#fff;border:0;border-radius:8px;padding:7px 10px;font-size:12px;font-weight:700;flex:none;touch-action:manipulation}
+#player .srnote{font-size:12px;color:#8b8b94;padding:4px 6px 2px;line-height:1.45}
+#player .pnext{position:absolute;right:12px;bottom:calc(var(--sab) + 140px);z-index:7;max-width:min(360px,calc(100% - 24px));background:rgba(14,14,16,.95);border:1px solid #33333a;border-radius:14px;padding:10px 10px 10px 14px;display:flex;align-items:center;gap:10px;box-shadow:0 8px 28px rgba(0,0,0,.6)}
+#player .pnt{flex:1;min-width:0}
+#player .pnt span{display:block;font-size:11px;color:#a1a1aa;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+#player .pnt b{display:block;font-size:13px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#player .pnplay{background:#fff;color:#000;border:0;border-radius:999px;padding:9px 16px;font-weight:800;font-size:13px;flex:none;touch-action:manipulation}
+#player .pnx{background:none;border:0;color:#a1a1aa;font-size:22px;line-height:1;padding:2px 6px;flex:none}
+
 #player .ptop,#player .pbot{touch-action:manipulation}
 #player .pscrub{touch-action:none}
 #player.rot{inset:auto;top:0;left:100vw;width:100vh;height:100vw;transform-origin:top left;transform:rotate(90deg)}
@@ -2991,7 +3020,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
   var AVC = ["#e50914", "#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#0891b2"];
   var CUR = null;
   var SUBS = [];
-  var SUBSEL = "";
+  var SUBSEL = "", SUBUSER = false;
   var LANGS = { eng: "English", spa: "Spanish", fre: "French", fra: "French", por: "Portuguese", ara: "Arabic", ger: "German", deu: "German", ita: "Italian", rus: "Russian", hin: "Hindi", tur: "Turkish", chi: "Chinese", zho: "Chinese", jpn: "Japanese", kor: "Korean", dut: "Dutch", pol: "Polish", ind: "Indonesian", swa: "Swahili", yor: "Yoruba" };
   function applySub() {
     var v = document.querySelector("#player video, #smplayer video");
@@ -3006,7 +3035,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     setTimeout(function () { try { if (v.textTracks && v.textTracks[0]) v.textTracks[0].mode = "showing"; } catch (e) {} }, 300);
   }
   function loadSubs(mt, id, s, e) {
-    SUBS = []; SUBSEL = "";
+    SUBS = []; SUBSEL = ""; SUBUSER = false;
     var box = $("smsubs");
     if (!box) return;
     box.textContent = "";
@@ -3021,10 +3050,16 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       });
       var def = -1;
       list.forEach(function (x, i) { if (def < 0 && x.lang === "eng") def = i; });
-      sel.onchange = function () { SUBSEL = sel.value; applySub(); };
+      sel.onchange = function () { SUBUSER = true; SUBSEL = sel.value; applySub(); };
       box.appendChild(sel);
       sel._def = def;
-      if (PLSUBREFRESH) PLSUBREFRESH();
+      // pick the subtitle that matches the device language (English as the fallback) unless the viewer chose already
+      var DM = { en: ["eng"], fr: ["fre", "fra"], es: ["spa"], pt: ["por"], ar: ["ara"], de: ["ger", "deu"], it: ["ita"], ru: ["rus"], hi: ["hin"], tr: ["tur"], zh: ["chi", "zho"], ja: ["jpn"], ko: ["kor"], nl: ["dut"], pl: ["pol"], id: ["ind"], sw: ["swa"], yo: ["yor"] };
+      var want = DM[String(navigator.language || "en").slice(0, 2).toLowerCase()] || ["eng"], pick = -1;
+      list.forEach(function (x, i) { if (pick < 0 && want.indexOf(x.lang) > -1) pick = i; });
+      if (pick < 0) pick = def;
+      if (!SUBUSER && SUBSEL === "" && pick > -1) { SUBSEL = String(pick); sel.value = SUBSEL; }
+      if (PLSUBREFRESH) { PLSUBREFRESH(); applySub(); }
     }).catch(function () {});
   }
   function RELAY_ON() { return lsGet("boa_relay", "0") === "1"; }
@@ -3485,6 +3520,8 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
 
     if (root.parentNode !== document.body) document.body.appendChild(root);
     window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
+    var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
+    (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
     var dash = null, menuEl = null, seekAfter = 0, BRI = 1, gestEnd = 0, rate = 1, fitI = 0, mqL = null;
     var dimEl = h("div", "pdim"), hud = h("div", "phud"), hudT = null;
     var amb = document.createElement("canvas");
@@ -3516,6 +3553,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     var canPip = !!(document.pictureInPictureEnabled || (v.webkitSupportsPresentationMode && v.webkitSetPresentationMode));
     if (canPip) tr.appendChild(bPip);
     var bVlc = h("button", "ptxt", "VLC");
+    bVlc.setAttribute("aria-label", "Open in VLC");
     bVlc.onclick = function () { v.pause(); location.href = vlcLink(url); };
     tr.appendChild(bVlc);
     tr.appendChild(bAmb); tr.appendChild(bFs); tr.appendChild(bX);
@@ -3539,10 +3577,12 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     var tim = h("span", "ptime", "00:00 / 00:00");
     var sp = h("span", "pspace");
     var cc = h("select", "pcc");
+    cc.setAttribute("aria-label", "Subtitles and closed captions");
     row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bFwd); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(cc);
     bot.appendChild(row);
     var row2 = h("div", "prow2");
     var bSpd = h("button", "ptxt", "1x"), bFit = h("button", "ptxt", "Fit"), bAud = h("button", "ptxt", "Audio"), bSrv = h("button", "ptxt", "Servers");
+    bSpd.setAttribute("aria-label", "Playback speed"); bFit.setAttribute("aria-label", "Picture fit: fit, fill or stretch"); bAud.setAttribute("aria-label", "Audio track"); bSrv.setAttribute("aria-label", "Servers");
     row2.appendChild(bSpd); row2.appendChild(bFit); row2.appendChild(bAud); row2.appendChild(bSrv);
     bot.appendChild(row2);
     root.appendChild(bot);
@@ -3555,6 +3595,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       cc.style.display = "";
       var o0 = h("option", null, "CC: Off"); o0.value = ""; cc.appendChild(o0);
       (SUBS || []).forEach(function (x, i) { var o = h("option", null, "CC: " + (LANGS[x.lang] || x.lang) + (x.n > 1 ? " " + x.n : "")); o.value = String(i); cc.appendChild(o); });
+      if (hls && hls.subtitleTracks) hls.subtitleTracks.forEach(function (tr, i) { var o = h("option", null, "CC: " + (tr.name || tr.lang || "Stream " + (i + 1))); o.value = "h" + i; cc.appendChild(o); });
       var ou = h("option", null, "Upload .srt / .vtt"); ou.value = "__up"; cc.appendChild(ou);
       cc.value = SUBSEL;
     }
@@ -3562,7 +3603,9 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     PLSUBREFRESH = fillCC;
     cc.onchange = function () {
       if (cc.value === "__up") { cc.value = SUBSEL; fileIn.click(); return; }
-      SUBSEL = cc.value; applySub();
+      SUBUSER = true; SUBSEL = cc.value;
+      if (/^h/.test(cc.value)) { applySub(); if (hls) hls.subtitleTrack = +cc.value.slice(1); }
+      else { if (hls) hls.subtitleTrack = -1; applySub(); }
     };
     fileIn.onchange = function () {
       var f = fileIn.files && fileIn.files[0];
@@ -3581,21 +3624,80 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       fileIn.value = "";
     };
 
-    // ----- controls visibility (hides after 3 seconds of inactivity) -----
-    function showCtl() {
-      root.classList.remove("hide");
-      clearTimeout(hideT);
-      hideT = setTimeout(function () { if (!v.paused && !seeking && spin.className.indexOf("on") < 0 && !menuEl) root.classList.add("hide"); }, 3000);
-    }
-    ["mousemove", "touchstart", "keydown"].forEach(function (ev) { root.addEventListener(ev, showCtl, { passive: true }); });
+    // ----- controls: one tap shows, one tap hides (no auto-dissolve timer) -----
+    function showCtl() { root.classList.remove("hide"); }
 
     // ----- source -----
-    function fail(text) {
-      spin.className = "pspin"; msg.textContent = text;
-      var vb = h("button", "pvlc", "Open in VLC");
-      vb.onclick = function () { location.href = vlcLink(url); };
-      msg.appendChild(document.createElement("br")); msg.appendChild(vb);
+    function extOf(u) { var m = /\.(m3u8|mpd|mp4|mkv|avi|mov|flv|webm|ts)(\?|$)/i.exec(String(u || "")); return m ? m[1].toLowerCase() : ""; }
+    function mediaWhy(er) {
+      var c = er && er.code, x = extOf(url);
+      if (c === 2) return "The stream host dropped the connection (link expired, blocked or geo-restricted).";
+      if (c === 3) return "The video or audio codec couldn't be decoded on this device.";
+      if (c === 4) return (x === "mkv" || x === "avi" || x === "flv" || x === "mov") ? "The ." + x.toUpperCase() + " container isn't supported by mobile web players." : "This format or codec (HEVC, AC3, DTS) isn't supported by your browser.";
+      return "The player couldn't open this stream.";
+    }
+    function hlsWhy(d) {
+      var t = String((d && d.details) || "");
+      if (/manifest|level|playlist/i.test(t)) return "The playlist couldn't be loaded (link expired or blocked by the host).";
+      if (/frag|key|buffer/i.test(t)) return "Video segments failed to load (host too slow, blocked or link expired).";
+      if (/codec|incompat/i.test(t)) return "The codec isn't supported by your browser.";
+      return "HLS playback error" + (t ? " (" + t + ")" : "") + ".";
+    }
+    function copyLink(u) {
+      u = u || url;
+      var ok = function () { toast("Link copied"); };
+      function fb() {
+        var t = document.createElement("textarea");
+        t.value = u; t.style.cssText = "position:fixed;opacity:0";
+        document.body.appendChild(t); t.select();
+        try { document.execCommand("copy"); ok(); } catch (e) { toast("Couldn't copy the link"); }
+        t.remove();
+      }
+      try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(u).then(ok, fb); return; } } catch (e) {}
+      fb();
+    }
+    function fail() {
+      spin.className = "pspin"; clearTimeout(stallT);
+      msg.textContent = "";
+      msg.appendChild(h("b", null, "This stream can't play in the app player"));
+      msg.appendChild(h("div", "pwhy", "Why: " + (why || "No picture or data was received from this stream.")));
+      var r = h("div", "pfrow");
+      var b1 = h("button", "pvlc pgrey", "Servers"); b1.onclick = openServers; r.appendChild(b1);
+      var b2 = h("button", "pvlc", "Open in VLC"); b2.onclick = function () { location.href = vlcLink(url); };
+      var b3 = h("button", "pvlc pgrey", "Copy Link"); b3.onclick = function () { copyLink(); };
+      r.appendChild(b2); r.appendChild(b3);
+      msg.appendChild(r);
       msg.className = "pmsg on";
+    }
+    // a stream that never reports a duration is treated as failed (the 00:00 / 00:00 case)
+    function armWatch() {
+      clearTimeout(stallT);
+      stallT = setTimeout(function () {
+        if (closed || adActive) return;
+        if (!(v.duration > 0) || v.readyState < 2) { why = why || "No data after 15 seconds (stuck at 00:00 / 00:00): the host is too slow or is blocking this link."; if (fatalFn) fatalFn(); }
+      }, 15000);
+    }
+    var fatalFn = null;
+    function switchTo(i, auto) {
+      var sv = ((ctx && ctx.servers) || [])[i];
+      if (!sv) return;
+      tried[i] = 1; curSrv = i;
+      var t = v.currentTime || 0;
+      if (t > 1) seekAfter = t;
+      url = sv.st.url; relayed = false; retried = false; why = "";
+      msg.className = "pmsg"; msg.textContent = "";
+      toast(auto ? "Switching to SERVER " + sv.n : "SERVER " + sv.n);
+      startSource(url, false);
+    }
+    function stepOrFail() {
+      var L = (ctx && ctx.servers) || [];
+      if (curSrv > -1) bad[curSrv] = 1;
+      for (var i = 0; i < L.length; i++) {
+        if (tried[i] || L[i].tier === "r" || L[i].urls.indexOf(url) > -1) continue;
+        switchTo(i, true);
+        return;
+      }
+      fail();
     }
     function startSource(src0, useRelay) {
       var isHls = /\.m3u8(\?|$)/i.test(src0);
@@ -3607,31 +3709,37 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
         msg.className = "pmsg";
         spin.className = "pspin on";
         var onFatal = function () {
+          clearTimeout(stallT);
           if (!relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
-          fail("This stream can't play in the app player. Close it and try another stream or the VLC button.");
+          stepOrFail();
         };
+        fatalFn = onFatal;
+        armWatch();
         if (/\.mpd(\?|$)/i.test(src0)) {
           loadDash(function () {
             if (closed) return;
             if (!window.dashjs) { onFatal(); return; }
             try { if (dash) dash.reset(); } catch (e) {}
             dash = window.dashjs.MediaPlayer().create();
-            dash.on("error", function () { onFatal(); });
+            dash.on("error", function () { why = "The DASH stream failed to load (link expired or blocked)."; onFatal(); });
             dash.initialize(v, src, true);
           });
         } else if (isHls && window.Hls && window.Hls.isSupported()) {
           hls = new window.Hls({ maxBufferLength: 40, enableWorker: true, lowLatencyMode: false });
           hls.on(window.Hls.Events.ERROR, function (ev, d) {
             if (!d || !d.fatal) return;
+            why = hlsWhy(d);
             if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch (e) {} }
             onFatal();
           });
+          hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, function () { try { if (hls.audioTracks.length && hls.audioTrack < 0) hls.audioTrack = 0; } catch (e) {} paintAud(); });
+          hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, function () { fillCC(); });
           hls.loadSource(src);
           hls.attachMedia(v);
           var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
         } else {
           v.src = src;
-          v.onerror = onFatal;
+          v.onerror = function () { why = mediaWhy(v.error); onFatal(); };
           var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
         }
       }
@@ -3773,23 +3881,24 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       if (!ctx || finished || adActive || !(v.currentTime > 1)) return;
       recordWatch(ctx, v.currentTime, v.duration || 0, !!force);
     }
-    v.addEventListener("play", function () { paintPlay(); showCtl(); });
+    v.addEventListener("play", function () { paintPlay(); });
     v.addEventListener("pause", function () { paintPlay(); root.classList.remove("hide"); save(true); });
     v.addEventListener("waiting", function () { spin.className = "pspin on"; });
-    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; setStreaming(!adActive); });
+    v.addEventListener("playing", function () { spin.className = "pspin"; msg.className = "pmsg"; clearTimeout(stallT); setStreaming(!adActive); });
     v.addEventListener("pause", function () { setStreaming(false); });
     v.addEventListener("ended", function () { setStreaming(false); });
     v.addEventListener("error", function () { setStreaming(false); });
     v.addEventListener("canplay", function () { spin.className = "pspin"; });
-    v.addEventListener("timeupdate", function () { paintTime(); midCheck(); });
+    v.addEventListener("timeupdate", function () { paintTime(); midCheck(); nextCheck(); });
     v.addEventListener("progress", paintTime);
     v.addEventListener("durationchange", paintTime);
     v.addEventListener("seeking", function () { if (v.currentTime < (v.duration || 1) * 0.9) finished = false; });
-    v.addEventListener("ended", function () { finished = true; if (ctx) recordWatch(ctx, v.duration || 1, v.duration || 1, true); root.classList.remove("hide"); paintPlay(); });
+    v.addEventListener("ended", function () { finished = true; if (ctx) recordWatch(ctx, v.duration || 1, v.duration || 1, true); root.classList.remove("hide"); paintPlay(); nextEnded(); });
     v.addEventListener("loadedmetadata", function () {
       if (ctx && ctx.resumeAt > 10 && v.duration && ctx.resumeAt < v.duration - 30) { try { v.currentTime = ctx.resumeAt; } catch (e) {} ctx.resumeAt = 0; }
-      planMid();
-      applySub();
+      clearTimeout(stallT);
+      planMid(); planNext();
+      applySub(); paintAud();
       paintTime();
     });
     v.volume = +vol.value;
@@ -3905,6 +4014,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
 
     // single tap on the picture toggles the controls (double-tap skipping is gone)
     root.addEventListener("click", function (ev) {
+      if (ev.target && ev.target.closest && ev.target.closest(".pbot,.ptop,.srvroom,.pmenu,.pnext,.pmsg")) return;
       if (menuEl && !menuEl.contains(ev.target)) { closeMenu(); return; }
       if (ev.target !== v && ev.target !== root && ev.target !== spin) return;
       if (Date.now() - gestEnd < 450) return;
@@ -3953,17 +4063,112 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       if (!items.length) { toast("This stream has only one audio track"); return; }
       popMenu("Audio track", items);
     };
-    bSrv.onclick = function () {
-      var list = ((ctx && ctx.streams) || []).filter(function (x) { return x && x.url && !/^magnet:/i.test(x.url) && !/\/embed\/|\.html?($|\?)/i.test(x.url); });
-      if (list.length < 2) { toast("No other streams available"); return; }
-      popMenu("Switch stream", list.slice(0, 40).map(function (x) {
-        return { label: x.label || ((x.provider || "Plugin") + " \u2022 " + (x.quality || "HD")), on: x.url === url, fn: function () {
-          if (x.url === url) return;
-          seekAfter = v.currentTime || 0; url = x.url; relayed = false; retried = false;
-          startSource(url, false);
-        } };
-      }));
-    };
+    var LIGHT = { g: "Green light: strong, web ready", y: "Yellow light: backup server", r: "Red light: heavy file, best opened in VLC" };
+    var LCOL = { g: "#22c55e", y: "#facc15", r: "#ef4444" };
+    function pad2(n) { return ("0" + n).slice(-2); }
+    function openServers() {
+      closeMenu();
+      var L = ((ctx && ctx.servers) || []).slice(0, 4);
+      var m = h("div", "srvroom");
+      m.setAttribute("role", "dialog"); m.setAttribute("aria-label", "Server room");
+      var hd = h("div", "srhd");
+      hd.appendChild(h("b", null, "SERVER ROOM"));
+      var cx = h("button", "srx", "×"); cx.setAttribute("aria-label", "Close server room"); cx.onclick = closeMenu;
+      hd.appendChild(cx); m.appendChild(hd);
+      if (!L.length) m.appendChild(h("div", "srnote", "Only this stream is available for this title."));
+      L.forEach(function (sv, i) {
+        var on = i === curSrv;
+        var row = h("div", "srrow" + (on ? " on" : ""));
+        row.tabIndex = 0; row.setAttribute("role", "button");
+        row.setAttribute("aria-label", "Server " + sv.n + ", " + LIGHT[sv.tier] + (on ? ", currently playing" : bad[i] ? ", failed" : ""));
+        row.appendChild(h("span", "srn", pad2(sv.n)));
+        var dot = h("i", "srdot"); dot.style.background = LCOL[sv.tier]; dot.style.boxShadow = "0 0 8px " + LCOL[sv.tier];
+        dot.setAttribute("role", "img"); dot.setAttribute("aria-label", LIGHT[sv.tier]);
+        row.appendChild(dot);
+        var mid = h("div", "srmid");
+        var t1 = h("div", "srt1");
+        t1.appendChild(h("b", null, "SERVER " + sv.n));
+        t1.appendChild(h("span", "sbadge", sv.label));
+        if (on) t1.appendChild(h("span", "srlive", "LIVE")); else if (bad[i]) t1.appendChild(h("span", "srbad", "FAILED"));
+        mid.appendChild(t1);
+        mid.appendChild(h("span", "srsub", (sv.q ? sv.q + "p • " : "") + String(sv.f || "").toUpperCase() + " • " + (sv.st.provider || "Plugin")));
+        row.appendChild(mid);
+        var cp = h("button", "srcp", "Copy"); cp.setAttribute("aria-label", "Copy link for server " + sv.n);
+        cp.onclick = function (ev) { ev.stopPropagation(); copyLink(sv.st.url); };
+        row.appendChild(cp);
+        row.onclick = function () { closeMenu(); if (i !== curSrv) switchTo(i, false); };
+        row.onkeydown = function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); row.onclick(); } };
+        m.appendChild(row);
+      });
+      m.appendChild(h("div", "srnote", "Stream stutters or won't load? Tap another server. Your place in the video is kept."));
+      root.appendChild(m); menuEl = m;
+    }
+    bSrv.onclick = openServers;
+    function paintAud() {
+      var n = 0;
+      try {
+        if (hls && hls.audioTracks) n = hls.audioTracks.length;
+        else if (dash && dash.getTracksFor) n = dash.getTracksFor("audio").length;
+        else if (v.audioTracks) n = v.audioTracks.length;
+      } catch (e) {}
+      bAud.textContent = n > 1 ? "Audio (" + n + ")" : "Audio";
+    }
+    try { if (v.audioTracks && v.audioTracks.addEventListener) v.audioTracks.addEventListener("addtrack", paintAud); } catch (e) {}
+    // ----- next episode (library-connected) -----
+    function planNext() {
+      if (nextInfo !== null) return;
+      nextInfo = false;
+      if (!ctx || ctx.mt !== "tv") return;
+      var sN = ctx.s || 1, eN = ctx.e || 1;
+      function season(n, cb) {
+        var key = ctx.id + ":" + n;
+        if (seasonCache[key]) { cb(seasonCache[key]); return; }
+        api("/api/season?id=" + ctx.id + "&n=" + n, 1, 15000).then(function (eps) { seasonCache[key] = eps; cb(eps); }).catch(function () { cb(null); });
+      }
+      season(sN, function (eps) {
+        if (closed || !eps) return;
+        var nx = null;
+        eps.forEach(function (x) { if (!nx && x.n === eN + 1) nx = { s: sN, e: x.n, t: x.t }; });
+        if (nx) { nextInfo = nx; return; }
+        season(sN + 1, function (e2) { if (!closed && e2 && e2.length) nextInfo = { s: sN + 1, e: e2[0].n, t: e2[0].t }; });
+      });
+    }
+    function playNext() {
+      clearTimeout(nextT);
+      var nx = nextInfo;
+      if (!nx || !ctx) return;
+      if (v.duration) recordWatch(ctx, v.duration, v.duration, true);
+      var c0 = ctx;
+      closeP();
+      openStreams("tv", c0.id, c0.base + " (S" + nx.s + "E" + nx.e + ")", nx.s, nx.e, c0.meta, 0, true);
+    }
+    function showNext() {
+      if (nextShown || !nextInfo) return;
+      nextShown = true;
+      var c = h("div", "pnext");
+      c.setAttribute("role", "region"); c.setAttribute("aria-label", "Next episode");
+      var tx = h("div", "pnt");
+      tx.appendChild(h("span", null, "Up next"));
+      tx.appendChild(h("b", null, "Next: S" + pad2(nextInfo.s) + "E" + pad2(nextInfo.e) + " — " + nextInfo.t));
+      var go = h("button", "pnplay", "Play"); go.setAttribute("aria-label", "Play next episode"); go.onclick = playNext;
+      var x = h("button", "pnx", "×"); x.setAttribute("aria-label", "Dismiss next episode");
+      x.onclick = function () { nextDismissed = true; clearTimeout(nextT); if (c.parentNode) c.parentNode.removeChild(c); nextEl = null; };
+      c.appendChild(tx); c.appendChild(go); c.appendChild(x);
+      root.appendChild(c); nextEl = c; c._go = go;
+    }
+    function nextCheck() {
+      if (!nextInfo || nextDismissed || adActive || nextShown) return;
+      var d = v.duration;
+      if (d && isFinite(d) && d > 300 && d - v.currentTime <= 45) showNext();
+    }
+    function nextEnded() {
+      if (!nextInfo || nextDismissed || adActive) return;
+      showNext();
+      if (!nextEl || !nextEl._go) return;
+      var n = 8, go = nextEl._go;
+      go.textContent = "Playing in " + n;
+      (function tick() { nextT = setTimeout(function () { n--; if (closed || nextDismissed) return; if (n <= 0) { playNext(); return; } go.textContent = "Playing in " + n; tick(); }, 1000); })();
+    }
 
     // scrubbing
     function pos(ev) {
@@ -4001,9 +4206,16 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       else if (ev.key === "m") bMute.onclick();
       else if (ev.key === "Escape" && !isFs()) closeP();
     }
-    function onHide() { if (document.hidden) save(true); }
+    function onHide() { if (document.hidden) { wasPlaying = !v.paused && !adActive; save(true); } }
+    function onShow() {
+      if (document.hidden || closed || adActive) return;
+      if (wasPlaying && v.paused && !v.ended && !document.pictureInPictureElement) { var q = v.play(); if (q && q.catch) q.catch(function () {}); }
+      if (hls && !v.paused) { try { hls.startLoad(); } catch (e) {} }
+    }
     document.addEventListener("keydown", onKey);
     document.addEventListener("visibilitychange", onHide);
+    document.addEventListener("visibilitychange", onShow);
+    window.addEventListener("pageshow", onShow);
     window.addEventListener("pagehide", onHide);
     function closeP() {
       if (closed) return;
@@ -4012,7 +4224,10 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       clearInterval(saveT); clearInterval(ambT); clearTimeout(hideT);
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("visibilitychange", onHide);
+      document.removeEventListener("visibilitychange", onShow);
+      window.removeEventListener("pageshow", onShow);
       window.removeEventListener("pagehide", onHide);
+      clearTimeout(stallT); clearTimeout(nextT);
       PLSUBREFRESH = null;
       setStreaming(false); window.__vPlaying = null;
       unlockO(); closeMenu();
@@ -4901,6 +5116,7 @@ $("smclose").onclick = function () {
           sv.main.st.label = "SERVER " + sv.n + " · " + sv.label;
         });
         CUR.streams = servers.map(function (sv) { return sv.main.st; });
+        CUR.servers = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })) }; });
         function openVlc(st0) {
           var u = st0.url || "";
           if (RELAY_ON() && u && !/^magnet:/i.test(u)) { relaySign(u).then(function (ru) { goVlc(ru, st0); }); return; }
