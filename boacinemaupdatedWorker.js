@@ -754,12 +754,14 @@ async function relaySign(env, u, hdr) {
   hdr = hdr || "";
   return "/api/relay?u=" + encodeURIComponent(u) + "&e=" + e + (hdr ? "&h=" + encodeURIComponent(hdr) : "") + "&s=" + (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")));
 }
+const RELAY_CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Allow-Headers": "range, if-range, content-type", "Access-Control-Max-Age": "86400" };
 async function relayHandle(request, url, env) {
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: RELAY_CORS });
   const u = url.searchParams.get("u") || "";
   const e = Number(url.searchParams.get("e")) || 0;
   const sg = url.searchParams.get("s") || "";
   const hdr = url.searchParams.get("h") || "";
-  if (!relayAllowed(u) || e < Date.now() / 1000 || sg !== (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")))) return new Response("forbidden", { status: 403 });
+  if (!relayAllowed(u) || e < Date.now() / 1000 || sg !== (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")))) return new Response("forbidden", { status: 403, headers: RELAY_CORS });
   // Only stream headers are built here: nothing about the viewer (IP, country, cookies) is forwarded.
   const h = new Headers();
   h.set("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36");
@@ -771,7 +773,7 @@ async function relayHandle(request, url, env) {
   if (hdr) { try { const o = JSON.parse(hdr); for (const k of Object.keys(o)) h.set(k, o[k]); } catch (e2) {} }
   let res;
   try { res = await fetch(u, { headers: h, redirect: "follow", method: request.method === "HEAD" ? "HEAD" : "GET", signal: request.signal }); }
-  catch (err) { return new Response("relay failed", { status: 502 }); }
+  catch (err) { return new Response("relay failed", { status: 502, headers: RELAY_CORS }); }
   const out = new Headers();
   ["content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified"].forEach((k) => { const v = res.headers.get(k); if (v) out.set(k, v); });
   out.set("Access-Control-Allow-Origin", "*");
@@ -3151,7 +3153,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
   // Returns a signed relay address, or "" when the relay can't be reached (callers never fall back to a direct link silently).
   function relaySign(u, st0) {
     var hq = st0 && st0.headers ? "&h=" + encodeURIComponent(JSON.stringify(st0.headers)) : "";
-    return api("/api/relay-sign?u=" + encodeURIComponent(u) + hq, 0, 15000).then(function (r) { return location.origin + r.u; }).catch(function () { toast("Privacy relay unavailable"); return ""; });
+    return api("/api/relay-sign?u=" + encodeURIComponent(u) + hq, 0, 15000).then(function (r) { return location.origin + r.u; }).catch(function () { toast(RELAY_ON() ? "Privacy relay unavailable" : "Stream proxy unavailable"); return ""; });
   }
   function paintPriv() {
     var b = $("smpriv");
@@ -3826,7 +3828,10 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
       triedU[src0] = 1; dead = false;
       if (/^http:/i.test(src0) && location.protocol === "https:") { why = "This link is plain HTTP and browsers block it on a secure page."; src0 = src0.replace(/^http:/i, "https:"); }
-      var isHls = /\.m3u8(\?|$)/i.test(src0);
+      var isHls = /\.m3u8(\?|$)/i.test(src0), netFail = false;
+      // HLS needs the stream proxy only when the plugin demands custom headers (Referer / User-Agent) or a direct load was blocked (CORS / 403)
+      var hdrNeed = !!(curSt && curSt.headers && Object.keys(curSt.headers).length);
+      var viaProxy = !RELAY_ON() && isHls && (!!useRelay || hdrNeed);
       msg.textContent = "";
       function go(src) {
         if (closed || gen !== srcGen) return;
@@ -3839,6 +3844,8 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
           if (gen !== srcGen) return;
           // the toggle is read live: a relay retry only happens while it is ON, and never when it is OFF
           if (RELAY_ON() && !relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
+          // privacy relay OFF: a blocked HLS playlist (CORS / 403 / network) gets one retry through the stream proxy, with its own message
+          if (!RELAY_ON() && isHls && !relayed && !retried && netFail) { retried = true; toast("Loading through the stream proxy"); startSource(src0, true); return; }
           stepOrFail();
         };
         fatalFn = onFatal;
@@ -3857,6 +3864,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
           hls.on(window.Hls.Events.ERROR, function (ev, d) {
             if (!d || !d.fatal) return;
             why = hlsWhy(d);
+            netFail = d.type === window.Hls.ErrorTypes.NETWORK_ERROR;
             if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch (e) {} }
             onFatal();
           });
@@ -3867,16 +3875,19 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
           var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
         } else {
           v.src = src;
-          v.onerror = function () { why = mediaWhy(v.error); onFatal(); };
+          v.onerror = function () { why = mediaWhy(v.error); netFail = isHls && !!v.error && (v.error.code === 2 || v.error.code === 4); onFatal(); };
           var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
         }
       }
-      if (RELAY_ON()) {
+      if (RELAY_ON() || viaProxy) {
         relayed = true;
         relaySign(src0, curSt).then(function (ru) {
           if (gen !== srcGen || closed) return;
-          if (!RELAY_ON()) { relayed = false; go(src0); return; }     // switched OFF while signing: go direct
-          if (!ru) { why = "The privacy relay is unavailable right now. Turn it off to play directly."; fail(); return; }
+          if (!RELAY_ON() && !viaProxy) { relayed = false; go(src0); return; }     // switched OFF while signing: go direct
+          if (!ru) {
+            if (!RELAY_ON()) { relayed = false; go(src0); return; }               // proxy unavailable: still try the direct link
+            why = "The privacy relay is unavailable right now. Turn it off to play directly."; fail(); return;
+          }
           go(ru);
         });
       } else { relayed = false; go(src0); }
