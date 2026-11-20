@@ -3607,7 +3607,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
 
     if (root.parentNode !== document.body) document.body.appendChild(root);
     window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
-    var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null;
+    var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null, failedU = {}, dead = false;
     var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
     (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
     var dash = null, menuEl = null, seekAfter = 0, BRI = 1, gestEnd = 0, rate = 1, fitI = 0, mqL = null;
@@ -3745,7 +3745,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       fb();
     }
     function fail() {
-      spin.className = "pspin"; clearTimeout(stallT);
+      dead = true; spin.className = "pspin"; clearTimeout(stallT);
       msg.textContent = "";
       msg.appendChild(h("b", null, "This stream can't play in the app player"));
       whyEl = h("div", "pwhy", "Why: " + (why || "Checking the stream\u2026"));
@@ -3784,7 +3784,8 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     function switchTo(i, auto) {
       var sv = ((ctx && ctx.servers) || [])[i];
       if (!sv) return;
-      tried[i] = 1; curSrv = i;
+      tried[i] = 1; curSrv = i; bad[i] = 0;
+      if (!auto) { autoN = 0; failedU[sv.st.url] = 0; triedU[sv.st.url] = 0; }   // a manual pick gets a fresh failover budget and a clean retry
       var t = v.currentTime || 0;
       if (t > 1) seekAfter = t;
       url = sv.st.url; curSt = sv.st; relayed = false; retried = false; why = "";
@@ -3794,11 +3795,12 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     }
     function stepOrFail() {
       var L = (ctx && ctx.servers) || [];
+      failedU[url] = 1;
       if (curSrv > -1) bad[curSrv] = 1;
       console.warn("[Boa] playback failed on", url, why);
-      if (autoN++ < 6) {
+      if (autoN++ < 10) {
         for (var i = 0; i < L.length; i++) {
-          if (tried[i] || L[i].tier === "r" || triedU[L[i].st.url] || L[i].urls.indexOf(url) > -1) continue;
+          if (tried[i] || L[i].tier === "r" || triedU[L[i].st.url] || failedU[L[i].st.url] || L[i].urls.indexOf(url) > -1) continue;
           switchTo(i, true);
           return;
         }
@@ -3807,8 +3809,9 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
           var al = L[k].alts || [];
           for (var m = 0; m < al.length; m++) {
             var a = al[m];
-            if (a.heavy || triedU[a.st.url] || a.st.url === url || /\/embed\/|\.html?($|\?)/i.test(a.st.url)) continue;
+            if (a.heavy || triedU[a.st.url] || failedU[a.st.url] || a.st.url === url || /\/embed\/|\.html?($|\?)/i.test(a.st.url)) continue;
             curSt = a.st; url = a.st.url; relayed = false; retried = false; why = "";
+            curSrv = k; tried[k] = 1; bad[k] = 0;   // the owning server is live through this link, so it is not shown as failed
             seekAfter = (v.currentTime || 0) > 1 ? v.currentTime : seekAfter;
             msg.className = "pmsg"; msg.textContent = "";
             toast("Trying another source");
@@ -3821,7 +3824,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     }
     function startSource(src0, useRelay) {
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
-      triedU[src0] = 1;
+      triedU[src0] = 1; dead = false;
       if (/^http:/i.test(src0) && location.protocol === "https:") { why = "This link is plain HTTP and browsers block it on a secure page."; src0 = src0.replace(/^http:/i, "https:"); }
       var isHls = /\.m3u8(\?|$)/i.test(src0);
       msg.textContent = "";
@@ -4207,10 +4210,11 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       hd.appendChild(cx); m.appendChild(hd);
       if (!L.length) m.appendChild(h("div", "srnote", "Only this stream is available for this title."));
       L.forEach(function (sv, i) {
-        var on = i === curSrv;
+        var on = !dead && sv.urls.indexOf(url) > -1;
+        var isBad = !on && (bad[i] || failedU[sv.st.url]);
         var row = h("div", "srrow" + (on ? " on" : ""));
         row.tabIndex = 0; row.setAttribute("role", "button");
-        row.setAttribute("aria-label", "Server " + sv.n + ", " + LIGHT[sv.tier] + (on ? ", currently playing" : bad[i] ? ", failed" : ""));
+        row.setAttribute("aria-label", "Server " + sv.n + ", " + LIGHT[sv.tier] + (on ? ", currently playing" : isBad ? ", failed, tap to retry" : ""));
         row.appendChild(h("span", "srn", pad2(sv.n)));
         var dot = h("i", "srdot"); dot.style.background = LCOL[sv.tier]; dot.style.boxShadow = "0 0 8px " + LCOL[sv.tier];
         dot.setAttribute("role", "img"); dot.setAttribute("aria-label", LIGHT[sv.tier]);
@@ -4219,14 +4223,14 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
         var t1 = h("div", "srt1");
         t1.appendChild(h("b", null, "SERVER " + sv.n));
         t1.appendChild(h("span", "sbadge", sv.label));
-        if (on) t1.appendChild(h("span", "srlive", "LIVE")); else if (bad[i]) t1.appendChild(h("span", "srbad", "FAILED"));
+        if (on) t1.appendChild(h("span", "srlive", "LIVE")); else if (isBad) t1.appendChild(h("span", "srbad", "FAILED"));
         mid.appendChild(t1);
         mid.appendChild(h("span", "srsub", (sv.q ? sv.q + "p • " : "") + String(sv.f || "").toUpperCase() + " • " + (sv.st.provider || "Plugin")));
         row.appendChild(mid);
         var cp = h("button", "srcp", "Copy"); cp.setAttribute("aria-label", "Copy link for server " + sv.n);
         cp.onclick = function (ev) { ev.stopPropagation(); copyLink(sv.st.url); };
         row.appendChild(cp);
-        row.onclick = function () { closeMenu(); if (i !== curSrv) switchTo(i, false); };
+        row.onclick = function () { closeMenu(); if (!on) switchTo(i, false); };
         row.onkeydown = function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); row.onclick(); } };
         m.appendChild(row);
       });
@@ -5205,31 +5209,32 @@ $("smclose").onclick = function () {
         pool.sort(function (a, b) { return b.sd.sc - a.sd.sc; });
         var light = pool.filter(function (e) { return !e.sd.heavy; });
         var heavyL = pool.filter(function (e) { return e.sd.heavy; });
-        var servers = [];
-        function take(list, wantNewProv) {
-          var pick = null;
-          for (var k = 0; k < list.length; k++) {
-            var e = list[k];
-            if (e._used) continue;
-            if (!pick) pick = e;
-            if (!wantNewProv || !servers.some(function (sv) { return sv.main.st.provider === e.st.provider; })) { pick = e; break; }
-          }
-          if (pick) pick._used = true;
-          return pick;
+        var servers = [], PROV = {};
+        function pv(e) { return e.st.provider || "Plugin"; }
+        function addSrv(e) { e._used = true; PROV[pv(e)] = 1; servers.push({ main: e, alts: [], tier: e.sd.heavy ? "r" : "y" }); }
+        function nextFrom(arr, distinct) {
+          for (var k = 0; k < arr.length; k++) { var e = arr[k]; if (!e._used && (!distinct || !PROV[pv(e)])) return e; }
+          return null;
         }
-        for (var n = 0; n < 3; n++) {
-          var e1 = take(light, n > 0);
+        // 1) new provider first (web-friendly before heavy), 2) only then repeat a provider so every slot still gets a stream
+        while (servers.length < 3) {
+          var e1 = nextFrom(light, true) || nextFrom(heavyL, true) || nextFrom(light, false) || nextFrom(heavyL, false);
           if (!e1) break;
-          servers.push({ main: e1, alts: [], tier: n === 0 && e1.sd.sc >= 90 ? "g" : "y" });
+          addSrv(e1);
         }
-        var h1 = take(heavyL, false);
-        if (h1) servers.push({ main: h1, alts: [], tier: "r" });
-        if (!servers.length && heavyL.length) { var h0 = take(heavyL, false); if (h0) servers.push({ main: h0, alts: [], tier: "r" }); }
-        // leftovers become hidden "more links" under the closest server of the same kind
+        if (servers.length < 4) {
+          var e4 = nextFrom(heavyL, true) || nextFrom(light, true) || nextFrom(heavyL, false) || nextFrom(light, false);
+          if (e4) addSrv(e4);
+        }
+        // heavy / VLC servers always sit last (stable), the top web-ready one is the green server
+        servers = servers.filter(function (x) { return x.tier !== "r"; }).concat(servers.filter(function (x) { return x.tier === "r"; }));
+        if (servers.length && servers[0].tier === "y" && servers[0].main.sd.sc >= 90) servers[0].tier = "g";
+        // leftovers become hidden "more links" under a server of the same provider, else the same kind
         pool.forEach(function (e) {
           if (e._used) return;
-          var targ = null;
-          for (var q = 0; q < servers.length; q++) { if ((servers[q].tier === "r") === e.sd.heavy) { targ = servers[q]; break; } }
+          var targ = null, q;
+          for (q = 0; q < servers.length; q++) { if (pv(servers[q].main) === pv(e) && (servers[q].tier === "r") === !!e.sd.heavy) { targ = servers[q]; break; } }
+          if (!targ) for (q = 0; q < servers.length; q++) { if ((servers[q].tier === "r") === !!e.sd.heavy) { targ = servers[q]; break; } }
           if (!targ) targ = servers[servers.length - 1];
           if (targ && targ.alts.length < 12) targ.alts.push(e);
         });
