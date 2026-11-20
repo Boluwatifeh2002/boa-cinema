@@ -733,32 +733,56 @@ function relayAllowed(u) {
     return true;
   } catch (e) { return false; }
 }
-async function relaySign(env, u) {
+// Only these plugin headers may be forwarded to the stream host (signed together with the link).
+function relayHdrClean(raw) {
+  try {
+    const o = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!o || typeof o !== "object") return "";
+    const out = {};
+    for (const k of Object.keys(o)) {
+      const n = k.toLowerCase();
+      if (n === "referer" || n === "referrer") out.Referer = String(o[k]).slice(0, 300);
+      else if (n === "origin") out.Origin = String(o[k]).slice(0, 200);
+      else if (n === "user-agent") out["User-Agent"] = String(o[k]).slice(0, 300);
+    }
+    const t = JSON.stringify(out);
+    return t === "{}" || t.length > 700 ? "" : t;
+  } catch (e) { return ""; }
+}
+async function relaySign(env, u, hdr) {
   const e = Math.floor(Date.now() / 1000) + 21600;
-  return "/api/relay?u=" + encodeURIComponent(u) + "&e=" + e + "&s=" + (await relayHmac(env, u + "|" + e));
+  hdr = hdr || "";
+  return "/api/relay?u=" + encodeURIComponent(u) + "&e=" + e + (hdr ? "&h=" + encodeURIComponent(hdr) : "") + "&s=" + (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")));
 }
 async function relayHandle(request, url, env) {
   const u = url.searchParams.get("u") || "";
   const e = Number(url.searchParams.get("e")) || 0;
   const sg = url.searchParams.get("s") || "";
-  if (!relayAllowed(u) || e < Date.now() / 1000 || sg !== (await relayHmac(env, u + "|" + e))) return new Response("forbidden", { status: 403 });
+  const hdr = url.searchParams.get("h") || "";
+  if (!relayAllowed(u) || e < Date.now() / 1000 || sg !== (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")))) return new Response("forbidden", { status: 403 });
+  // Only stream headers are built here: nothing about the viewer (IP, country, cookies) is forwarded.
   const h = new Headers();
   h.set("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36");
+  h.set("Accept", "*/*");
   const rg = request.headers.get("range");
   if (rg) h.set("Range", rg);
+  const ir = request.headers.get("if-range");
+  if (ir && rg) h.set("If-Range", ir);
+  if (hdr) { try { const o = JSON.parse(hdr); for (const k of Object.keys(o)) h.set(k, o[k]); } catch (e2) {} }
   let res;
   try { res = await fetch(u, { headers: h, redirect: "follow", method: request.method === "HEAD" ? "HEAD" : "GET", signal: request.signal }); }
   catch (err) { return new Response("relay failed", { status: 502 }); }
   const out = new Headers();
-  ["content-type", "content-length", "content-range", "accept-ranges"].forEach((k) => { const v = res.headers.get(k); if (v) out.set(k, v); });
+  ["content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified"].forEach((k) => { const v = res.headers.get(k); if (v) out.set(k, v); });
   out.set("Access-Control-Allow-Origin", "*");
+  out.set("Access-Control-Expose-Headers", "content-range, accept-ranges, content-length, content-type");
   out.set("Cache-Control", "no-store");
   const ct = res.headers.get("content-type") || "";
   const clen = Number(res.headers.get("content-length")) || 0;
   if ((/mpegurl/i.test(ct) || /\.m3u8(\?|$)/i.test(u)) && clen < 1500000) {
     const base = res.url || u;
     const lines = (await res.text()).split("\n");
-    const fix = async (ref) => { try { const abs = new URL(ref.trim(), base).href; return relayAllowed(abs) ? await relaySign(env, abs) : ref; } catch (err) { return ref; } };
+    const fix = async (ref) => { try { const abs = new URL(ref.trim(), base).href; return relayAllowed(abs) ? await relaySign(env, abs, hdr) : ref; } catch (err) { return ref; } };
     const done = await Promise.all(lines.map(async (ln) => {
       if (!ln.trim()) return ln;
       if (ln[0] === "#") {
@@ -772,6 +796,65 @@ async function relayHandle(request, url, env) {
     return new Response(done.join("\n"), { status: res.status, headers: out });
   }
   return new Response(res.body, { status: res.status, headers: out });
+}
+
+// Looks at what a stream link really returns (first bytes / playlist) and explains why a browser may not play it.
+// Runs only after a playback failure, from this Worker (the viewer's IP is never involved).
+async function probeHandle(url, env) {
+  const out = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json", "cache-control": "no-store", "Access-Control-Allow-Origin": "*" } });
+  const u = url.searchParams.get("u") || "";
+  const e = Number(url.searchParams.get("e")) || 0;
+  const hdr = url.searchParams.get("h") || "";
+  if (!relayAllowed(u) || e < Date.now() / 1000 || (url.searchParams.get("s") || "") !== (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")))) return new Response("forbidden", { status: 403 });
+  const h = new Headers({ "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36", Accept: "*/*", Range: "bytes=0-65535" });
+  if (hdr) { try { const o = JSON.parse(hdr); for (const k of Object.keys(o)) h.set(k, o[k]); } catch (e2) {} }
+  let res;
+  try { res = await fetch(u, { headers: h, redirect: "follow", signal: AbortSignal.timeout(6000) }); }
+  catch (err) { return out({ ok: false, kind: "network", reason: "Couldn't reach the stream host (it is offline, blocked or the address no longer exists)." }); }
+  const st = res.status, ct = (res.headers.get("content-type") || "").toLowerCase();
+  let bytes = new Uint8Array(0);
+  try {
+    if (res.body) {
+      const rd = res.body.getReader();
+      const parts = []; let n = 0;
+      while (n < 65536) { const { done, value } = await rd.read(); if (done) break; parts.push(value); n += value.length; }
+      try { await rd.cancel(); } catch (e2) {}
+      bytes = new Uint8Array(Math.min(n, 65536));
+      let o = 0; for (const p of parts) { const take = Math.min(p.length, bytes.length - o); if (take <= 0) break; bytes.set(p.subarray(0, take), o); o += take; }
+    }
+  } catch (err) {}
+  const txt = new TextDecoder("latin1").decode(bytes);
+  const base = { status: st, ct: ct.slice(0, 60) };
+  if (st === 401 || st === 403) return out({ ...base, ok: false, kind: "denied", reason: "The host refused access (HTTP " + st + "): the link is blocked, expired or needs a login or token." });
+  if (st === 404 || st === 410) return out({ ...base, ok: false, kind: "gone", reason: "The file no longer exists on the host (HTTP " + st + ")." });
+  if (st === 429) return out({ ...base, ok: false, kind: "ratelimit", reason: "The host is rate-limiting requests (HTTP 429). Wait a minute or switch server." });
+  if (st >= 500) return out({ ...base, ok: false, kind: "hosterr", reason: "The host had a server error (HTTP " + st + ")." });
+  if (st >= 400) return out({ ...base, ok: false, kind: "http", reason: "The host answered HTTP " + st + "." });
+  if (/text\/html/.test(ct) || /^\s*<(!doctype|html|head|body)/i.test(txt)) return out({ ...base, ok: false, kind: "html", reason: "This link opens a web page, not a video file (it may need a browser, a login or an embedded player)." });
+  if (/^#EXTM3U/.test(txt) || /mpegurl/.test(ct)) {
+    const codecs = (txt.match(/CODECS="([^"]+)"/g) || []).join(" ");
+    if (/hvc1|hev1|dvh1/i.test(codecs)) return out({ ...base, ok: false, kind: "hls", codec: "hevc", reason: "This HLS stream uses HEVC (H.265) video, which most browsers can't decode. Use VLC or another server." });
+    if (/ec-3|ac-3/i.test(codecs)) return out({ ...base, ok: false, kind: "hls", codec: "ac3", reason: "This HLS stream uses AC3 / E-AC3 audio, which many browsers can't play. Use VLC or another server." });
+    if (/METHOD=SAMPLE-AES|skd:\/\/|com\.apple\.fps|widevine/i.test(txt)) return out({ ...base, ok: false, kind: "hls", codec: "drm", reason: "This HLS stream is DRM-protected and can't be played in the browser." });
+    if (!/#EXTINF|#EXT-X-STREAM-INF/.test(txt)) return out({ ...base, ok: false, kind: "hls", reason: "The HLS playlist is empty or has expired." });
+    return out({ ...base, ok: true, kind: "hls", reason: "The HLS playlist looks valid, but the browser could not load its segments (often a CORS block or an expired token)." });
+  }
+  const b = bytes;
+  if (b.length > 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) {
+    if (/webm/i.test(txt.slice(0, 64))) return out({ ...base, ok: true, kind: "webm", reason: "A WebM file that the browser still refused to play (likely a CORS block or a codec the browser lacks)." });
+    return out({ ...base, ok: false, kind: "mkv", reason: "This is an MKV file. Mobile web players can't play the MKV container, so use VLC or another server." });
+  }
+  if (txt.slice(0, 4) === "RIFF" && txt.slice(8, 12) === "AVI ") return out({ ...base, ok: false, kind: "avi", reason: "This is an AVI file, which browsers can't play. Use VLC or another server." });
+  if (txt.slice(4, 8) === "ftyp") {
+    const brand = txt.slice(8, 12);
+    if (/hvc1|hev1|dvh1/.test(txt)) return out({ ...base, ok: false, kind: "mp4", codec: "hevc", reason: "This file uses HEVC (H.265) video, which most browsers can't decode. Use VLC or another server." });
+    if (/ec-3|ac-3|dtsc|dtsh|dtsl/.test(txt)) return out({ ...base, ok: false, kind: "mp4", codec: "audio", reason: "This file uses AC3 / E-AC3 / DTS audio, which many browsers can't play. Use VLC or another server." });
+    return out({ ...base, ok: true, kind: brand === "qt  " ? "mov" : "mp4", reason: "The file looks like a normal MP4, but the browser could not load it (likely a CORS block, a blocked range request or an expired link)." });
+  }
+  if (b.length && b[0] === 0x47 && b[188] === 0x47) return out({ ...base, ok: false, kind: "ts", reason: "This is a raw MPEG-TS stream, which browsers can't play directly. Use VLC or another server." });
+  if (txt.slice(0, 3) === "FLV") return out({ ...base, ok: false, kind: "flv", reason: "This is an FLV file, which browsers can't play." });
+  if (/^(video|audio)\//.test(ct)) return out({ ...base, ok: true, kind: "media", reason: "The host returns " + ct.split(";")[0] + ", but the browser could not play it (codec or CORS issue)." });
+  return out({ ...base, ok: false, kind: "unknown", reason: "The host returned something that isn't a recognisable video (type: " + (ct.split(";")[0] || "unknown") + ")." });
 }
 
 // ============================================================================
@@ -1831,6 +1914,8 @@ function normStremio(repo, x) {
   const out = { title: first.slice(0, 120), url, quality: qualityOf(label), provider: repo.name || "Stremio" };
   if (bh.videoSize) out.size = bh.videoSize;
   if (bh.notWebReady) out.notWebReady = true;
+  const ph = bh.proxyHeaders && bh.proxyHeaders.request;
+  if (ph && typeof ph === "object") { const hc = relayHdrClean(ph); if (hc) out.headers = JSON.parse(hc); }
   return out;
 }
 async function stremioStreams(repo, env, mediaType, tmdbId, season, episode, timeoutMs) {
@@ -2241,7 +2326,7 @@ async function handleApi(url, env, request) {
     if (path === "/api/relay-sign") {
       const u = url.searchParams.get("u") || "";
       if (!relayAllowed(u)) return send({ error: "bad link" }, 400, "no-store");
-      return send({ u: await relaySign(env, u) }, 200, "no-store");
+      return send({ u: await relaySign(env, u, relayHdrClean(url.searchParams.get("h") || "")) }, 200, "no-store");
     }
     if (path === "/api/notice") {
       let n = "", p = 0;
@@ -3063,8 +3148,10 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     }).catch(function () {});
   }
   function RELAY_ON() { return lsGet("boa_relay", "0") === "1"; }
-  function relaySign(u) {
-    return api("/api/relay-sign?u=" + encodeURIComponent(u), 0, 15000).then(function (r) { return location.origin + r.u; }).catch(function () { toast("Privacy relay unavailable, playing directly"); return u; });
+  // Returns a signed relay address, or "" when the relay can't be reached (callers never fall back to a direct link silently).
+  function relaySign(u, st0) {
+    var hq = st0 && st0.headers ? "&h=" + encodeURIComponent(JSON.stringify(st0.headers)) : "";
+    return api("/api/relay-sign?u=" + encodeURIComponent(u) + hq, 0, 15000).then(function (r) { return location.origin + r.u; }).catch(function () { toast("Privacy relay unavailable"); return ""; });
   }
   function paintPriv() {
     var b = $("smpriv");
@@ -3087,7 +3174,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       }
       st.style.color = "#a3a3a8";
       st.textContent = "Checking relay\u2026";
-      relaySign("https://api.ipify.org?format=json").then(function (u) { return fetch(u).then(function (r) { return r.json(); }); }).then(function (j) {
+      relaySign("https://api.ipify.org?format=json").then(function (u) { if (!u) throw new Error("relay"); return fetch(u).then(function (r) { return r.json(); }); }).then(function (j) {
         if (!cb.checked) return;
         st.style.color = "#46d369";
         st.textContent = "Protected \u2022 Relay IP: " + j.ip;
@@ -3520,6 +3607,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
 
     if (root.parentNode !== document.body) document.body.appendChild(root);
     window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
+    var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null;
     var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
     (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
     var dash = null, menuEl = null, seekAfter = 0, BRI = 1, gestEnd = 0, rate = 1, fitI = 0, mqL = null;
@@ -3554,7 +3642,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     if (canPip) tr.appendChild(bPip);
     var bVlc = h("button", "ptxt", "VLC");
     bVlc.setAttribute("aria-label", "Open in VLC");
-    bVlc.onclick = function () { v.pause(); location.href = vlcLink(url); };
+    bVlc.onclick = function () { v.pause(); if (RELAY_ON()) relaySign(url, curSt).then(function (ru) { if (ru) location.href = vlcLink(ru); }); else location.href = vlcLink(url); };
     tr.appendChild(bVlc);
     tr.appendChild(bAmb); tr.appendChild(bFs); tr.appendChild(bX);
     top.appendChild(tr);
@@ -3660,14 +3748,29 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       spin.className = "pspin"; clearTimeout(stallT);
       msg.textContent = "";
       msg.appendChild(h("b", null, "This stream can't play in the app player"));
-      msg.appendChild(h("div", "pwhy", "Why: " + (why || "No picture or data was received from this stream.")));
+      whyEl = h("div", "pwhy", "Why: " + (why || "Checking the stream\u2026"));
+      msg.appendChild(whyEl);
       var r = h("div", "pfrow");
       var b1 = h("button", "pvlc pgrey", "Servers"); b1.onclick = openServers; r.appendChild(b1);
-      var b2 = h("button", "pvlc", "Open in VLC"); b2.onclick = function () { location.href = vlcLink(url); };
+      var b2 = h("button", "pvlc", "Open in VLC"); b2.onclick = function () { bVlc.onclick(); };
       var b3 = h("button", "pvlc pgrey", "Copy Link"); b3.onclick = function () { copyLink(); };
       r.appendChild(b2); r.appendChild(b3);
       msg.appendChild(r);
       msg.className = "pmsg on";
+      var u0 = url;
+      if (!probed[u0]) {
+        probed[u0] = 1;
+        console.warn("[Boa] stream failed:", u0, why);
+        api("/api/relay-sign?u=" + encodeURIComponent(u0) + (curSt && curSt.headers ? "&h=" + encodeURIComponent(JSON.stringify(curSt.headers)) : ""), 0, 8000)
+          .then(function (sg) { return api(String(sg.u).replace("/api/relay?", "/api/probe?"), 0, 9000); })
+          .then(function (j) {
+            console.warn("[Boa] stream diagnostic:", j);
+            if (closed || u0 !== url || !j || !j.reason || !whyEl) return;
+            why = j.reason;
+            whyEl.textContent = "Why: " + j.reason;
+          })
+          .catch(function () { if (whyEl && !why) whyEl.textContent = "Why: Couldn't inspect the stream. It may be offline, blocked or in a format the browser can't play."; });
+      }
     }
     // a stream that never reports a duration is treated as failed (the 00:00 / 00:00 case)
     function armWatch() {
@@ -3684,7 +3787,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
       tried[i] = 1; curSrv = i;
       var t = v.currentTime || 0;
       if (t > 1) seekAfter = t;
-      url = sv.st.url; relayed = false; retried = false; why = "";
+      url = sv.st.url; curSt = sv.st; relayed = false; retried = false; why = "";
       msg.className = "pmsg"; msg.textContent = "";
       toast(auto ? "Switching to SERVER " + sv.n : "SERVER " + sv.n);
       startSource(url, false);
@@ -3692,25 +3795,47 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
     function stepOrFail() {
       var L = (ctx && ctx.servers) || [];
       if (curSrv > -1) bad[curSrv] = 1;
-      for (var i = 0; i < L.length; i++) {
-        if (tried[i] || L[i].tier === "r" || L[i].urls.indexOf(url) > -1) continue;
-        switchTo(i, true);
-        return;
+      console.warn("[Boa] playback failed on", url, why);
+      if (autoN++ < 6) {
+        for (var i = 0; i < L.length; i++) {
+          if (tried[i] || L[i].tier === "r" || triedU[L[i].st.url] || L[i].urls.indexOf(url) > -1) continue;
+          switchTo(i, true);
+          return;
+        }
+        // no ranked server left: quietly try any other web-friendly link from the source list
+        for (var k = 0; k < L.length; k++) {
+          var al = L[k].alts || [];
+          for (var m = 0; m < al.length; m++) {
+            var a = al[m];
+            if (a.heavy || triedU[a.st.url] || a.st.url === url || /\/embed\/|\.html?($|\?)/i.test(a.st.url)) continue;
+            curSt = a.st; url = a.st.url; relayed = false; retried = false; why = "";
+            seekAfter = (v.currentTime || 0) > 1 ? v.currentTime : seekAfter;
+            msg.className = "pmsg"; msg.textContent = "";
+            toast("Trying another source");
+            startSource(url, false);
+            return;
+          }
+        }
       }
       fail();
     }
     function startSource(src0, useRelay) {
+      var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
+      triedU[src0] = 1;
+      if (/^http:/i.test(src0) && location.protocol === "https:") { why = "This link is plain HTTP and browsers block it on a secure page."; src0 = src0.replace(/^http:/i, "https:"); }
       var isHls = /\.m3u8(\?|$)/i.test(src0);
       msg.textContent = "";
       function go(src) {
-        if (closed) return;
+        if (closed || gen !== srcGen) return;
         if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
         if (dash) { try { dash.reset(); } catch (e) {} dash = null; }
         msg.className = "pmsg";
         spin.className = "pspin on";
         var onFatal = function () {
           clearTimeout(stallT);
-          if (!relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
+          if (gen !== srcGen) return;
+          // the toggle is read live: a relay retry only happens while it is ON, and never when it is OFF
+          if (RELAY_ON() && !relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
           stepOrFail();
         };
         fatalFn = onFatal;
@@ -3743,10 +3868,15 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
           var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
         }
       }
-      if (useRelay || RELAY_ON()) {
+      if (RELAY_ON()) {
         relayed = true;
-        relaySign(src0).then(go);
-      } else go(src0);
+        relaySign(src0, curSt).then(function (ru) {
+          if (gen !== srcGen || closed) return;
+          if (!RELAY_ON()) { relayed = false; go(src0); return; }     // switched OFF while signing: go direct
+          if (!ru) { why = "The privacy relay is unavailable right now. Turn it off to play directly."; fail(); return; }
+          go(ru);
+        });
+      } else { relayed = false; go(src0); }
     }
     // ----- VAST ads (pre-roll, mid-roll) -----
     function pixel(u) { try { var im = new Image(); im.src = String(u).replace(/\[(CACHEBUSTER|TIMESTAMP|RANDOM)\]/gi, String(Date.now())); } catch (e) {} }
@@ -5116,10 +5246,10 @@ $("smclose").onclick = function () {
           sv.main.st.label = "SERVER " + sv.n + " · " + sv.label;
         });
         CUR.streams = servers.map(function (sv) { return sv.main.st; });
-        CUR.servers = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })) }; });
+        CUR.servers = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })), alts: sv.alts.map(function (a) { return { st: a.st, heavy: a.sd.heavy }; }) }; });
         function openVlc(st0) {
           var u = st0.url || "";
-          if (RELAY_ON() && u && !/^magnet:/i.test(u)) { relaySign(u).then(function (ru) { goVlc(ru, st0); }); return; }
+          if (RELAY_ON() && u && !/^magnet:/i.test(u)) { relaySign(u, st0).then(function (ru) { if (ru) goVlc(ru, st0); }); return; }
           goVlc(u, st0);
         }
         function goVlc(u, st0) {
@@ -7557,6 +7687,8 @@ function kvEnv(env, strict) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.pathname === "/api/relay") return relayHandle(request, url, env);   // heavy stream proxy: handled first, no KV, no metadata work
+    if (url.pathname === "/api/probe") return probeHandle(url, env);
     env = kvEnv(env, url.pathname.startsWith("/api/admin/"));
     // The Mini App and trailer player must open from this Worker's own https address
     if (url.protocol === "https:") {
