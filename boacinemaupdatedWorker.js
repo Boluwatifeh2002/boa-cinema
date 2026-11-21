@@ -962,7 +962,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-21.7";
+const APP_VERSION = "2026-11-21.9";
 const SW_JS = ("// " + "@@VER@@" + "\nvar V=\"boa-@@VER@@\";\nself.addEventListener(\"install\",function(e){self.skipWaiting();});\nself.addEventListener(\"activate\",function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==V;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});\nself.addEventListener(\"fetch\",function(e){\n  var r=e.request;\n  if(r.method!==\"GET\")return;\n  var u=new URL(r.url);\n  if(u.pathname.indexOf(\"/api/\")===0)return;\n  if(r.mode===\"navigate\"){\n    e.respondWith(fetch(r).then(function(res){\n      if(u.pathname===\"/\"||u.pathname===\"/app\"){var c=res.clone();caches.open(V).then(function(ca){ca.put(\"/app\",c);});}\n      return res;\n    }).catch(function(){return caches.match(\"/app\").then(function(m){return m||new Response(\"You are offline. Open Boa Cinema again when you have a connection.\",{status:503,headers:{\"content-type\":\"text/plain\"}});});}));\n    return;\n  }\n  if(u.hostname===\"image.tmdb.org\"){\n    e.respondWith(caches.open(V).then(function(ca){return ca.match(r).then(function(hit){\n      var f=fetch(r).then(function(res){if(res.ok||res.type===\"opaque\")ca.put(r,res.clone());return res;}).catch(function(){return hit;});\n      return hit||f;\n    });}));\n  }\n});\n").split("@@VER@@").join(APP_VERSION);
 const PWA_ICONS = { "192": "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", "512": "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ev0510wH1KtXrx49eqTd6sILL+zQoUPaYikKbN68WZ0KmzFjxg033KBOi6nb2LFj1cM1a9bs3r07xYapn6pTp861116bugzPVhYgACprsBxNgW0yfrko9uu9vzKdO3fuQQcdpBayuX3zzTfqUudvf/tbdfK9efPmRxxxRN26dY877rg2bdpcfPHF6uTS559/nk39iW2nTJmS9pcShg8fniiscf/WW29169btpJNO6t69uzppo96zP/KfH9Wuenjuuec2adJEhaVGzYlN+vbtq+I2scx9WgECIC0RBcIt8LgsO18Urxe+fd+DOvPTunXrbBA3bNjQv3//Qw45ZMiQIU8//fRrr732/vvv79y5U9W5ZcuWN95444UXXhg9evSRRx7Zs2fP9evXq/XaNxUqc+bMSfGhIPXev0WLFnr1P/74461atVqyZEmKzb/77ruBAwcOGDAgRZkUTxUVFQ0bNixFAZ6qLEAAJDVYiJrAThn/X6t4TKxst0+f+FSg559//tChQ9WC3k296x8zZozKjwULFtipYdGiReqAQG2idqN2ytdYpmnTptdcc02NT6mV2m//V65c2adPH1WDndv8+fPVYY2dktXLdO3atfpK1tQoQADUyMLK0As8b5WrN/4+/q5vQvDOO+/U/qiMOlF+2mmn3X333VJmcPiiCqtNzjjjjE8//TTRB4372vbUhx122JlnnqlRYUVFRYpQqbFCdVizcOHCGp9KvfLQQw9t1qxZ6jI8mxAgABIO3EdEQO3+XrbKe1jFg0Xp1/698U9oqmuqao+ZWM70Xp3hUe9kP/vss0w3TJT/8MMP1TtoVUniYab3P//5zwcOHFh9q4suuqj6Sjtrnnvuuffee89OycplJk6cWPmh/WV1LcF+4R9KmvofAWDqzEdu3MVSPiLL2os9V4nS1336pH8VVO0T2cXFxZdddtkHH3xQpcKMHqodrrrQqv2hmho737Zt24z6kCy8dOnS5LL9hXfffVdd4bBfPllS7zAlubk5CwSAOXMd2ZF+JePTZWkbsWdcrOwTv9/1J5XbtWvXvHnz5MOMFu66667Vq1dntEmNhdXl4pm2P9pfpYZjjjmmc+fOlVcKIfR2rOr8j7o4Ubkq+8vqorf9wsmSp59+enKZhRQCBEAKHJ4KtMCnMj7XKrvSKj5D7Lk7Vp7FCR9Xhjl48GC9er/44os7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" };
 const PWA_MANIFEST = {
@@ -2136,12 +2136,14 @@ function normStremio(repo, x) {
 }
 async function stremioStreams(repo, env, mediaType, tmdbId, season, episode, timeoutMs) {
   const base = repo.base || manifestBase(repo.url);
+  const sig = AbortSignal.timeout(timeoutMs || 9000);          // ONE deadline for this provider, however many ids are tried
   const ids = await streamVideoIds(env, mediaType, tmdbId, season, episode);
   for (const vid of ids) {
+    if (sig.aborted) break;
     try {
       const r = await fetch(base + "/stream/" + (mediaType === "tv" ? "series" : "movie") + "/" + encodeURIComponent(vid).replace(/%3A/g, ":") + ".json", {
         headers: { "user-agent": "BoaCinema/1.0" },
-        signal: AbortSignal.timeout(timeoutMs || 9000),
+        signal: sig,
       });
       if (!r.ok) continue;
       const j = await r.json();
@@ -2155,7 +2157,7 @@ async function stremioStreams(repo, env, mediaType, tmdbId, season, episode, tim
 }
 async function stremioOnly(env, mediaType, tmdbId, season, episode) {
   const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false && r.kind === "stremio" && !(r.disabled || []).includes("stremio"));
-  const lists = await Promise.all(repos.map((r) => stremioStreams(r, env, mediaType, tmdbId, season, episode, Number(env.SCRAPER_TIMEOUT_MS) || 9000).catch(() => [])));
+  const lists = await Promise.all(repos.map((r) => stremioStreams(r, env, mediaType, tmdbId, season, episode, providerMs(env)).catch(() => [])));
   return lists.flat();
 }
 
@@ -2213,124 +2215,168 @@ function withTimeout(p, ms, label) {
   return Promise.race([p, timer]).finally(() => clearTimeout(t));
 }
 
-function startScrapers(env, tmdbId, mediaType, season, episode, key) {
-  const bag = [];
-  const seen = new Set();
-  const job = { bag, done: null };
-  job.done = (async () => {
-    const perScraper = Math.min(Number(env.SCRAPER_TIMEOUT_MS) || 4000, 4000);
-    const only = String(env.ONLY_SCRAPERS || "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
-    const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false);
-    const tasks = [];
-    await Promise.all(
-      repos.map(async (repo) => {
-        if (repo.kind === "stremio") {
-          if ((repo.disabled || []).includes("stremio")) return;
-          tasks.push(
-            async () => {
-              const res = await stremioStreams(repo, env, mediaType, tmdbId, season, episode, perScraper).catch(() => []);
-              for (const st of res) {
-                const k = String(st.url);
-                if (seen.has(k)) continue;
-                seen.add(k);
-                bag.push(st);
-              }
-              console.log("Collected " + res.length + " streams from " + (repo.name || repo.url));
-            }
-          );
-          return;
-        }
-        let manifest;
-        try {
-          manifest = await loadManifest(repo.url, 8000);
-        } catch (err) {
-          console.log("Repo failed " + repo.url + ": " + err.message);
-          return;
-        }
-        const off = new Set((repo.disabled || []).map(String));
-        for (const sc of scraperList(manifest, repo.url)) {
-          const sid = String(sc.id || sc.name || "");
-          const label = sc.name || sc.id || sc.url;
-          if (sc.enabled === false || !sc.url || off.has(sid)) continue;
-          if (only.length && !only.some((o) => String(sc.name || sc.id).toLowerCase().includes(o))) continue;
-          const types = sc.supportedTypes || sc.types;
-          if (Array.isArray(types) && types.length && !types.includes(mediaType)) continue;
-          tasks.push(
-            async () => {
-              try {
-                const fn = await loadScraperFn(sc.url, 4000);
-                const res = await withTimeout(
-                  Promise.resolve().then(() => fn(String(tmdbId), mediaType, season, episode)),
-                  perScraper,
-                  label
-                );
-                if (Array.isArray(res)) {
-                  for (const st of res) {
-                    if (!st) continue;
-                    const k = String(st.url || st.title || "");
-                    if (seen.has(k)) continue;
-                    seen.add(k);
-                    bag.push({ ...st, provider: sc.name || st.provider || sc.id });
-                  }
-                  console.log("Collected " + res.length + " streams from " + label);
-                }
-              } catch (err) {
-                console.log("Skipped scraper " + label + ": " + (err && err.message));
-              }
-            }
-          );
-        }
-      })
-    );
-    await runPool(tasks, 6);
-  })();
-  job.done
-    .then(() => cacheSetStreams(key, bag.slice()))
-    .catch(() => {})
-    .finally(() => STREAM_JOBS.delete(key));
-  return job;
+// ---- Progressive stream engine -------------------------------------------------------------------------
+// Every provider runs in parallel with its own hard timeout and drops its results into a shared "job" the moment they
+// arrive. Clients read the job as it fills (long-poll), so the first playable stream shows up immediately and slower
+// providers are merged in later. Finished lists are cached in the Edge Cache API (caches.default) with stale-while-
+// revalidate, never in KV. Nothing here reads or writes admin state beyond one cached config read at job start.
+const SC_FRESH_MS = 90 * 1000;       // served as-is
+let STREAM_EPOCH = 0;                // bumped when plugins change, so NEW lookups skip older cached lists (running jobs are untouched)
+function providerMs(env) { return Math.min(Math.max(Number(env.PROVIDER_TIMEOUT_MS) || 5000, 1500), 12000); }
+function newJob() { return { bag: [], seen: new Set(), ws: [], fin: false, done: Promise.resolve() }; }
+function jobWake(job) { const w = job.ws; job.ws = []; for (const f of w) f(); }
+function jobPush(job, list, needUrl, prov) {
+  let n = 0;
+  for (const st of list || []) {
+    if (!st || (needUrl && !st.url)) continue;
+    const k = String(st.url || st.title || "");
+    if (!k || job.seen.has(k)) continue;
+    job.seen.add(k);
+    job.bag.push(prov ? { ...st, provider: prov } : st);
+    n++;
+  }
+  if (n) jobWake(job);
+  return n;
+}
+// resolves when the job has more than `since` items, has finished, or `ms` passed (no timer is left behind)
+function jobWait(job, since, ms) {
+  if (job.fin || job.bag.length > since) return Promise.resolve();
+  return new Promise((res) => {
+    let t;
+    const f = () => { clearTimeout(t); res(); };
+    job.ws.push(f);
+    t = setTimeout(() => { const i = job.ws.indexOf(f); if (i > -1) job.ws.splice(i, 1); res(); }, ms);
+  });
+}
+function limiter(n) {
+  let act = 0;
+  const q = [];
+  const next = () => {
+    while (act < n && q.length) {
+      const it = q.shift();
+      act++;
+      Promise.resolve().then(it.f).catch(() => {}).finally(() => { act--; it.r(); next(); });
+    }
+  };
+  return (f) => new Promise((r) => { q.push({ f, r }); next(); });
+}
+const scReq = (key) => new Request("https://boa-cache.internal/streams/" + encodeURIComponent(key), { method: "GET" });
+async function edgeGet(key) {
+  try {
+    if (!globalThis.caches || !caches.default) return null;
+    const r = await caches.default.match(scReq(key));
+    if (!r) return null;
+    const at = Number(r.headers.get("x-boa-at")) || 0;
+    const list = await r.json();
+    return Array.isArray(list) && list.length ? { list, at } : null;
+  } catch (e) { return null; }
+}
+async function edgePut(key, list) {
+  try {
+    if (!globalThis.caches || !caches.default || !list.length || JSON.stringify(list).length > 400000) return;
+    await caches.default.put(scReq(key), new Response(JSON.stringify(list), {
+      headers: { "content-type": "application/json", "cache-control": "public, max-age=" + Math.round(STREAM_TTL_MS / 1000) + ", stale-while-revalidate=120", "x-boa-at": String(Date.now()) },
+    }));
+  } catch (e) {}
 }
 
-async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1, fresh = false) {
-  const s = Number(season) || 1;
-  const e = Number(episode) || 1;
-  if (globalThis.__fastStreams) {
-    // your faststream.js stays the main path; installed Stremio add-ons run alongside it and get merged in
-    const [fast, extra] = await Promise.all([
-      Promise.resolve(globalThis.__fastStreams(env, tmdbId, mediaType, s, e)).catch(() => []),
-      withTimeout(stremioOnly(env, mediaType, tmdbId, s, e), (Number(env.SCRAPER_TIMEOUT_MS) || 9000) + 1000, "stremio").catch(() => []),
-    ]);
-    const seenU = new Set();
-    return (Array.isArray(fast) ? fast : []).concat(extra).filter((x) => x && x.url && !seenU.has(x.url) && seenU.add(x.url));
+async function runScrapers(job, env, tmdbId, mediaType, season, episode) {
+  const perScraper = Math.min(Number(env.SCRAPER_TIMEOUT_MS) || 4000, 4000);
+  const per = providerMs(env);
+  const only = String(env.ONLY_SCRAPERS || "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+  const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false);
+  const lim = limiter(10), all = [];
+  await Promise.all(
+    repos.map(async (repo) => {
+      if (repo.kind === "stremio") {
+        if ((repo.disabled || []).includes("stremio")) return;
+        all.push(lim(async () => {
+          const res = await stremioStreams(repo, env, mediaType, tmdbId, season, episode, per).catch(() => []);
+          jobPush(job, res, false);
+        }));
+        return;
+      }
+      let manifest;
+      try { manifest = await loadManifest(repo.url, 6000); } catch (err) { return; }     // a slow manifest only delays its own repository
+      const off = new Set((repo.disabled || []).map(String));
+      for (const sc of scraperList(manifest, repo.url)) {
+        const sid = String(sc.id || sc.name || "");
+        const label = sc.name || sc.id || sc.url;
+        if (sc.enabled === false || !sc.url || off.has(sid)) continue;
+        if (only.length && !only.some((o) => String(sc.name || sc.id).toLowerCase().includes(o))) continue;
+        const types = sc.supportedTypes || sc.types;
+        if (Array.isArray(types) && types.length && !types.includes(mediaType)) continue;
+        all.push(lim(async () => {
+          try {
+            const fn = await loadScraperFn(sc.url, 4000);
+            const res = await withTimeout(Promise.resolve().then(() => fn(String(tmdbId), mediaType, season, episode)), perScraper, label);
+            if (Array.isArray(res)) jobPush(job, res, false, sc.name || sc.id);
+          } catch (err) {}
+        }));
+      }
+    })
+  );
+  await Promise.all(all);
+}
+async function runFast(job, env, tmdbId, mediaType, season, episode) {
+  const tasks = [
+    withTimeout(Promise.resolve(globalThis.__fastStreams(env, tmdbId, mediaType, season, episode)), Number(env.FAST_TIMEOUT_MS) || 15000, "fast")
+      .then((l) => { jobPush(job, Array.isArray(l) ? l : [], true); }).catch(() => {}),
+  ];
+  const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false && r.kind === "stremio" && !(r.disabled || []).includes("stremio"));
+  const per = providerMs(env);
+  for (const r of repos) tasks.push(stremioStreams(r, env, mediaType, tmdbId, season, episode, per).then((l) => { jobPush(job, l, true); }).catch(() => {}));
+  await Promise.all(tasks);
+}
+async function runBackend(job, env, tmdbId, mediaType, season, episode) {
+  try {
+    const r = await fetch(
+      env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) + "&id=" + encodeURIComponent(tmdbId) + "&s=" + season + "&e=" + episode,
+      { headers: { "x-stream-key": env.STREAM_KEY || "" }, signal: AbortSignal.timeout(Number(env.BACKEND_TIMEOUT_MS) || 45000) }
+    );
+    const list = r.ok ? await r.json() : [];
+    if (Array.isArray(list)) jobPush(job, list, false);
+  } catch (err) {}
+}
+function startJob(env, ctx, key, tmdbId, mediaType, season, episode) {
+  const job = newJob();
+  STREAM_JOBS.set(key, job);
+  const run = env.STREAM_BACKEND ? runBackend : globalThis.__fastStreams ? runFast : runScrapers;
+  job.done = withTimeout(Promise.resolve().then(() => run(job, env, tmdbId, mediaType, season, episode)), Number(env.STREAM_JOB_MS) || 30000, "job")
+    .catch(() => {})
+    .then(() => {
+      job.fin = true;
+      jobWake(job);
+      STREAM_JOBS.delete(key);
+      cacheSetStreams(key, job.bag.slice());
+      return edgePut(key, job.bag);
+    });
+  try { if (ctx && ctx.waitUntil) ctx.waitUntil(job.done); } catch (e) {}      // keeps running after the first response is sent
+  return job;
+}
+// Returns a job-like object { bag, fin, done, ws }. Cached lists come back finished; stale ones are refreshed in the background.
+async function streamsFor(env, ctx, tmdbId, mediaType, season, episode, fresh) {
+  const s = Number(season) || 1, e = Number(episode) || 1;
+  const key = [STREAM_EPOCH, mediaType, tmdbId, mediaType === "tv" ? s : 0, mediaType === "tv" ? e : 0].join(":");
+  const fin = (list) => { const j = newJob(); j.bag = list; j.fin = true; return j; };
+  const now = Date.now();
+  let hit = null;
+  const mem = STREAM_CACHE.get(key);
+  if (mem && (mem.list.length || !fresh) && now - mem.at < (mem.list.length ? STREAM_TTL_MS : EMPTY_TTL_MS)) hit = mem;
+  if (!hit && !fresh && !STREAM_JOBS.get(key)) { const eg = await edgeGet(key); if (eg) hit = { at: eg.at, list: eg.list }; }
+  if (hit && !fresh) {
+    if (hit.list.length && now - hit.at > SC_FRESH_MS && !STREAM_JOBS.get(key)) startJob(env, ctx, key, tmdbId, mediaType, s, e);   // stale-while-revalidate
+    return fin(hit.list);
   }
-  const key = [mediaType, tmdbId, mediaType === "tv" ? s : 0, mediaType === "tv" ? e : 0].join(":");
-  const cached = STREAM_CACHE.get(key);
-  if (cached && (cached.list.length || !fresh) && Date.now() - cached.at < (cached.list.length ? STREAM_TTL_MS : EMPTY_TTL_MS)) return cached.list;
-
-  if (env.STREAM_BACKEND) {
-    try {
-      const r = await fetch(
-        env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) +
-          "&id=" + encodeURIComponent(tmdbId) + "&s=" + s + "&e=" + e,
-        { headers: { "x-stream-key": env.STREAM_KEY || "" }, signal: AbortSignal.timeout(Number(env.BACKEND_TIMEOUT_MS) || 45000) }
-      );
-      const list = r.ok ? await r.json() : [];
-      if (Array.isArray(list)) cacheSetStreams(key, list);
-      return Array.isArray(list) ? list : [];
-    } catch (err) {
-      return [];
-    }
+  return STREAM_JOBS.get(key) || startJob(env, ctx, key, tmdbId, mediaType, s, e);
+}
+async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1, fresh = false, ctx) {
+  const job = await streamsFor(env, ctx, tmdbId, mediaType, season, episode, fresh);
+  if (!job.fin) {
+    let timer;
+    await Promise.race([job.done, new Promise((r) => { timer = setTimeout(r, Number(env.STREAM_BUDGET_MS) || 10000); })]);
+    clearTimeout(timer);
   }
-
-  let job = STREAM_JOBS.get(key);
-  if (!job) {
-    job = startScrapers(env, tmdbId, mediaType, s, e, key);
-    STREAM_JOBS.set(key, job);
-  }
-  const budget = Number(env.STREAM_BUDGET_MS) || 10000;
-  let timer;
-  await Promise.race([job.done, new Promise((r) => { timer = setTimeout(r, budget); })]);
-  clearTimeout(timer);
   return job.bag.slice();
 }
 
@@ -2430,7 +2476,7 @@ const bustRows = (url) => bustCache(url, ["/api/rows?type=movie", "/api/rows?typ
 const bustPicks = (url) =>
   bustCache(url, ["/api/row?type=movie&name=upcoming_boa", "/api/row?type=tv&name=upcoming_boa"]);
 
-async function handleApi(url, env, request) {
+async function handleApi(url, env, request, ctx) {
   const send = (data, status = 200, cache) =>
     new Response(JSON.stringify(data), {
       status,
@@ -2474,7 +2520,18 @@ async function handleApi(url, env, request) {
       const e = url.searchParams.get("e") || "1";
       if (!/^\d{1,9}$/.test(id)) return send({ error: "bad id" }, 400);
       try {
-        const streams = await fetchPluginStreams(env, id, media, s, e, !!url.searchParams.get("r") && url.searchParams.get("r") !== "0");
+        const fresh = !!url.searchParams.get("r") && url.searchParams.get("r") !== "0";
+        if (url.searchParams.get("warm") === "1") {            // details page opened: start (or reuse) the lookup, answer at once
+          const wj = await streamsFor(env, ctx, id, media, s, e, false);
+          return send({ ok: true, n: wj.bag.length, done: wj.fin }, 200, "no-store");
+        }
+        if (url.searchParams.get("p") === "1") {               // progressive: whatever has arrived so far, long-polled
+          const since = Number(url.searchParams.get("n")) || 0;
+          const job = await streamsFor(env, ctx, id, media, s, e, fresh);
+          await jobWait(job, since, 2500);
+          return send({ streams: await signStreamSubs(env, job.bag.slice()), n: job.bag.length, done: job.fin }, 200, "no-store");
+        }
+        const streams = await fetchPluginStreams(env, id, media, s, e, fresh, ctx);
         return send(Array.isArray(streams) ? await signStreamSubs(env, streams) : [], 200, "no-store");
       } catch (err) {
         console.error("Plugin fetch error:", err.message);
@@ -5811,28 +5868,50 @@ $("smclose").onclick = function () {
     modal.classList.add("open");
 
     var tok = ++STRM_TOK; clearTimeout(STRM_T);
-    // an empty or timed-out answer (providers still responding, common on S1E2+) is re-checked up to twice before giving up
-    function getStreams(n) {
-      return api("/api/streams?type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1) + "&r=" + n, 0, n ? 30000 : 60000)
-        .catch(function () { return null; })
-        .then(function (r) {
-          if (Array.isArray(r) && r.length) return r;
-          if (tok !== STRM_TOK) return [];
-          if (n >= 2) { if (r === null) throw new Error("timeout"); return []; }
-          var f = $("smlist").firstChild;
-          if (f && f.className === "note center") f.textContent = "Still checking sources\u2026 (try " + (n + 2) + " of 3)";
-          return new Promise(function (res) { STRM_T = setTimeout(res, n ? 5000 : 3000); }).then(function () { return tok === STRM_TOK ? getStreams(n + 1) : []; });
-        });
+    // Progressive fetch: the server answers with whatever has arrived so far (long-poll). The first playable stream builds the
+    // Server Room at once (and auto-starts it); later answers are merged in without touching a stream that is already playing.
+    var acc = [], seenAcc = {}, started = false, more = null;
+    function pause(ms) { return new Promise(function (res) { STRM_T = setTimeout(res, ms); }); }
+    function onBatch(batch) {
+      if (!batch.length || tok !== STRM_TOK) return;
+      if (!started) { started = true; begin(acc); }
+      else { addStreamSubs(batch); if (more) more(); }
     }
-    getStreams(0)
-      .then(function (streams) {
-        if (tok !== STRM_TOK) return;
-        clearTimeout(slowT);
-        list.textContent = "";
-        if (!streams || !streams.length) {
+    function run(attempt) {
+      var t0 = Date.now(), errs = 0;
+      function step(seen) {
+        if (tok !== STRM_TOK) return Promise.resolve("x");
+        return api("/api/streams?p=1&type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1) + "&n=" + seen + "&r=" + (attempt ? 1 : 0), 0, 15000)
+          .catch(function () { return null; })
+          .then(function (r) {
+            if (tok !== STRM_TOK) return "x";
+            if (Array.isArray(r)) r = { streams: r, n: r.length, done: true };      // plain-array answer (older server)
+            if (!r || !Array.isArray(r.streams)) { if (++errs > 2) return "err"; return pause(1500).then(function () { return step(seen); }); }
+            var batch = [];
+            r.streams.forEach(function (x) { if (x && x.url && !seenAcc[x.url]) { seenAcc[x.url] = 1; acc.push(x); batch.push(x); } });
+            onBatch(batch);
+            if (r.done || Date.now() - t0 > 50000) return "done";
+            return step(r.n || seen);
+          });
+      }
+      return step(0).then(function (st) {
+        if (tok !== STRM_TOK || st === "x" || started) return;
+        if (attempt >= 2) {
+          clearTimeout(slowT);
+          if (st === "err") throw new Error("timeout");
+          list.textContent = "";
           list.appendChild(h("div", "note center", "No stream returned."));
           return;
         }
+        var f = $("smlist").firstChild;
+        if (f && f.className === "note center") f.textContent = "Still checking sources… (try " + (attempt + 2) + " of 3)";
+        return pause(attempt ? 5000 : 3000).then(function () { return tok === STRM_TOK ? run(attempt + 1) : null; });
+      });
+    }
+    function begin(streams) {
+        if (tok !== STRM_TOK) return;
+        clearTimeout(slowT);
+        list.textContent = "";
         addStreamSubs(streams);
         // ---- size / resolution picker above the servers: filters what is shown, never what is fetched ----
         var host = h("div", "srvhost"), bar = h("div", "tierbar");
@@ -5853,8 +5932,14 @@ $("smclose").onclick = function () {
         bar.appendChild(chipRow("Quality", [["any", "Any"], ["380", "380p"], ["480", "480p"], ["720", "720p"], ["1080", "1080p"], ["2160", "4K"], ["4320", "8K"]], function () { return TIER; }, function (v) { TIER = v; lsSet("boa_tier", v); }));
         bar.appendChild(chipRow("Max size", [["auto", "Auto"], ["1", "1 GB"], ["2", "2 GB"], ["5", "5 GB"], ["10", "10 GB"], ["inf", "10 GB+"]], function () { return MAXG; }, function (v) { MAXG = v; lsSet("boa_maxgb", v); }));
         list.appendChild(bar); list.appendChild(host);
-        function renderServers() {
-        host.textContent = "";
+        var PREV = [];
+        function playerOpen() { var pl = $("player"); return !!pl && /(^|\s)open(\s|$)/.test(pl.className); }
+        function ukey(u) { return /^magnet:/i.test(u) ? String(u).slice(0, 60) : String(u).replace(/[?#].*$/, ""); }
+        // append = true while a stream is playing: existing servers keep their slot and state, only empty slots get filled
+        function renderServers(append) {
+        var APP = !!append && PREV.length > 0 && playerOpen();
+        if (append && !APP && PREV.length === 0 && !playerOpen()) append = false;
+        if (!APP) host.textContent = "";
         // ---- Provider-to-Server pipeline: score every stream, drop duplicates, show SERVER 1-4 with signal lights ----
         function fmtOf(x) {
           var u = String(x.url || ""), t = String(x.title || "") + " " + String(x.name || "");
@@ -5929,6 +6014,16 @@ $("smclose").onclick = function () {
         // heavy / VLC servers always sit last (stable), the top web-ready one is the green server
         servers = servers.filter(function (x) { return x.tier !== "r"; }).concat(servers.filter(function (x) { return x.tier === "r"; }));
         if (servers.length && servers[0].tier === "y" && servers[0].main.sd.sc >= 100) servers[0].tier = "g";
+        if (APP) {
+          var have = {}, provHave = {};
+          PREV.forEach(function (sv) { have[ukey(sv.main.st.url)] = 1; provHave[pv(sv.main)] = 1; sv.alts.forEach(function (a2) { have[ukey(a2.st.url)] = 1; }); });
+          var fresh = servers.filter(function (sv) { return !have[ukey(sv.main.st.url)]; });
+          fresh = fresh.filter(function (sv) { return !provHave[pv(sv.main)]; }).concat(fresh.filter(function (sv) { return provHave[pv(sv.main)]; }));
+          fresh = fresh.slice(0, Math.max(0, 7 - PREV.length));
+          if (!fresh.length) return;
+          fresh.forEach(function (sv) { if (sv.tier === "g") sv.tier = "y"; });
+          servers = PREV.concat(fresh);
+        }
         // leftovers become hidden "more links" under a server of the same provider, else the same kind
         function kindOf(sd) { return sd.tor ? 2 : sd.heavy ? 1 : 0; }
         pool.forEach(function (e) {
@@ -5949,7 +6044,7 @@ $("smclose").onclick = function () {
           host.appendChild(nm);
           return;
         }
-        if (TIER !== "any" || MAXG !== "auto") host.appendChild(h("div", "note", "Showing " + pool.length + " of " + total + " streams for this selection."));
+        if (!APP && (TIER !== "any" || MAXG !== "auto")) host.appendChild(h("div", "note", "Showing " + pool.length + " of " + total + " streams for this selection."));
         var LAB = { g: "Strong / Web Ready", y: ["Backup", "Alt Backup"], r: "Heavy / VLC" };
         var COL = { g: "#22c55e", y: "#facc15", r: "#ef4444" };
         function fmtName(sd) { return sd.tor ? "TORRENT" : sd.f === "hls" ? "HLS" : sd.f === "mp4" ? "MP4" : sd.f === "dash" ? "DASH" : sd.f === "embed" ? "Embed" : sd.f.toUpperCase(); }
@@ -5959,8 +6054,10 @@ $("smclose").onclick = function () {
           if (sv.main.sd.tor) sv.label = "Torrent (no Debrid)";
           sv.main.st.label = "SERVER " + sv.n + " · " + sv.label;
         });
-        CUR.streams = servers.filter(function (sv) { return !sv.main.sd.tor; }).map(function (sv) { return sv.main.st; });
-        CUR.servers = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, tor: !!sv.main.sd.tor, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })), alts: sv.alts.map(function (a) { return { st: a.st, heavy: a.sd.heavy, tor: !!a.sd.tor }; }) }; });
+        var csAll = servers.filter(function (sv) { return !sv.main.sd.tor; }).map(function (sv) { return sv.main.st; });
+        var cvAll = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, tor: !!sv.main.sd.tor, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })), alts: sv.alts.map(function (a) { return { st: a.st, heavy: a.sd.heavy, tor: !!a.sd.tor }; }) }; });
+        if (APP) { for (var ci = PREV.length; ci < cvAll.length; ci++) CUR.servers.push(cvAll[ci]); for (var cj = 0; cj < csAll.length; cj++) if (CUR.streams.indexOf(csAll[cj]) < 0) CUR.streams.push(csAll[cj]); }
+        else { CUR.streams = csAll; CUR.servers = cvAll; }
         function openMagnet(st0) {
           var u = st0.url || "";
           try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(u); } catch (e) {}
@@ -6011,7 +6108,10 @@ $("smclose").onclick = function () {
           if (CUR && (!w0 || w0.nx || w0.e !== CUR.e || w0.s !== CUR.s)) recordWatch(CUR, 1, 0, true);
         }
         var firstPlay = null, firstPlay0 = null;
+        var fromSi = APP ? PREV.length : 0;
+        if (APP) { var dsc0 = host.querySelector(".srvdisc"); if (dsc0 && dsc0.parentNode) dsc0.parentNode.removeChild(dsc0); }
         servers.forEach(function (sv, si) {
+          if (si < fromSi) return;
           var card = h("div", "srv");
           var top = h("div", "srvtop");
           var dot = h("i", "srvdot"); dot.style.background = COL[sv.tier]; dot.style.boxShadow = "0 0 10px " + COL[sv.tier];
@@ -6060,13 +6160,16 @@ $("smclose").onclick = function () {
         });
         if (!firstPlay) firstPlay = firstPlay0;
         host.appendChild(h("div", "srvdisc", "Boa Cinema does not host any media files. Streams and metadata come from online sources, TMDB and your installed plugins."));
-        if (CUR && CUR.auto) {
+        PREV = servers;
+        if (CUR && CUR.auto && firstPlay && !playerOpen()) {
           CUR.auto = false;
-          if (firstPlay) firstPlay.click();
+          firstPlay.click();
         }
         }
+        more = function () { renderServers(true); };
         renderServers();
-      })
+    }
+    run(0)
       .catch(function (e) {
   if (tok !== STRM_TOK) return;
   clearTimeout(slowT);
@@ -6238,7 +6341,11 @@ $("smclose").onclick = function () {
     }
     body.appendChild(h("div", "credit", "Powered by TMDB"));
     body.appendChild(h("div", "dbottom"));
-    if (d.mt === "movie" && !isUnreleased(d) && /^\d+$/.test(String(d.id))) { api("/api/streams?type=movie&id=" + d.id + "&s=1&e=1", 0, 60000).catch(function () {}); }
+    // warm the stream lookup while the details page is open, so Play resolves from the cache (the server answers at once)
+    if (!isUnreleased(d) && /^\d+$/.test(String(d.id)) && (d.mt === "movie" || d.mt === "tv")) {
+      var wp = d.mt === "tv" ? (watchGet("tv", d.id) || {}) : {};
+      api("/api/streams?warm=1&type=" + d.mt + "&id=" + d.id + "&s=" + (wp.s || 1) + "&e=" + (wp.e || 1), 0, 8000).catch(function () {});
+    }
     if (!d.lg && d.mt && /^\d+$/.test(String(d.id))) {
       api("/api/logo?type=" + d.mt + "&id=" + d.id, 0).then(function (r) {
         if (!r || !r.l) return;
@@ -7840,7 +7947,7 @@ async function cachedApi(request, url, env, ctx) {
   ) {
     ttl = 60;
   }
-  if (!ttl) return handleApi(url, env, request);
+  if (!ttl) return handleApi(url, env, request, ctx);
 
   const cache = caches.default;
   const key = new Request(url.toString(), { method: "GET" });
@@ -7853,7 +7960,7 @@ async function cachedApi(request, url, env, ctx) {
     }
   } catch (e) {}
 
-  const res = await handleApi(url, env, request);
+  const res = await handleApi(url, env, request, ctx);
   if (res.status !== 200) return res;
   const out = new Response(res.body, res);
   out.headers.set("cache-control", `public, max-age=${Math.min(ttl, 300)}, s-maxage=${ttl}`);
@@ -8424,6 +8531,7 @@ async function adminRoute(request, url, env) {
       MANIFEST_CACHE.clear();
       SCRIPT_CACHE.clear();
       STREAM_CACHE.clear();
+      STREAM_EPOCH++;              // new lookups skip older cached lists; lookups already running are not touched
       return json({ plugins });
     }
     if (path === "/api/admin/picks") {
