@@ -3,6 +3,11 @@ import { createServer } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { createHmac, createHash } from 'node:crypto';
+import { gzip, brotliCompress, constants as zc } from 'node:zlib';
+import { promisify } from 'node:util';
+const gzipP = promisify(gzip);
+const brP = promisify(brotliCompress);
 import { createKV } from './kvstore.js';
 import { fastStreams } from './fastStreams.js';
 import { handleExtras } from './extras.js';
@@ -134,6 +139,171 @@ if (typeof globalThis.caches === 'undefined') {
 
 import worker from './boacinemaupdatedWorker.js';
 
+// ==========================================================================
+// ZERO VIDEO PROXYING + SLIM JSON
+// Video bytes must never pass through this server: players connect straight to the stream host.
+// Set ALLOW_VIDEO_PROXY=1 only if you ever need the old behaviour back.
+// ==========================================================================
+const ALLOW_VIDEO_PROXY = process.env.ALLOW_VIDEO_PROXY === '1';
+const VIDEO_TYPE = /^(video|audio)\/|octet-stream|mp2t|matroska|x-mpegts|x-flv/i;
+const PLAYLIST_URL = /m3u8/i;
+
+function relaySecret(env) {
+  return env.RELAY_SECRET || env.BOT_TOKEN || 'boa-relay';
+}
+function relaySigOk(env, u, e, h, sig) {
+  try {
+    const want = createHmac('sha256', relaySecret(env)).update(u + '|' + e + (h ? '|' + h : '')).digest('hex');
+    return want.length === String(sig).length && want === String(sig);
+  } catch {
+    return false;
+  }
+}
+
+// /api/relay carries signed links. Playlists (small text) still go through the worker so their
+// segment links keep working; every other link (mp4, mkv, ts, webm, ...) is answered with a redirect
+// to the real stream host, so the video bytes go host -> viewer and never through this server.
+function handleRelayRedirect(req, res, env, reqUrl) {
+  if (ALLOW_VIDEO_PROXY || reqUrl.pathname !== '/api/relay') return false;
+  if (req.method === 'OPTIONS') return false;
+  const u = reqUrl.searchParams.get('u') || '';
+  const e = Number(reqUrl.searchParams.get('e')) || 0;
+  const sig = reqUrl.searchParams.get('s') || '';
+  const h = reqUrl.searchParams.get('h') || '';
+  let target = null;
+  try { target = new URL(u); } catch {}
+  if (!target || !/^https?:$/.test(target.protocol) || e < Date.now() / 1000 || !relaySigOk(env, u, e, h, sig)) {
+    res.statusCode = 403;
+    res.setHeader('access-control-allow-origin', '*');
+    res.end('forbidden');
+    return true;
+  }
+  if (PLAYLIST_URL.test(u)) return false;
+  res.statusCode = 302;
+  res.setHeader('location', target.href);
+  res.setHeader('cache-control', 'no-store');
+  res.setHeader('access-control-allow-origin', '*');
+  res.end();
+  return true;
+}
+
+// Compact stream objects: only what the apps use. Bulky metadata (behaviorHints, sources, raw, descriptions...) is dropped.
+const SUB_KEYS = ['lang', 'label', 'name', 'url', 'u', 'n', 'from', 'kind'];
+function slimSubs(list) {
+  if (!Array.isArray(list)) return undefined;
+  const out = [];
+  for (const x of list.slice(0, 30)) {
+    if (typeof x === 'string') { out.push(x); continue; }
+    if (!x || typeof x !== 'object') continue;
+    const o = {};
+    for (const k of SUB_KEYS) if (x[k] !== undefined && x[k] !== null && x[k] !== '') o[k] = x[k];
+    if (Object.keys(o).length) out.push(o);
+  }
+  return out.length ? out : undefined;
+}
+function slimStream(st) {
+  if (!st || typeof st !== 'object') return st;
+  const o = {};
+  if (st.title !== undefined) o.title = String(st.title).slice(0, 160);
+  if (st.url !== undefined) o.url = st.url;
+  if (st.quality) o.quality = st.quality;
+  if (st.size) o.size = st.size;
+  if (st.provider) o.provider = st.provider;
+  const subs = slimSubs(st.subtitles);
+  if (subs) o.subtitles = subs;
+  const subs2 = slimSubs(st.subs);
+  if (subs2) o.subs = subs2;
+  // small flags the apps still rely on (request headers some hosts need, torrent / not-web-ready markers)
+  if (st.headers && typeof st.headers === 'object' && Object.keys(st.headers).length) o.headers = st.headers;
+  if (st.torrent) { o.torrent = true; if (st.seeders) o.seeders = st.seeders; }
+  if (st.notWebReady) o.notWebReady = true;
+  return o;
+}
+function slimPayload(data) {
+  if (Array.isArray(data)) return data.map(slimStream);
+  if (data && typeof data === 'object' && Array.isArray(data.streams)) return { ...data, streams: data.streams.map(slimStream) };
+  return data;
+}
+const SLIM_PATHS = new Set(['/api/streams', '/api/plugin-streams']);
+
+// ==========================================================================
+// COMPRESSION (brotli / gzip) + CACHE HEADERS
+// Only text-like responses are compressed; video/audio is never touched.
+// ==========================================================================
+const COMPRESSIBLE = /json|html|javascript|ecmascript|text\/(plain|css|html|xml|vtt|javascript)|xml|svg|mpegurl|manifest/i;
+const MIN_COMPRESS = 860;                 // tiny bodies cost more to compress than to send
+const MAX_BUFFER = 4 * 1024 * 1024;       // bigger text bodies are streamed uncompressed (keeps memory low)
+const ZCACHE = new Map();                 // compressed copies of repeated bodies (the app page, scripts); capped
+const ZCACHE_MAX = 16;
+
+function pickEncoding(req) {
+  const a = String(req.headers['accept-encoding'] || '').toLowerCase();
+  if (/(^|[\s,])br(\s*;|\s*,|\s*$)/.test(a)) return 'br';
+  if (/(^|[\s,])gzip(\s*;|\s*,|\s*$)/.test(a)) return 'gzip';
+  return '';
+}
+async function compressBuf(buf, enc) {
+  const key = enc + ':' + createHash('sha1').update(buf).digest('hex');
+  const hit = ZCACHE.get(key);
+  if (hit) { ZCACHE.delete(key); ZCACHE.set(key, hit); return hit; }
+  const out = enc === 'br'
+    ? await brP(buf, { params: { [zc.BROTLI_PARAM_QUALITY]: 5, [zc.BROTLI_PARAM_SIZE_HINT]: buf.length } })
+    : await gzipP(buf, { level: 6 });
+  ZCACHE.set(key, out);
+  while (ZCACHE.size > ZCACHE_MAX) ZCACHE.delete(ZCACHE.keys().next().value);
+  return out;
+}
+function addVary(h, v) {
+  const cur = String(h['vary'] || '');
+  if (!cur) h['vary'] = v;
+  else if (!cur.toLowerCase().split(',').map((x) => x.trim()).includes(v.toLowerCase()) && cur.trim() !== '*') h['vary'] = cur + ', ' + v;
+}
+
+// Cache policy for stream LOOKUPS. Progressive polls (p=1), warm-ups and forced refreshes (r=1) are never cached;
+// a finished lookup may be reused for a few minutes (the worker already sets a policy on its own answers, which is kept).
+function streamCacheControl(reqUrl, existing, count, isPrivate) {
+  const q = reqUrl.searchParams;
+  const fresh = q.get('r') && q.get('r') !== '0';
+  if (q.get('p') === '1' || q.get('warm') === '1' || fresh) return existing || 'no-store';
+  if (existing && !/no-store|no-cache/i.test(existing)) return existing;
+  const scope = isPrivate ? 'private' : 'public';
+  return count > 0 ? scope + ', max-age=300, stale-while-revalidate=120' : scope + ', max-age=30';
+}
+
+// One place that writes a finished (buffered) response: ETag / 304, compression, headers.
+async function sendBuf(req, res, status, hdrs, buf, opts = {}) {
+  const h = { ...hdrs };
+  delete h['content-length'];
+  delete h['transfer-encoding'];
+  const body = typeof buf === 'string' ? Buffer.from(buf) : buf;
+  const noStore = /no-store/i.test(h['cache-control'] || '');
+  if (opts.etag && status === 200 && !noStore) {
+    const tag = '"' + createHash('sha1').update(body).digest('base64url').slice(0, 22) + '"';
+    h['etag'] = tag;
+    const inm = String(req.headers['if-none-match'] || '');
+    if (inm && inm.split(',').some((x) => x.trim().replace(/^W\//, '') === tag)) {
+      delete h['content-type'];
+      res.writeHead(304, h);
+      res.end();
+      return;
+    }
+  }
+  let out = body;
+  const enc = pickEncoding(req);
+  const ctype = h['content-type'] || '';
+  if (enc && req.method !== 'HEAD' && status !== 206 && status !== 204 && status !== 304 && !h['content-encoding'] && body.length >= MIN_COMPRESS && COMPRESSIBLE.test(ctype)) {
+    try {
+      out = await compressBuf(body, enc);
+      h['content-encoding'] = enc;
+      if (h['etag'] && !/^W\//.test(h['etag'])) h['etag'] = 'W/' + h['etag'];
+    } catch { out = body; }
+  }
+  if (COMPRESSIBLE.test(ctype)) addVary(h, 'Accept-Encoding');
+  h['content-length'] = String(out.length);
+  res.writeHead(status, h);
+  if (req.method === 'HEAD') res.end(); else res.end(out);
+}
+
 const PORT = process.env.PORT || 8787;
 
 const server = createServer(async (req, res) => {
@@ -182,8 +352,8 @@ if (!onRender) {
       const isPublic = !!process.env.RENDER || process.env.NODE_ENV === 'production';
       const key = process.env.STREAM_KEY || '';
       const allowed = !isPublic || (key && req.headers['x-stream-key'] === key);
-      res.setHeader('content-type', 'application/json');
       if (!allowed) {
+        res.setHeader('content-type', 'application/json');
         res.statusCode = 401;
         res.end('{"error":"unauthorized"}');
         return;
@@ -196,15 +366,20 @@ if (!onRender) {
           Number(reqUrl.searchParams.get('s')) || 1,
           Number(reqUrl.searchParams.get('e')) || 1
         );
-        res.statusCode = 200;
-        res.end(JSON.stringify(out));
+        const slim = slimPayload(out);
+        const count = Array.isArray(slim) ? slim.length : (slim && Array.isArray(slim.streams) ? slim.streams.length : 0);
+        await sendBuf(req, res, 200, {
+          'content-type': 'application/json',
+          'cache-control': streamCacheControl(reqUrl, '', count, isPublic && !!key),
+          'vary': 'x-stream-key',
+        }, JSON.stringify(slim), { etag: true });
       } catch (e) {
         console.error('plugin-streams failed:', e);
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: String((e && e.message) || e) }));
+        await sendBuf(req, res, 500, { 'content-type': 'application/json', 'cache-control': 'no-store' }, JSON.stringify({ error: String((e && e.message) || e) }));
       }
       return;
     }
+    if (handleRelayRedirect(req, res, env, reqUrl)) return;
     if (await handleExtras(req, res, env, url)) return;
     const ctx = {
       waitUntil: (promise) => Promise.resolve(promise).catch(console.error),
@@ -212,6 +387,43 @@ if (!onRender) {
     };
 
     const response = await worker.fetch(request, env, ctx);
+    const ctype = response.headers.get('content-type') || '';
+
+    // Safety net: never pipe raw video/audio bytes, whichever route produced them.
+    if (!ALLOW_VIDEO_PROXY && response.body && VIDEO_TYPE.test(ctype)) {
+      try { await response.body.cancel(); } catch {}
+      res.statusCode = 410;
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('access-control-allow-origin', '*');
+      res.end('{"error":"This server does not proxy video. Use the direct stream url."}');
+      return;
+    }
+
+    const hdrs = {};
+    for (const [key, value] of response.headers.entries()) hdrs[key] = value;
+
+    // Slim stream lists (small JSON only; the body is read, trimmed and re-sent with cache headers).
+    if (response.status === 200 && SLIM_PATHS.has(reqUrl.pathname) && /json/i.test(ctype)) {
+      let text = await response.text();
+      let count = 0;
+      try {
+        const slim = slimPayload(JSON.parse(text));
+        count = Array.isArray(slim) ? slim.length : (slim && Array.isArray(slim.streams) ? slim.streams.length : 0);
+        text = JSON.stringify(slim);
+      } catch {}
+      delete hdrs['content-encoding'];
+      hdrs['cache-control'] = streamCacheControl(reqUrl, hdrs['cache-control'], count, false);
+      await sendBuf(req, res, 200, hdrs, text, { etag: true });
+      return;
+    }
+
+    // Other text responses (app page, scripts, JSON, playlists): compress when the client supports it.
+    const clen = Number(hdrs['content-length']) || 0;
+    if (response.body && COMPRESSIBLE.test(ctype) && !hdrs['content-encoding'] && response.status !== 206 && response.status !== 204 && response.status !== 304 && req.method !== 'HEAD' && clen <= MAX_BUFFER && pickEncoding(req)) {
+      const buf = Buffer.from(await response.arrayBuffer());
+      await sendBuf(req, res, response.status, hdrs, buf);
+      return;
+    }
 
     res.statusCode = response.status;
     for (const [key, value] of response.headers.entries()) {
