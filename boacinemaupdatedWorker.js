@@ -6663,7 +6663,7 @@ $("smclose").onclick = function () {
           if (!firstPlay0 && !sd.tor) firstPlay0 = pb;
         });
         if (!firstPlay) firstPlay = firstPlay0;
-        host.appendChild(h("div", "srvdisc", "Boa Cinema does not host any media files. Streams and metadata come from online sources, TMDB and your installed plugins."));
+        host.appendChild(h("div", "srvdisc", "Boa Cinema does not host any media files. Streams and metadata come from online sources."));
         PREV = servers;
         if (CUR && CUR.auto && firstPlay && !playerOpen()) {
           CUR.auto = false;
