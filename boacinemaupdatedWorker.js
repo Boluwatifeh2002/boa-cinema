@@ -752,16 +752,16 @@ function relayHdrClean(raw) {
     return t === "{}" || t.length > 700 ? "" : t;
   } catch (e) { return ""; }
 }
-async function relaySign(env, u, hdr, origin) {
+async function relaySign(env, u, hdr, origin, path) {
   const e = Math.floor(Date.now() / 1000) + 21600;
   hdr = hdr || "";
-  return (origin || "") + "/api/relay?u=" + encodeURIComponent(u) + "&e=" + e + (hdr ? "&h=" + encodeURIComponent(hdr) : "") + "&s=" + (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")));
+  return (origin || "") + (path === "/api/proxy/hls" ? path : "/api/relay") + "?u=" + encodeURIComponent(u) + "&e=" + e + (hdr ? "&h=" + encodeURIComponent(hdr) : "") + "&s=" + (await relayHmac(env, u + "|" + e + (hdr ? "|" + hdr : "")));
 }
 const RELAY_CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Allow-Headers": "range, if-range, content-type", "Access-Control-Max-Age": "86400" };
 // Rewrites every address inside an HLS playlist (variant playlists, segments, keys, init maps, subtitle / audio renditions) into a signed
 // link on THIS Worker, as an absolute https address, so nothing the player fetches next can point anywhere else (never Render).
-async function relayRewrite(txt, base, env, hdr, origin) {
-  const fix = async (ref) => { try { const abs = new URL(ref.trim(), base).href; return relayAllowed(abs) ? await relaySign(env, abs, hdr, origin) : ref; } catch (err) { return ref; } };
+async function relayRewrite(txt, base, env, hdr, origin, path) {
+  const fix = async (ref) => { try { const abs = new URL(ref.trim(), base).href; return relayAllowed(abs) ? await relaySign(env, abs, hdr, origin, path) : ref; } catch (err) { return ref; } };
   const done = await Promise.all(txt.split("\n").map(async (ln) => {
     const t = ln.replace(/\r$/, "");
     if (!t.trim()) return t;
@@ -808,7 +808,7 @@ async function relayHandle(request, url, env) {
   const clen = Number(res.headers.get("content-length")) || 0;
   const base = res.url || u;
   const isPl = /mpegurl/i.test(ct) || /\.m3u8(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(base);
-  const playlistOut = (txt) => { out.delete("content-length"); out.set("content-type", "application/vnd.apple.mpegurl"); return relayRewrite(txt, base, env, hdr, url.origin).then((body) => new Response(body, { status: res.status, headers: out })); };
+  const playlistOut = (txt) => { out.delete("content-length"); out.set("content-type", "application/vnd.apple.mpegurl"); return relayRewrite(txt, base, env, hdr, url.origin, url.pathname).then((body) => new Response(body, { status: res.status, headers: out })); };
   if (isPl && clen < 1500000) {
     const txt = await relayText(res, 1500000);
     if (txt === null) return new Response("Playlist too large for the relay", { status: 502, headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" } });
@@ -1036,6 +1036,91 @@ function lang3(l) {
   const k = String(l || "und").toLowerCase().replace(/[^a-z-]/g, "").slice(0, 12) || "und";
   return L3[k.slice(0, 2)] && k.length <= 5 ? L3[k.slice(0, 2)] : k;
 }
+// ============================================================================
+// LANGUAGE + CODEC TAGGING / RANKING (global: works for any original language TMDB reports)
+//   lc  language label  EN | ES / LAT | FR | KO | MULTI ...      lt  badge: ORIGINAL | MULTI | <label>
+//   lr  language rank   0 original ... 2 mismatched foreign dub  cx  1 = not browser-safe (HEVC / AC3 / DTS / MKV / MPD)   cf  the flags found
+// Nothing is deleted: streams are only re-ordered and tagged.
+// ============================================================================
+const OL_MEMO = new Map();
+async function originalLang(env, mt, id) {
+  const k = (mt === "tv" ? "tv" : "movie") + id;
+  const hit = OL_MEMO.get(k);
+  if (hit && Date.now() - hit.at < 21600000) return hit.v;
+  let v = "";
+  try { const j = await tmdb(env, "/" + (mt === "tv" ? "tv" : "movie") + "/" + id, "language=en-US"); v = String((j && j.original_language) || "").toLowerCase().slice(0, 3); } catch (e) { return hit ? hit.v : ""; }
+  capSet(OL_MEMO, k, { at: Date.now(), v }, 300);
+  return v;
+}
+const LANG_RX = [
+  ["es", /\b(latino|latam|lat|castellano|espa[nñ]ol|spanish|spa|esp)\b/],
+  ["en", /\b(english|eng)\b|[\[(]en[\])]/],
+  ["fr", /\b(french|fran[cç]ais|truefrench|vff|vfq|vf|fra|fre)\b/],
+  ["pt", /\b(portuguese|portugu[eê]s|brazilian|ptbr|pt-br|por)\b/],
+  ["ko", /\b(korean|hangul|kor)\b/], ["ja", /\b(japanese|jpn|jap)\b/], ["hi", /\b(hindi|hin)\b/],
+  ["ta", /\btamil\b/], ["te", /\btelugu\b/], ["ml", /\bmalayalam\b/], ["bn", /\b(bengali|bangla)\b/],
+  ["de", /\b(german|deutsch|deu|ger)\b/], ["it", /\b(italian|italiano|ita)\b/], ["ru", /\b(russian|rus)\b/],
+  ["ar", /\b(arabic|ara)\b/], ["tr", /\b(turkish|tur)\b/], ["zh", /\b(chinese|mandarin|cantonese|chi|zho)\b/],
+  ["th", /\bthai\b/], ["id", /\bindonesian\b/], ["vi", /\bvietnamese\b/], ["pl", /\b(polish|pol)\b/], ["nl", /\b(dutch|nld)\b/],
+  ["fa", /\b(persian|farsi)\b/], ["he", /\bhebrew\b/], ["yo", /\byoruba\b/],
+];
+const PROV_LANG = [[/lamovie|cinecalidad|embed69|seriesmetro|pelisplus|cuevana|gnula|pelisflix/i, "es"]];
+function streamLang(st) {
+  let t = " " + [st.title, st.name, st.description, st.lang, st.language].filter(Boolean).join(" ").toLowerCase() + " ";
+  // "subbed / VOSTFR / VOSE / CC / hardsub + language" describes SUBTITLES, the audio stays original
+  t = t.replace(/\b(vost[a-z]*|vose|subs?|subbed|subtitles?|subtitled|hardsub|softsub|cc|forced)\b[ :._-]*(?:[a-z]{2,10})?/g, " ");
+  if (/\b(multi|multi[ -]?audio|multi[ -]?lang\w*|dual|dual[ -]?audio)\b/.test(t)) return "multi";
+  const found = [];
+  for (const [c, rx] of LANG_RX) if (rx.test(t.replace(/[._]+/g, " "))) found.push(c);
+  if (found.length > 1) return "multi";
+  if (found.length === 1) return found[0];
+  for (const [rx, c] of PROV_LANG) if (rx.test(String(st.provider || ""))) return c;   // Spanish-only sources
+  return "";
+}
+function langLabel(c) { return c === "es" ? "ES / LAT" : c === "multi" ? "MULTI" : c ? c.toUpperCase() : ""; }
+function codecFlags(st) {
+  const u = String(st.url || ""), t = (String(st.title || "") + " " + String(st.name || "") + " " + String(st.description || "") + " " + u).toLowerCase();
+  const f = [];
+  if (/\b(hevc|h\.?265|x265)\b/.test(t)) f.push("HEVC");
+  if (/\b(ac-?3|e-?ac-?3|dd\+?[ .]?[257]\.[01])\b/.test(t)) f.push("AC3");
+  if (/\b(dts(?:-?hd)?|truehd|atmos)\b/.test(t)) f.push("DTS");
+  if (/\.mkv(\?|#|$)/.test(u.toLowerCase()) || /\bmkv\b/.test(t)) f.push("MKV");
+  if (/\.mpd(\?|#|$)/.test(u.toLowerCase())) f.push("MPD");
+  const safe = /\.m3u8(\?|#|$)|\.mp4(\?|#|$)|\b(h\.?264|x264|avc|aac)\b/.test(t) && !f.length;
+  return { flags: f, safe };
+}
+// Returns NEW tagged objects in the best order. ol = TMDB original_language (e.g. "es", "en", "ko"); "" = unknown (treated as English).
+// Native players (Odyssey, VLC, ExoPlayer apps) decode HEVC / AC3 / DTS / MKV fine, so codec priority only applies to browsers.
+// A native client says so with ?app=1 (or ?native=1) or by its user agent.
+function nativeClient(url, request) {
+  try {
+    if (url.searchParams.get("app") === "1" || url.searchParams.get("native") === "1") return true;
+    const ua = (request && request.headers && request.headers.get("user-agent")) || "";
+    return /Odyssey|BoaNative|VLC\/|ExoPlayer|libmpv|media_kit|Dart\//i.test(ua);
+  } catch (e) { return false; }
+}
+function rankStreams(list, ol, native) {
+  if (!Array.isArray(list)) return list;
+  const o = String(ol || "en").toLowerCase();
+  const rows = list.map((x, i) => {
+    if (!x || typeof x !== "object") return { x, i, k: [9, 9, i] };
+    const lang = streamLang(x), cf = codecFlags(x);
+    let lr;
+    if (lang === o) lr = 0;
+    else if (lang === "multi") lr = 1.3;
+    else if (lang === "en") lr = 1;
+    else if (!lang) lr = o === "en" ? 0.8 : 1.6;
+    else lr = 2;
+    const y = Object.assign({}, x, { lc: langLabel(lang), lt: lang && lang === o ? "ORIGINAL" : langLabel(lang), lr, cx: cf.flags.length ? 1 : 0 });
+    if (cf.flags.length) y.cf = cf.flags; else delete y.cf;
+    // browser-playable first (H.264 / AAC / .m3u8 / .mp4 ahead of unknown, both ahead of HEVC / AC3 / DTS / MKV / MPD), then the language rank, then arrival order
+    const tier = native ? 0 : cf.flags.length ? 2 + Math.min(cf.flags.length, 3) / 10 : cf.safe ? 0 : 1;
+    return { x: y, i, k: [tier, lr, i] };
+  });
+  rows.sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.k[2] - b.k[2]);
+  return rows.map((r) => r.x);
+}
+
 async function signStreamSubs(env, list) {
   if (!Array.isArray(list)) return list;
   const out = [];
@@ -1072,7 +1157,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.35";
+const APP_VERSION = "2026-11-22.39";
 const SW_JS = ("// " + "@@VER@@" + "\nvar V=\"boa-@@VER@@\";\nself.addEventListener(\"install\",function(e){self.skipWaiting();});\nself.addEventListener(\"activate\",function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==V;}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});\nself.addEventListener(\"fetch\",function(e){\n  var r=e.request;\n  if(r.method!==\"GET\")return;\n  var u=new URL(r.url);\n  if(u.pathname.indexOf(\"/api/\")===0)return;\n  if(r.mode===\"navigate\"){\n    e.respondWith(fetch(r).then(function(res){\n      if(u.pathname===\"/\"||u.pathname===\"/app\"){var c=res.clone();caches.open(V).then(function(ca){ca.put(\"/app\",c);});}\n      return res;\n    }).catch(function(){return caches.match(\"/app\").then(function(m){return m||new Response(\"You are offline. Open Boa Cinema again when you have a connection.\",{status:503,headers:{\"content-type\":\"text/plain\"}});});}));\n    return;\n  }\n  if(u.hostname===\"image.tmdb.org\"){\n    e.respondWith(caches.open(V).then(function(ca){return ca.match(r).then(function(hit){\n      var f=fetch(r).then(function(res){if(res.ok||res.type===\"opaque\")ca.put(r,res.clone());return res;}).catch(function(){return hit;});\n      return hit||f;\n    });}));\n  }\n});\n").split("@@VER@@").join(APP_VERSION);
 const PWA_ICONS = { "192": "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAQAElEQVR4AeydCXAUVRrH3+vJZIagBCEGUUGQU+TcFeQwXAvriiLHWlhBlEsKuQ9jGQgBFCK4iBaEWgmHZWQFPNjiEMOhBmsVlmMDQkCFojjUBTkECw0zSabffkOzoad7ju7JzPTxvtSb5t393v/78c4JCCn4gwpUQwGB4A8qUA0FEKBqiIdFCUGAkIJqKYAAVUs+LIwAIQPVUgABqpZ8WDhqgFA6VMCvAALkVwE/USuAAEUtHRb0K4AA+VXAT9QKIEBRS4cF/QogQH4V8BO1AghQ1NJhQb8CiQfI/1b82EYBBMg2pjSmIwiQMbrb5q0IkG1MaUxHECBjdLfNWxEg25jSmI4gQMbobpu3Wggg22huq44gQLYyZ+I7gwAlXnNbvREBspU5E98ZBCjxmtvqjQiQrcyZ+M4gQInX3FZv5AEgWxnMbJ1BgMxmEYu1BwGymMHM1lwEyGwWsVh7ECCLGcxszUWAzGYRi7UHAbKYwczWXAQojEUwKbICCFBkjTBHGAUQoDDiYFJkBRCgyBphjjAKIEBhxMGkyAogQJE1whxhFECAwoiDSZEVQIAia6Q/B0clECCOjB2PriJA8VCVozoRII6MHY+uIkDxUJWjOhEgjowdj64iQPFQlaM6ESBTGdt6jUGArGczU7UYATKVOazXGATIejYzVYsRIFOZw3qNQYCsZzNTtRgBMpU5rNcYBMh6NgvWYsPiECDDpLfHixEge9jRsF4gQIZJb48XI0D2sKNhvUCADJPeHi9GgOxhR8N6YTxAW0XXCZYSJ/eNWGOP6P5CdG8RXR8y1wrmyhKThjDHHxmtwwwT3Uwvrm5bjAeouj0IWz6F0jQqNKBCS+roQBy9iGMsTc4jrvWkxl6SslN0z2TOLkxIYkhTWB1DJ9ocoNAd96c0osJI4nyPuP/DUuYyZ22kyK+Kvg/XAFVJBQPVM8T5GXOPYA4HjkZVumjwIEC3REqlQg5xbWHuhjgU3VIlgg8BUgrUjDo2MHc7RpUJGA6mAAIURJXaVFjL3H8RUZwg4iiiUCOFIDeDyZQuJa6WOA7d1EP9x80YBOimEOo/KKV5JJngmlotjSwGAZKJofK2JY6exKGKxohbClgJoGeJR5ebTDzzmXcFK9/EKvYy361O6/ENZEl6snOX10oA/ZuKulwRFQsF3yKhMkuoGCZ4O5Ky2cx7gPmYnlnpz8SRirv60H8vrARQ6F5oSrlKyTrBlyl4x1DvNSZqKkOIk9InGM5iIdUSQqbYN+FLKmaTcu39+yMug0KLxSNAoMYOQSzRvCqqCwXQhVBAP0AhKrJc9GZSqbHNdQmeSoeUil+A9lOty6BUigAhQCoFLhOtm6syPbs21XtsHsHvCPSbZoCu2pyBanWPX4CaEK19P020TnbVMoU1C2sV0Zq9C9fqVpoBOogAhRaSX4BaagbokObldmidbZuSQIDMpGF9RgZpO18+xcTvcAQKbTseAXIxtpK5alFNff87rSDRbuNr1qzZqlWr3jd+wAPB0IaInOJwOJo3b96nT5+OHTvWqlUrcoGE5NAkYkJakqCX1GRkCXG1oJqut74hvo3Up7dljz32WH5+fmlp6YULF/bv37/lxg94IHj69OmioqK8vLz09HQt1d51113Z2dnFxcUnT568cuXKwYMHN23atGvXrnM3fg4dOvTmm2+mpaVpqSpOeTgCqCmjz4mOHcz9J6L1GxpZeq7MwELPP/98SUnJxx9/PGrUqMaNG0OMwt15553du3efOnUqoDB9+nQYVBQZqoINGjSAer7//vvc3NxOnToBSYrMMAg1a9Zs7Nixhw8fzsnJcbvdVWUT6bESQJPFpCjcNDGpQEzeK7qLSI1c6krXNnOBDcYxz2mq9bARzLlx48YlS5a0aNECykZ0tWvXnjdv3ldffdWuXTt1ZhifPv30UxjJkpIis56amjpz5sx3331XXU8CYqwE0CSaHIUbT5N706Q6mrmRRAd6PhO0Hv/A3/4dO3b07dtXKqv92bZt223btjVt2lRepE6dOp988sn9998vj4zo79+//7BhwyJmi3kGKwEU884HrfAo8/Ul17XTA5XAiqdNmzbgUbgjR4688847L7744vjx41euXAnTliIDBGHoWr16tXx6gvwPPvggJMndzz//DMPMI488AoMTPFetWiVPlfwLFy689957JX/CnlYAKFFinCfiXOYdKHi1z1zQtAEDBgwdOhQ8Crd27douXbpMmjRp+fLlhYWFsO4Bw7/++uvq70M+9NBDo0ePrioOM1eVv8ozZcoUmB8Bwd9//x2eEFyzZk1VquS54447MjMzJX/CnggQucbEYuKbRbwZ1PO+oHvPNW3aNKL6AXrGjBmjZuXVV19dsGCBKjuZOHEipf47//bt26tXUbDlgp2cohTwpIiBYNCVO8THz/EO0AXC/kEqN7CKfxHd6IBVmjRpAqcy4JE7n88HG3V5jNy/YsUKj8cjjwE/1AO7M/D8+uuvL7zwwowZM2CsKigo+Oijj2B1BctzSFK4b7/99pdfflFE6l05KYpHEeQdoHRCx9HkZdT9JUn5QnTnMmdXJjg0f39j0KBBatFhAwXnPep4KebixYtwliP55c+MjAwInjp1CuampUuXwlgF+/wRI0bAK7KysiBJ7S5duqSIxBFIIUhCgw2o8BxxFhJ3MakxhDkEDRj17NlT3cRdu3apI+UxsHuXByU/LJgkj/YnrIcUmevWrauIiXeQ9xEoqL71iZBHXNtYjc4sgj4tW7ZU1/DDDz+oI+UxcCQtD0r+oLNPSkpK+/btn3zyyfHjx8O5EYxMsP+CBRZMajC1wUGiVNbAZwSBDGyZ4a9uTIVC5poiJtHQQxGcLKvbeebMGXWkPOb8+fPyoOS//fbbJY/0hKUVLIAg59dff71u3bpFixbBjAabNdhnwb4Pzpy6det22223SZkNfFoJoL3Mp88x3z7mO858lzT/FpjCEgKlE2nycuJSxEtB2DYnqU6KYed14sQJKUOo508//aROSk1NlSLhpAcOEmEe7Nevn/x8SEo129NKAA0TvHrdM4L3ccHbRfA0o2WdSVl/cn0C88CeC7bu2i3RmyTNEJ3a81Pq35CHyQ+QqVMp9ZeilMIM1atXL3UGc8ZYCaBqKniZku8o2yGI2UJFF3r9b6T8iuaRaRR1/oH5DSxvA1yPi6LyugMIuO++++TZ1H64KFVHXr58GSLnz5+vXk3Dth82/3BT26NHj/T09Jr//4ETRShirOMIILnQXkpX0soB1HNOM0O5LFleg+RXn8RA/D333APPMC5ohqtXr8KENW7cOEXByspKuOeC40pYCR04cEC+83I6dYyLimpjFeQUIEm+c5Q8Sz2/aWOoNXUMVn2JEY5tpKrkz7vvvlseVPvr16+vjjx58iTcrbpcyvUWLIZ2796tzg8x9erVg6exjmuAQPozlMymFeDR4oapvki0d+9edcGuXbuqI+UxMBPJg5J/z549HTp0kPzyZ6gleevWrYPuAeVlE+DnHSCQeAv179TAE9G1ZkJq4BeEgh4JDh48GFYpoWpr2LAhbK/UqTDSPPDAA+r48vLg/w6EerKDsoKQaIMm+n3QSRM6YCigVSECsEDOIAHfhYXTPPWxIZzowBVEiDoI3M/DWkeRevjw4f3798MySBEPwUaNGsFT4QDB4cOHKyIhCDMgnD2CJ2EOAfJLfULbMgiyNg/ci3m93jfeeAPiFQ42U3CHpYgEbubOnQu39Ip4CL7yyivwPH78ODwV7tFHH1V8y6dTp06rV68GmhU5pWDnzp0lT2KeCJBfZ7iT9/+h4ZNKlZt5uFtQL3KTk5MLCwsXLlwItxCwUunduzcgBQuml156Sb112rBhw7Zt2+DlR48ehafCud1uuHyFafGJGz+vvfba1q1ba934rQw4kLx27Zoi/8yZM4MeEyiyxSqIAPmVDFzY+GNCfVIDRyAp28iRI69cuSL5q54w3sBsBXtvuJnfsmUL7MODLnHOnj07YcIEqdSxY8cAMskvf8KNG1zRf3DjZ8qUKdIkBaeRsAw6dOiQPCf44RgJIktKSuDiDILxdgiQX+E01bjijw32cSoHIH+mH3/8EY5q1Ishf1rYz5EjR2A1Ix9FJk+eHGrVrKgpPz//888/B1YU8RCEQatFixbqoQ6SYu4QIL+kLYlWHZTf4PKX9n/gUDgjIwPusPwBDR+fzwfrGNjPK06SSktLc3NzwzMEZRcsWABTFbxn2bJlgC94jHJahTOqfYl5b8SvbVQ1I8xq6eLFi08//TQsVGBJBJcPVUUUHpjsioqK4KwIBhtYgytSIQhMPPzww9u3bwe/wsGp9ObNm6UVFUxhkAr0QBBWReBXuKCn5Io81Q8iQKSeSLrRyL9+JWl9gSgvv6T4m09CiouL+/btm5aW1rNnz9GjR2dnZ8M2DVa+06dPHzp0KBwVwpbqqaeegpGmqojaA9sxWDXDBn7gwIFZWVmLFy+eNWsWbN/atGmTmZkJFxryIrCUHjJkCFyPwBUsEAxFpPuynJwcebY4+REgMp3ouFE6EgkgyU4wPMC5zvr162GlMmfOnLy8vIKCAthMARlSBi1PGNJ27tz59ttvz549+6233oJb+rNnz4YqCGdI+/btgzkUisjvy0Llj1U87wA9KzoGEa3Dz3+ZeEzz76rGykImr4dfgOowkic6Z1MXpcF2VsHstp1G85sbwWqyTxyPAHViwlzm/w8uh1AdkxfY/DOCAIEMAc5KAHVmQhSuBxP+yhyjWVIuc64VXSWi+33ifoY4b9f52/IlzLcP/6myAHj8ASsBtIa4o3CriHshcWWT5OeIsyN16OXGLxIhlYy9TIPfiksZuH1aCSADjVRAKnT9wrzuplq2AAIU2XRbWWW+5i+dRa7OXjkQoAj2/IBVTKVen+adWoTqbJeMAIUzaT4rnyVUEKQntEgIUHBtTjLfcOJZKmj9H32C18JBLAKkNPJVJs5j3n7Usxs37UptgoQRoFuiHGC+HOLtQT3vCT4Rp61bwoTz8Q6Qh7FSIi5n5X1IWabg/ZD6yrRebISTNXFpRr+JF4DOEbGU+Xaxyn+yCsBlDvPCEieDlLURrg+insVC5RnkJioWjQfoccHbjJbF23WnnkGCd4xQ/rJQAbisFXywxDmP0EQFjbyQ8QDJW4N+yymAAFnOZOZqMAJkLntYrjUIkOVMZq4GI0DmskfiWhOjNyFAMRKS12oQIF4tH6N+I0AxEpLXahAgXi0fo34jQDESktdqECBeLR+jfiNAMRKSn2oCe4oABeqBIZ0KIEA6BcPsgQogQIF6YEinAgiQTsEwe6ACCFCgHhjSqQACpFMwzB6oAAIUqAeGdCqgAyCdNWN2LhRAgLgwc/w6iQDFT1suakaAuDBz/DqJAMVPWy5qRoC4MHP8OokAxU9bLmpOBEBcCMlrJxEgXi0fo34jQDESktdqECBeLR+jfiNAMRKS12oQc98O9QAAAOtJREFUIF4tH6N+I0AxEpLXakwNEK9GsVK/ESArWcuEbUWATGgUKzUJAbKStUzYVgTIhEaxUpMQICtZy4RtRYBMaBQrNcmeAFnJAhZvKwJkcQMa3XwEyGgLWPz9CJDFDWh08xEgoy1g8fcjQBY3oNHNR4CMtoDF348ABRgQA3oVQID0Kob5AxRAgALkwIBeBRAgvYph/gAFEKAAOTCgVwEESK9imD9AAQQoQA4M6FUAAdKrWPD83MYiQNyaPjYdR4BioyO3tSBA3Jo+Nh1HgGKjI7e1IEDcmj42HUeAYqMjt7UgQAab3uqv/x8AAAD//6oQ9F0AAAAGSURBVAMAWBeOTHvYQagAAAAASUVORK5CYII=", "512": "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ev0510wH1KtXrx49eqTd6sILL+zQoUPaYikKbN68WZ0KmzFjxg033KBOi6nb2LFj1cM1a9bs3r07xYapn6pTp861116bugzPVhYgACprsBxNgW0yfrko9uu9vzKdO3fuQQcdpBayuX3zzTfqUudvf/tbdfK9efPmRxxxRN26dY877rg2bdpcfPHF6uTS559/nk39iW2nTJmS9pcShg8fniiscf/WW29169btpJNO6t69uzppo96zP/KfH9Wuenjuuec2adJEhaVGzYlN+vbtq+I2scx9WgECIC0RBcIt8LgsO18Urxe+fd+DOvPTunXrbBA3bNjQv3//Qw45ZMiQIU8//fRrr732/vvv79y5U9W5ZcuWN95444UXXhg9evSRRx7Zs2fP9evXq/XaNxUqc+bMSfGhIPXev0WLFnr1P/74461atVqyZEmKzb/77ruBAwcOGDAgRZkUTxUVFQ0bNixFAZ6qLEAAJDVYiJrAThn/X6t4TKxst0+f+FSg559//tChQ9WC3k296x8zZozKjwULFtipYdGiReqAQG2idqN2ytdYpmnTptdcc02NT6mV2m//V65c2adPH1WDndv8+fPVYY2dktXLdO3atfpK1tQoQADUyMLK0As8b5WrN/4+/q5vQvDOO+/U/qiMOlF+2mmn3X333VJmcPiiCqtNzjjjjE8//TTRB4372vbUhx122JlnnqlRYUVFRYpQqbFCdVizcOHCGp9KvfLQQw9t1qxZ6jI8mxAgABIO3EdEQO3+XrbKe1jFg0Xp1/698U9oqmuqao+ZWM70Xp3hUe9kP/vss0w3TJT/8MMP1TtoVUniYab3P//5zwcOHFh9q4suuqj6Sjtrnnvuuffee89OycplJk6cWPmh/WV1LcF+4R9KmvofAWDqzEdu3MVSPiLL2os9V4nS1336pH8VVO0T2cXFxZdddtkHH3xQpcKMHqodrrrQqv2hmho737Zt24z6kCy8dOnS5LL9hXfffVdd4bBfPllS7zAlubk5CwSAOXMd2ZF+JePTZWkbsWdcrOwTv9/1J5XbtWvXvHnz5MOMFu66667Vq1dntEmNhdXl4pm2P9pfpYZjjjmmc+fOlVcKIfR2rOr8j7o4Ubkq+8vqorf9wsmSp59+enKZhRQCBEAKHJ4KtMCnMj7XKrvSKj5D7Lk7Vp7FCR9Xhjl48GC9er/44os7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" };
 const PWA_MANIFEST = {
@@ -2282,13 +2367,9 @@ function normStremio(repo, x) {
   let tor = false;
   if (!/^https?:\/\//i.test(url)) {
     // a torrent result (no debrid needed): kept as a magnet link so it can be opened in a torrent app, never played in the browser
-    const ih = /^[a-f0-9]{40}$/i.test(String(x.infoHash || "")) ? String(x.infoHash).toLowerCase() : "";
+    // A bare infoHash object is dropped: nothing here builds, fetches or caches torrent data. Only a ready magnet: link is kept (a plain string the viewer's own torrent app opens).
     if (/^magnet:\?/i.test(url)) tor = true;
-    else if (ih) {
-      const trs = (Array.isArray(x.sources) ? x.sources : []).map((t) => String(t)).filter((t) => /^tracker:/i.test(t)).slice(0, 6).map((t) => "&tr=" + encodeURIComponent(t.replace(/^tracker:/i, "")));
-      url = "magnet:?xt=urn:btih:" + ih + "&dn=" + encodeURIComponent(String(bh.filename || first).slice(0, 90)) + trs.join("");
-      tor = true;
-    } else return null;
+    else return null;
   }
   const out = { title: first.slice(0, 120), url, quality: qualityOf(label), provider: repo.name || "Stremio" };
   if (tor) { out.torrent = true; const sm0 = /(?:👤|seeders?:?)\s*(\d+)/i.exec(label); out.seeders = Number(x.seeders) || (sm0 ? Number(sm0[1]) : 0); }
@@ -2346,16 +2427,19 @@ function scraperList(manifest, manifestUrl) {
   });
 }
 
-function compileScraper(code, timeoutMs) {
+function compileScraper(code, timeoutMs, label) {
   const moduleObj = { exports: {} };
+  const tag = "[scraper " + (label || "?") + "]";
+  const where = (input) => { try { return String(typeof input === "string" ? input : (input && input.url) || input).slice(0, 160); } catch (e) { return "?"; } };
   const timedFetch = (input, init) => {
     const o = init || {};
-    if (o.signal) return fetch(input, o);
-    return fetch(input, Object.assign({}, o, { signal: AbortSignal.timeout(timeoutMs) }));
+    const p = o.signal ? fetch(input, o) : fetch(input, Object.assign({}, o, { signal: AbortSignal.timeout(timeoutMs) }));
+    return p.then((r) => { if (!r.ok) console.warn(tag, "fetch " + r.status, where(input)); return r; }, (e) => { console.warn(tag, "fetch failed:", (e && e.message) || e, where(input)); throw e; });
   };
-  const mockRequire = (mod) => (mod === "axios" ? timedFetch : {});
+  const mockRequire = (mod) => { if (mod === "axios") return timedFetch; console.warn(tag, "require('" + mod + "') is not available in the Worker sandbox (returns {})"); return {}; };
+  const sbx = { log: (...a) => console.log(tag, ...a), info: (...a) => console.log(tag, ...a), warn: (...a) => console.warn(tag, ...a), error: (...a) => console.warn(tag, "error:", ...a), debug: () => {} };
   const fn = new Function("module", "exports", "require", "moduleObj", "fetch", "console", code);
-  fn(moduleObj, moduleObj.exports, mockRequire, moduleObj, timedFetch, console);
+  fn(moduleObj, moduleObj.exports, mockRequire, moduleObj, timedFetch, sbx);
   const exp = moduleObj.exports || {};
   const g = exp.getStreams || exp.getstreams || (exp.default && (exp.default.getStreams || exp.default.getstreams));
   return typeof g === "function" ? g : null;
@@ -2366,7 +2450,7 @@ async function loadScraperFn(url, timeoutMs, fresh) {
   if (!fresh && hit && Date.now() - hit.at < CODE_TTL_MS) return hit.fn;
   const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs || 12000) });
   if (!r.ok) throw new Error("script " + r.status);
-  const fn = compileScraper(await r.text(), 9000);
+  const fn = compileScraper(await r.text(), 9000, String(url).split("/").pop().replace(/\.js.*$/, ""));
   if (!fn) throw new Error("no getStreams function in that script");
   capSet(SCRIPT_CACHE, url, { at: Date.now(), fn }, 100);
   return fn;
@@ -2390,18 +2474,64 @@ let STREAM_EPOCH = 0;                // bumped when plugins change, so NEW looku
 function providerMs(env) { return Math.min(Math.max(Number(env.PROVIDER_TIMEOUT_MS) || 5000, 1500), 12000); }
 function newJob() { return { bag: [], seen: new Set(), ws: [], fin: false, done: Promise.resolve() }; }
 function jobWake(job) { const w = job.ws; job.ws = []; for (const f of w) f(); }
-function jobPush(job, list, needUrl, prov) {
-  let n = 0;
+// ---- Parallel stream health check: every http(s) / HLS / extractor url gets one HEAD (then a 1-byte Range GET if HEAD is refused) inside a single 2.5 s AbortController.
+// Kept only on 200 / 206. DNS failure, timeout, any other status => dropped. Uses the stream's own request headers (behaviorHints.proxyHeaders.request / headers).
+const HEALTH_MS = 2500, HEALTH_CACHE = new Map();
+async function streamAlive(st) {
+  const url = String(st.url || "");
+  if (!/^https?:\/\//i.test(url)) return true;                      // magnet: / title-only rows are not web streams
+  if (!relayAllowed(url)) return false;                               // private / blocked hosts are never probed
+  const hit = HEALTH_CACHE.get(url);
+  if (hit && Date.now() - hit.at < (hit.ok ? 300000 : 60000)) return hit.ok;
+  const raw = (st.behaviorHints && st.behaviorHints.proxyHeaders && st.behaviorHints.proxyHeaders.request) || st.headers || null;
+  let hdr = {};
+  try { if (raw && typeof raw === "object") { const c = relayHdrClean(raw); if (c) hdr = JSON.parse(c); } } catch (e) {}
+  const h = Object.assign({ "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36", Accept: "*/*" }, hdr);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), HEALTH_MS);
+  let ok = false, why = "";
+  try {
+    let r = await fetch(url, { method: "HEAD", headers: h, redirect: "follow", signal: ctl.signal });
+    if (r.status !== 200 && r.status !== 206) {
+      try { r.body && r.body.cancel(); } catch (e) {}
+      r = await fetch(url, { method: "GET", headers: Object.assign({}, h, { Range: "bytes=0-0" }), redirect: "follow", signal: ctl.signal });
+    }
+    ok = r.status === 200 || r.status === 206;
+    if (!ok) why = "HTTP " + r.status;
+    try { r.body && r.body.cancel(); } catch (e) {}
+  } catch (e) { why = ctl.signal.aborted ? "timeout > " + HEALTH_MS + "ms" : "unreachable (" + ((e && e.message) || "dns/connect") + ")"; }
+  clearTimeout(timer);
+  if (!ok) console.warn("[health] dropped", url.slice(0, 120), "-", why);
+  capSet(HEALTH_CACHE, url, { at: Date.now(), ok }, 400);
+  return ok;
+}
+async function healthFilter(list, max) {
+  const keep = new Array(list.length).fill(true);
+  let used = 0;
+  await Promise.all(list.map(async (st, i) => {
+    if (!/^https?:\/\//i.test(String(st.url || ""))) return;
+    if (used >= max) return;                                          // Worker sub-request budget: the rest pass unchecked
+    used++;
+    keep[i] = await streamAlive(st).catch(() => true);
+  }));
+  return list.filter((x, i) => keep[i]);
+}
+function jobPush(job, list, needUrl, prov, trusted) {
+  const fresh = [];
   for (const st of list || []) {
     if (!st || (needUrl && !st.url)) continue;
+    if (!st.url && (st.infoHash || st.fileIdx !== undefined)) continue;  // raw infoHash-only torrent objects never enter the list
     const k = String(st.url || st.title || "");
     if (!k || job.seen.has(k)) continue;
     job.seen.add(k);
-    job.bag.push(prov ? { ...st, provider: prov } : st);
-    n++;
+    fresh.push(prov ? { ...st, provider: prov } : st);
   }
-  if (n) jobWake(job);
-  return n;
+  if (!fresh.length) return 0;
+  const env = job.env || {};
+  if (trusted || String(env.HEALTH_CHECK) === "0") { for (const x of fresh) job.bag.push(x); jobWake(job); return fresh.length; }
+  const p = healthFilter(fresh, Number(env.HEALTH_MAX) || 24).then((ok) => { for (const x of ok) job.bag.push(x); if (ok.length) jobWake(job); }).catch(() => { for (const x of fresh) job.bag.push(x); jobWake(job); });
+  (job.checks || (job.checks = [])).push(p);
+  return fresh.length;
 }
 // resolves when the job has more than `since` items, has finished, or `ms` passed (no timer is left behind)
 function jobWait(job, since, ms) {
@@ -2464,7 +2594,7 @@ async function waitPeer(job, key) {
   while (Date.now() < until) {
     await new Promise((r) => setTimeout(r, 700));
     const eg = await edgeGet(key);
-    if (eg) { jobPush(job, eg.list, false); return true; }
+    if (eg) { jobPush(job, eg.list, false, undefined, true); return true; }
     if (!(await lockPresent(key))) return false;           // the other request ended without a result: ask the backend ourselves
   }
   return false;
@@ -2497,11 +2627,20 @@ async function runScrapers(job, env, tmdbId, mediaType, season, episode) {
         const types = sc.supportedTypes || sc.types;
         if (Array.isArray(types) && types.length && !types.includes(mediaType)) continue;
         all.push(lim(async () => {
+          // Nuvio scrapers take getStreams(tmdbId, mediaType, season, episode): the TMDB id as a plain numeric string (e.g. "44778"), season/episode only for series.
+          const tid = String(tmdbId).replace(/^tmdb:/i, "").trim();
+          const tv = mediaType === "tv";
+          const ctxs = "tmdb " + tid + " " + mediaType + (tv ? " S" + season + "E" + episode : "");
+          if (!/^\d+$/.test(tid)) console.warn("[scraper " + label + "] id is not a numeric TMDB id (" + tid + "), results will probably be empty");
           try {
             const fn = await loadScraperFn(sc.url, 4000);
-            const res = await withTimeout(Promise.resolve().then(() => fn(String(tmdbId), mediaType, season, episode)), perScraper, label);
-            if (Array.isArray(res)) jobPush(job, res, false, sc.name || sc.id);
-          } catch (err) {}
+            const res = await withTimeout(Promise.resolve().then(() => fn(tid, mediaType, tv ? season : null, tv ? episode : null)), perScraper, label);
+            if (!Array.isArray(res)) console.warn("[scraper " + label + "] returned " + typeof res + " instead of an array for " + ctxs);
+            else {
+              if (!res.length) console.warn("[scraper " + label + "] returned [] for " + ctxs + " (see its fetch/require lines above for the cause)");
+              jobPush(job, res, false, sc.name || sc.id);
+            }
+          } catch (err) { console.warn("[scraper " + label + "] failed for " + ctxs + ": " + ((err && err.message) || err)); }
         }));
       }
     })
@@ -2530,6 +2669,7 @@ async function runBackend(job, env, tmdbId, mediaType, season, episode) {
 }
 function startJob(env, ctx, key, tmdbId, mediaType, season, episode, follow) {
   const job = newJob();
+  job.env = env;
   STREAM_JOBS.set(key, job);
   const run = env.STREAM_BACKEND ? runBackend : globalThis.__fastStreams ? runFast : runScrapers;
   const go = async () => {
@@ -2542,6 +2682,7 @@ function startJob(env, ctx, key, tmdbId, mediaType, season, episode, follow) {
   job.done = withTimeout(Promise.resolve().then(go), (Number(env.STREAM_JOB_MS) || 30000) + (follow ? 8000 : 0), "job")
     .catch(() => {})
     .then(async () => {
+      while (job.checks && job.checks.length) await Promise.allSettled(job.checks.splice(0));   // health checks finish (<= 2.5 s each, in parallel) before the list is final
       job.fin = true;
       jobWake(job);
       STREAM_JOBS.delete(key);
@@ -2733,10 +2874,12 @@ async function handleApi(url, env, request, ctx) {
           const since = Number(url.searchParams.get("n")) || 0;
           const job = await streamsFor(env, ctx, id, media, s, e, fresh, joinJob);
           await jobWait(job, since, 2500);
-          return send({ streams: await signStreamSubs(env, job.bag.slice()), n: job.bag.length, done: job.fin }, 200, "no-store");
+          const ol = await originalLang(env, media, id);
+          return send({ streams: await signStreamSubs(env, rankStreams(job.bag.slice(), ol, nativeClient(url, request))), n: job.bag.length, done: job.fin, ol }, 200, "no-store");
         }
         const streams = await fetchPluginStreams(env, id, media, s, e, fresh, ctx);
-        return send(Array.isArray(streams) ? await signStreamSubs(env, streams) : [], 200, "no-store");
+        const ol2 = await originalLang(env, media, id);
+        return send(Array.isArray(streams) ? await signStreamSubs(env, rankStreams(streams, ol2, nativeClient(url, request))) : [], 200, "no-store");
       } catch (err) {
         console.error("Plugin fetch error:", err.message);
         return send({ error: err.message }, 500);
@@ -2810,7 +2953,13 @@ async function handleApi(url, env, request, ctx) {
       if (env.WORKER_URL && /^https:\/\/[^\s"'<>]+$/i.test(String(env.WORKER_URL))) wb = String(env.WORKER_URL).replace(/\/+$/, "");
       else if (!env.RENDER && url.protocol === "https:") wb = url.origin;
       if (!wb) return new Response(JSON.stringify({ error: "relay runs on the Worker only: set WORKER_URL" }), { status: 503, headers: { "content-type": "application/json", "cache-control": "no-store", "Access-Control-Allow-Origin": "*" } });
-      return new Response(JSON.stringify({ u: await relaySign(env, u, relayHdrClean(url.searchParams.get("h") || ""), wb) }), { headers: { "content-type": "application/json", "cache-control": "no-store", "Access-Control-Allow-Origin": "*" } });
+      // headers come from h={"Referer":..} (behaviorHints.proxyHeaders.request) or from ref= / org= / ua= query params; p=hls issues /api/proxy/hls links
+      const hobj = {};
+      try { const hq0 = url.searchParams.get("h"); if (hq0) Object.assign(hobj, JSON.parse(hq0)); } catch (e) {}
+      if (url.searchParams.get("ref")) hobj.Referer = url.searchParams.get("ref");
+      if (url.searchParams.get("org")) hobj.Origin = url.searchParams.get("org");
+      if (url.searchParams.get("ua")) hobj["User-Agent"] = url.searchParams.get("ua");
+      return new Response(JSON.stringify({ u: await relaySign(env, u, relayHdrClean(hobj), wb, url.searchParams.get("p") === "hls" ? "/api/proxy/hls" : "") }), { headers: { "content-type": "application/json", "cache-control": "no-store", "Access-Control-Allow-Origin": "*" } });
     }
     if (path === "/api/relay-check") {
       const out = await relayCheck(request, url);
@@ -5890,6 +6039,7 @@ html.splashlock,html.splashlock body{overflow:hidden!important;height:100%;overs
         var t1 = h("div", "srt1");
         t1.appendChild(h("b", null, "SERVER " + sv.n));
         t1.appendChild(h("span", "sbadge", sv.label));
+        if (sv.main.st && sv.main.st.lt) t1.appendChild(h("span", "sbadge", sv.main.st.lt));
         var slot = h("span", "srslot");
         t1.appendChild(slot);
         mid.appendChild(t1);
@@ -7263,12 +7413,16 @@ $("smclose").onclick = function () {
           var heavy = f === "mkv" || f === "avi" || /hevc|x265|h\.?265|remux|dts|ac3|e-?ac-?3|dd\+?5|truehd|atmos|2160p|\b4k\b/i.test(t) || gb > 3;
           var qm = /(\d{3,4})p/i.exec(String(x.quality || "") + " " + t), q = qm ? +qm[1] : (/8k|4320/i.test(String(x.quality || "") + t) ? 4320 : (/4k|uhd/i.test(String(x.quality || "") + t) ? 2160 : 0));
           if (q >= 2160) heavy = true;
+          if (x.cx || f === "dash") heavy = true;                                    // HEVC / AC3 / DTS / MKV / MPD: not browser-safe
           if (f === "torrent") return { f: "torrent", heavy: true, tor: true, q: q, sc: 1 + Math.min(+x.seeders || 0, 1000) / 100, gb: gb, over: false, seed: +x.seeders || 0 };
           // format: HLS 100 > MP4 80 > MKV 10
           var sc = f === "hls" ? 100 : f === "mp4" ? 80 : f === "dash" ? 60 : f === "file" ? 50 : f === "embed" ? 20 : f === "mkv" ? 10 : f === "avi" ? 5 : 20;
           // resolution: 1080p 30 > 720p 20 > 4K 10 (4K is heavy on mobile bandwidth and codecs)
           sc += q === 1080 ? 30 : q === 720 ? 20 : q >= 2160 ? 10 : q >= 1000 ? 28 : q >= 480 ? 8 : q >= 360 ? 4 : 0;
           if (/cam|hdcam|telesync|\bts\b/i.test(t)) sc -= 40;
+          // language: original audio first, English second, mismatched foreign dubs last (never removed)
+          if (typeof x.lr === "number") sc += x.lr <= 0 ? 60 : x.lr < 1.5 ? 20 : x.lr < 2 ? 0 : -30;
+          if (x.cx) sc -= 25;
           // file size: over 3 GB loses points, over 5 GB is rejected unless nothing smaller exists
           if (gb > 3) sc -= 20 + Math.round((gb - 3) * 10);
           return { f: f, heavy: heavy, q: q, sc: sc, gb: gb, over: gb > 5 };
@@ -7467,7 +7621,7 @@ $("smclose").onclick = function () {
           var tx = h("div", "srvtx");
           tx.appendChild(h("b", null, "SERVER " + sv.n + " · " + sv.label + (sv.last ? " · Last used" : "")));
           var st = sv.main.st, sd = sv.main.sd;
-          tx.appendChild(h("span", null, (sd.q ? sd.q + "p • " : "") + fmtName(sd) + (sd.tor && sd.seed ? " • " + sd.seed + " seeders" : "") + " • " + (st.provider || "Plugin") + (sd.f === "embed" ? " • opens inline" : "")));
+          tx.appendChild(h("span", null, (sd.q ? sd.q + "p • " : "") + fmtName(sd) + (st.lt ? " • " + st.lt : "") + (sd.tor && sd.seed ? " • " + sd.seed + " seeders" : "") + " • " + (st.provider || "Plugin") + (sd.f === "embed" ? " • opens inline" : "")));
           var note = h("div", "note", "");
           tx.appendChild(note);
           top.appendChild(dot); top.appendChild(tx);
@@ -9827,7 +9981,7 @@ async function cachedApi(request, url, env, ctx) {
   }
 
   if (url.pathname === "/api/version" || url.pathname === "/version.json") return new Response(JSON.stringify({ v: APP_VERSION }), { headers: { "content-type": "application/json", "cache-control": "no-cache, no-store, must-revalidate", "access-control-allow-origin": "*" } });
-  if (url.pathname === "/api/relay") return relayHandle(request, url, env);
+  if ((url.pathname === "/api/relay" || url.pathname === "/api/proxy/hls")) return relayHandle(request, url, env);
   if (url.pathname === "/api/sub") return subHandle(url, env);
   if (url.pathname === "/api/ratings") return ratingsHandle(url, env);
 
@@ -10851,7 +11005,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS" && (url.pathname === "/api/relay-sign" || url.pathname === "/api/relay-check" || url.pathname === "/api/probe" || url.pathname === "/api/ping" || url.pathname === "/api/size")) return new Response(null, { status: 204, headers: { ...RELAY_CORS, "Access-Control-Allow-Headers": "range, if-range, content-type, x-tg-init" } });
-    if (url.pathname === "/api/relay") return relayHandle(request, url, env);   // heavy stream proxy: handled first, no KV, no metadata work
+    if ((url.pathname === "/api/relay" || url.pathname === "/api/proxy/hls")) return relayHandle(request, url, env);   // heavy stream proxy: handled first, no KV, no metadata work
     if (url.pathname === "/api/probe") return probeHandle(url, env);
     if (url.pathname === "/api/ping") return pingHandle(url, env);
     if (url.pathname === "/api/size") return sizeHandle(url, env);

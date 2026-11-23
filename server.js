@@ -198,9 +198,19 @@ function slimStream(st) {
   if (st.headers && typeof st.headers === 'object' && Object.keys(st.headers).length) o.headers = st.headers;
   if (st.torrent) { o.torrent = true; if (st.seeders) o.seeders = st.seeders; }
   if (st.notWebReady) o.notWebReady = true;
+  if (st.lt) o.lt = st.lt;                       // language badge (ORIGINAL / EN / ES / LAT / FR / KO / MULTI)
+  if (st.lc) o.lc = st.lc;
+  if (typeof st.lr === 'number') o.lr = st.lr;   // language rank: 0 original ... 2 mismatched dub
+  if (st.cx) o.cx = 1;                           // 1 = not browser-safe (HEVC / AC3 / DTS / MKV / MPD)
+  if (Array.isArray(st.cf) && st.cf.length) o.cf = st.cf.slice(0, 5);
   return o;
 }
+// Render keeps 0 MB of disk for streams: raw infoHash-only torrent objects (no url) are dropped, torrent caching is switched off.
+process.env.TORRENT_CACHE = '0'; process.env.TORRENT_DISK_CACHE = '0'; process.env.WEBTORRENT_DISABLED = '1'; process.env.DISABLE_TORRENTS = '1';
+const rawTorrent = (st) => !!st && typeof st === 'object' && !st.url && (st.infoHash !== undefined || st.fileIdx !== undefined || st.torrent === true);
 function slimPayload(data) {
+  if (Array.isArray(data)) data = data.filter((x) => !rawTorrent(x));
+  else if (data && typeof data === 'object' && Array.isArray(data.streams)) data = { ...data, streams: data.streams.filter((x) => !rawTorrent(x)) };
   if (Array.isArray(data)) return data.map(slimStream);
   if (data && typeof data === 'object' && Array.isArray(data.streams)) return { ...data, streams: data.streams.map(slimStream) };
   return data;
