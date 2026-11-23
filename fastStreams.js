@@ -16,7 +16,7 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', (e
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', (e && e.message) || e));
 
 const quiet = { log() {}, info() {}, debug() {}, warn() {}, error() {} };
-const scraperConsole = process.env.SCRAPER_LOGS === '1' ? console : quiet;
+const scraperConsole = process.env.SCRAPER_LOGS === '0' ? quiet : console;   // on by default: silent scraper failures are what we are hunting
 
 const manifestCache = new Map();
 const compiled = new Map();
@@ -106,9 +106,27 @@ function getScraperFn(entry) {
   return cached(compiled, entry.url, CODE_TTL, async () => {
     const code = await fetchText(entry.url, 12000);
     const moduleObj = { exports: {} };
-    const req = globalThis.customRequire || (() => ({}));
+    const tag = '[scraper ' + (entry.name || entry.id) + ']';
+    const where = (i) => String(typeof i === 'string' ? i : (i && i.url) || i).slice(0, 160);
+    // every failed or non-OK request inside the scraper is logged instead of vanishing
+    const loggedFetch = (input, init) =>
+      globalThis.fetch(input, init).then(
+        (r) => { if (!r.ok) console.warn(tag, 'fetch ' + r.status, where(input)); return r; },
+        (e) => { console.warn(tag, 'fetch failed:', (e && e.message) || e, where(input)); throw e; }
+      );
+    const base = globalThis.customRequire || (() => ({}));
+    const req = (m) => {
+      try { return base(m); } catch (e) { console.warn(tag, "require('" + m + "') failed:", (e && e.message) || e); return {}; }
+    };
+    const sbx = {
+      log: (...a) => scraperConsole.log(tag, ...a),
+      info: (...a) => scraperConsole.log(tag, ...a),
+      warn: (...a) => scraperConsole.warn(tag, ...a),
+      error: (...a) => scraperConsole.warn(tag, 'error:', ...a),
+      debug() {},
+    };
     const fn = new Function('module', 'exports', 'require', 'moduleObj', 'fetch', 'console', code);
-    fn(moduleObj, moduleObj.exports, req, moduleObj, globalThis.fetch, scraperConsole);
+    fn(moduleObj, moduleObj.exports, req, moduleObj, loggedFetch, sbx);
     const exp = moduleObj.exports || {};
     const getStreams =
       exp.getStreams ||
@@ -121,19 +139,28 @@ function getScraperFn(entry) {
 
 async function runScraper(entry, id, type, season, episode, timeoutMs = SCRAPER_TIMEOUT) {
   const t0 = Date.now();
+  // Nuvio scrapers take getStreams(tmdbId, mediaType, season, episode): numeric TMDB id string (e.g. "44778"); season/episode only for series
+  const tid = String(id).replace(/^tmdb:/i, '').trim();
+  const tv = type === 'tv';
+  const ctx = 'tmdb ' + tid + ' ' + type + (tv ? ' S' + season + 'E' + episode : '');
+  if (!/^\d+$/.test(tid)) console.warn('[scraper ' + (entry.name || entry.id) + '] id is not a numeric TMDB id (' + tid + '), results will probably be empty');
   try {
     const getStreams = await getScraperFn(entry);
     const result = await withTimeout(
-      Promise.resolve(getStreams(String(id), type, Number(season) || 1, Number(episode) || 1)),
+      Promise.resolve(getStreams(tid, type, tv ? Number(season) || 1 : null, tv ? Number(episode) || 1 : null)),
       timeoutMs
     );
+    if (!Array.isArray(result)) console.warn('[scraper ' + (entry.name || entry.id) + '] returned ' + typeof result + ' instead of an array for ' + ctx);
     const list = Array.isArray(result) ? result : [];
+    if (!list.length) console.warn('[scraper ' + (entry.name || entry.id) + '] returned [] for ' + ctx + ' (see its fetch/require lines above for the cause)');
     return {
       ok: true,
       ms: Date.now() - t0,
-      streams: list.map((s) => ({ ...s, provider: entry.name || s.provider })),
+      // raw infoHash-only torrent objects are dropped here: this server never builds, fetches or caches torrent data
+      streams: list.filter((s) => s && (s.url || !(s.infoHash || s.fileIdx !== undefined))).map((s) => ({ ...s, provider: entry.name || s.provider })),
     };
   } catch (e) {
+    console.warn('[scraper ' + (entry.name || entry.id) + '] failed for ' + ctx + ': ' + ((e && e.message) || e));
     return { ok: false, ms: Date.now() - t0, streams: [], error: String((e && e.message) || e) };
   }
 }
