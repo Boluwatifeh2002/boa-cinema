@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { createHmac, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { gzip, brotliCompress, constants as zc } from 'node:zlib';
 import { promisify } from 'node:util';
 const gzipP = promisify(gzip);
@@ -145,45 +145,26 @@ import worker from './boacinemaupdatedWorker.js';
 // Set ALLOW_VIDEO_PROXY=1 only if you ever need the old behaviour back.
 // ==========================================================================
 const ALLOW_VIDEO_PROXY = process.env.ALLOW_VIDEO_PROXY === '1';
-const VIDEO_TYPE = /^(video|audio)\/|octet-stream|mp2t|matroska|x-mpegts|x-flv/i;
-const PLAYLIST_URL = /m3u8/i;
+const VIDEO_TYPE = /^(video|audio)\/|octet-stream|mp2t|matroska|x-mpegts|x-flv|mpegurl|dash\+xml/i;
 
-function relaySecret(env) {
-  return env.RELAY_SECRET || env.BOT_TOKEN || 'boa-relay';
-}
-function relaySigOk(env, u, e, h, sig) {
-  try {
-    const want = createHmac('sha256', relaySecret(env)).update(u + '|' + e + (h ? '|' + h : '')).digest('hex');
-    return want.length === String(sig).length && want === String(sig);
-  } catch {
-    return false;
-  }
-}
-
-// /api/relay carries signed links. Playlists (small text) still go through the worker so their
-// segment links keep working; every other link (mp4, mkv, ts, webm, ...) is answered with a redirect
-// to the real stream host, so the video bytes go host -> viewer and never through this server.
-function handleRelayRedirect(req, res, env, reqUrl) {
-  if (ALLOW_VIDEO_PROXY || reqUrl.pathname !== '/api/relay') return false;
-  if (req.method === 'OPTIONS') return false;
-  const u = reqUrl.searchParams.get('u') || '';
-  const e = Number(reqUrl.searchParams.get('e')) || 0;
-  const sig = reqUrl.searchParams.get('s') || '';
-  const h = reqUrl.searchParams.get('h') || '';
-  let target = null;
-  try { target = new URL(u); } catch {}
-  if (!target || !/^https?:$/.test(target.protocol) || e < Date.now() / 1000 || !relaySigOk(env, u, e, h, sig)) {
-    res.statusCode = 403;
-    res.setHeader('access-control-allow-origin', '*');
-    res.end('forbidden');
-    return true;
-  }
-  if (PLAYLIST_URL.test(u)) return false;
-  res.statusCode = 302;
-  res.setHeader('location', target.href);
-  res.setHeader('cache-control', 'no-store');
+// ALL relay / proxy / stream-forwarding is OFF on this server. Nothing media-shaped is ever answered from Render:
+//  - /api/relay (and any /proxy, /relay, /hls, /stream... alias) answers 410 Gone, playlists included
+//  - any path that looks like a media file (.m3u8 .ts .m4s .mp4 .mkv .webm ...) answers 410 Gone
+// The signed relay links the app builds point at the Cloudflare Worker (WBASE), so the privacy relay keeps working there.
+// Tiny helper routes (/api/relay-sign, /api/ping, /api/size, /api/probe) stay: they only sign a link or read a few bytes.
+const BLOCK_PATH = /^\/(api\/)?(relay|proxy|hls|stream-proxy|streamproxy|dl|download|segment|seg)(\/|$)/i;
+const MEDIA_EXT = /\.(m3u8|m3u|mpd|ts|m4s|m4v|mp4|mkv|webm|avi|mov|flv|aac|mp3|m4a|ogg|opus)$/i;
+function blockMedia(req, res, reqUrl) {
+  const p = reqUrl.pathname;
+  if (ALLOW_VIDEO_PROXY || !(BLOCK_PATH.test(p) || MEDIA_EXT.test(p))) return false;
+  res.statusCode = req.method === 'OPTIONS' ? 204 : 410;
   res.setHeader('access-control-allow-origin', '*');
-  res.end();
+  res.setHeader('access-control-allow-methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('access-control-allow-headers', 'range, if-range, content-type');
+  res.setHeader('cache-control', 'public, max-age=3600');
+  if (req.method === 'OPTIONS' || req.method === 'HEAD') { res.end(); return true; }
+  res.setHeader('content-type', 'application/json');
+  res.end('{"error":"This server does not relay or proxy streams. Use the direct stream url."}');
   return true;
 }
 
@@ -312,6 +293,8 @@ const server = createServer(async (req, res) => {
     const host = req.headers.host || `localhost:${PORT}`;
     const url = `${protocol}://${host}${req.url}`;
 
+    if (blockMedia(req, res, new URL(req.url, 'http://x'))) return;
+
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       const chunks = [];
@@ -379,7 +362,7 @@ if (!onRender) {
       }
       return;
     }
-    if (handleRelayRedirect(req, res, env, reqUrl)) return;
+    if (blockMedia(req, res, reqUrl)) return;   // /api/relay, /proxy, .m3u8/.ts/.mp4... => 410 Gone, before anything else runs
     if (await handleExtras(req, res, env, url)) return;
     const ctx = {
       waitUntil: (promise) => Promise.resolve(promise).catch(console.error),
