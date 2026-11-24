@@ -1752,27 +1752,31 @@ function legalPage(kind) {
   const body = priv
     ? `<h1>Privacy Policy</h1>
 <p>${B} does not host any media files. Streams and metadata come from online sources.</p>
-<h2>What we keep</h2>
-<p>Creating an account is optional. If you do, we store your name, your email address, a salted and hashed version of your password (we cannot read your password), and the data you choose to sync: your profiles, My List and Continue Watching progress.</p>
-<p>If you do not create an account, this data stays on your device (and in Telegram cloud storage when you use the Telegram Mini App).</p>
+<h2>Why You sign in & What We Store</h2>
+<p>Purpose of Signing In: Guests may browse the catalog only. Signing in enables you to sync your watchlist/library across devices and access saved offline downloads in the app.</p>
+<p>Minimal Personal Info: Please do not enter real personal details (such as your real name, legal identity, phone number, or sensitive info). Email is the only personal field used for your account (alongside a hashed password we cannot read).
+</p>
+<p>No Password Reset: We do not offer password resets—if you forget your password, you will need to create a new account.</p>
+<p>Watchlist & Offline Cache: Your synced watchlist/progress is stored for your account, and downloaded media is cached locally on your device for in-app offline playback.</p>
 <h2>What we do not do</h2>
 <p>We do not sell your data, and we do not send marketing email. We do not currently send any email at all.</p>
 <h2>Ads and third parties</h2>
-<p>Ad networks that serve video ads may use their own cookies or identifiers under their own policies. Metadata and images come from TMDB; streams come from third-party sources we do not control.</p>
+<p>Third-party ad networks and external stream/metadata providers may use their own cookies, identifiers, or policies outside our control..</p>
 <h2>Deleting your data</h2>
-<p>Open the Profile tab, sign in, and choose Delete account. This erases your account and all synced data from our database. You can also sign out at any time; signing out keeps the data already saved on your device.</p>
-<h2>Children</h2>
-<p>${B} is not intended for children under 13.</p>
+<p>Sign in and use Delete account under Profile to remove your account and synced data. Signing out keeps local/downloaded data on your device unless removed.. You can also sign out at any time; signing out keeps the data already saved on your device.</p>
+<h2>Age & Updates</h2>
+<p>${B} Not intended for users under 13 (or the minimum digital age in your region). Updates to this policy take effect when posted.</p>
 <h2>Changes</h2>
 <p>We may update this policy as the app grows. Continued use means you accept the updated policy.</p>`
     : `<h1>Terms of Use</h1>
-<p>${B} does not host any media files. Streams and metadata come from online sources.</p>
+<p>${B}owns the platform service and interface, we do not host any media files. Streams and metadata come from online sources.</p>
 <h2>Using the service</h2>
+<p>Guest may browse the catalog only; a registered account is required to watch, use your library, sync across devices, or access offline downloads (once available).</p>
 <p>${B} is provided as is, with no guarantee that any title, stream or feature will be available or error free. You are responsible for how you use third-party content and for following the laws where you live.</p>
-<h2>Accounts</h2>
+<h2>Accounts & Passwords</h2>
 <p>Accounts are optional. Keep your password private; you are responsible for activity on your account. We may suspend accounts that abuse the service.</p>
-<h2>Content</h2>
-<p>We do not own or control the third-party sources that streams come from. If you are a rights holder and believe a link should not appear, contact us through the ${B} Telegram bot and we will review it.</p>
+<h2>Third-Party Content & Liability</h2>
+<p>We do not own or control the third-party sources that streams come from. If you are a rights holder and believe a link should not appear, contact us through boacinema001@gmail.com and we will review it.</p>
 <h2>Liability</h2>
 <p>To the extent allowed by law, ${B} is not liable for losses arising from use of the service.</p>
 <h2>Changes</h2>
