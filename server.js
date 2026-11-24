@@ -389,6 +389,28 @@ if (!onRender) {
       passThroughOnException: () => {}
     };
 
+    if (reqUrl.pathname.startsWith('/api/auth')) {
+      const workerBase = (process.env.WORKER_URL || 'https://silent-block-5183.adesanyaalexandra.workers.dev').replace(/\/+$/, '');
+      const targetUrl = `${workerBase}${reqUrl.pathname}${reqUrl.search}`;
+      const fwdHeaders = new Headers(req.headers);
+      fwdHeaders.delete('host');
+      fwdHeaders.delete('connection');
+      fwdHeaders.delete('content-length');
+
+      const proxyRes = await fetch(targetUrl, {
+        method: req.method,
+        headers: fwdHeaders,
+        body: req.method !== 'GET' && req.method !== 'HEAD' && body && body.length ? body : undefined,
+      });
+
+      const outHeaders = {};
+      for (const [k, v] of proxyRes.headers.entries()) {
+        outHeaders[k] = v;
+      }
+      const buf = Buffer.from(await proxyRes.arrayBuffer());
+      await sendBuf(req, res, proxyRes.status, outHeaders, buf);
+      return;
+    }
     const response = await worker.fetch(request, env, ctx);
     const ctype = response.headers.get('content-type') || '';
 
