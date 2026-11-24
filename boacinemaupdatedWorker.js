@@ -1763,7 +1763,7 @@ function legalPage(kind) {
 <h2>Ads and third parties</h2>
 <p>Third-party ad networks and external stream/metadata providers may use their own cookies, identifiers, or policies outside our control..</p>
 <h2>Deleting your data</h2>
-<p>Sign in and use Delete account under Profile to remove your account and synced data. Signing out keeps local/downloaded data on your device unless removed.. You can also sign out at any time; signing out keeps the data already saved on your device.</p>
+<p>Sign in and use Delete account under Profile to remove your account and synced data. Signing out keeps local/downloaded data on your device unless removed..</p>
 <h2>Age & Updates</h2>
 <p>${B} Not intended for users under 13 (or the minimum digital age in your region). Updates to this policy take effect when posted.</p>
 <h2>Changes</h2>
