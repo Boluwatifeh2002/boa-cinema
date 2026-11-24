@@ -1,3 +1,13 @@
+function toMagnet(s) {
+  if (!s || typeof s !== 'object' || s.url || !s.infoHash) return s;
+  const h = String(s.infoHash).trim();
+  if (!/^[a-f0-9]{40}$/i.test(h) && !/^[a-z2-7]{32}$/i.test(h)) return s;
+  const dn = String(s.title || s.name || 'stream').split('\n')[0].slice(0, 100);
+  let m = 'magnet:?xt=urn:btih:' + h + '&dn=' + encodeURIComponent(dn);
+  const tr = (Array.isArray(s.sources) ? s.sources : []).map((x) => String(x).replace(/^tracker:/, '')).filter((x) => /^(udp|http|https|wss?):\/\//i.test(x)).slice(0, 8);
+  (tr.length ? tr : ['udp://tracker.opentrackr.org:1337/announce', 'udp://open.tracker.cl:1337/announce', 'udp://tracker.torrent.eu.org:451/announce']).forEach((t) => { m += '&tr=' + encodeURIComponent(t); });
+  return { ...s, url: m, torrent: true };   // a plain magnet string: the viewer's own torrent app opens it, nothing is fetched or stored here
+}
 // fastStreams.js
 // Runs plugin scrapers IN PARALLEL (the old code ran them one by one), caches the downloaded
 // scripts and the results, and stops waiting after a deadline so the page never hangs.
@@ -156,8 +166,8 @@ async function runScraper(entry, id, type, season, episode, timeoutMs = SCRAPER_
     return {
       ok: true,
       ms: Date.now() - t0,
-      // raw infoHash-only torrent objects are dropped here: this server never builds, fetches or caches torrent data
-      streams: list.filter((s) => s && (s.url || !(s.infoHash || s.fileIdx !== undefined))).map((s) => ({ ...s, provider: entry.name || s.provider })),
+      // infoHash-only torrent objects become plain magnet links here: this server never builds, fetches or caches torrent data
+      streams: list.map(toMagnet).filter((s) => s && (s.url || !(s.infoHash || s.fileIdx !== undefined))).map((s) => ({ ...s, provider: entry.name || s.provider })),
     };
   } catch (e) {
     console.warn('[scraper ' + (entry.name || entry.id) + '] failed for ' + ctx + ': ' + ((e && e.message) || e));

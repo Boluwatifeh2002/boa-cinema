@@ -205,12 +205,22 @@ function slimStream(st) {
   if (Array.isArray(st.cf) && st.cf.length) o.cf = st.cf.slice(0, 5);
   return o;
 }
-// Render keeps 0 MB of disk for streams: raw infoHash-only torrent objects (no url) are dropped, torrent caching is switched off.
+// Render keeps 0 MB of disk for streams: raw infoHash-only torrent objects become plain magnet links (no url and no valid hash: dropped), torrent caching is switched off.
 process.env.TORRENT_CACHE = '0'; process.env.TORRENT_DISK_CACHE = '0'; process.env.WEBTORRENT_DISABLED = '1'; process.env.DISABLE_TORRENTS = '1';
+function toMagnet(s) {
+  if (!s || typeof s !== 'object' || s.url || !s.infoHash) return s;
+  const h = String(s.infoHash).trim();
+  if (!/^[a-f0-9]{40}$/i.test(h) && !/^[a-z2-7]{32}$/i.test(h)) return s;
+  const dn = String(s.title || s.name || 'stream').split('\n')[0].slice(0, 100);
+  let m = 'magnet:?xt=urn:btih:' + h + '&dn=' + encodeURIComponent(dn);
+  const tr = (Array.isArray(s.sources) ? s.sources : []).map((x) => String(x).replace(/^tracker:/, '')).filter((x) => /^(udp|http|https|wss?):\/\//i.test(x)).slice(0, 8);
+  (tr.length ? tr : ['udp://tracker.opentrackr.org:1337/announce', 'udp://open.tracker.cl:1337/announce', 'udp://tracker.torrent.eu.org:451/announce']).forEach((t) => { m += '&tr=' + encodeURIComponent(t); });
+  return { ...s, url: m, torrent: true };   // a plain magnet string: the viewer's own torrent app opens it, nothing is fetched or stored here
+}
 const rawTorrent = (st) => !!st && typeof st === 'object' && !st.url && (st.infoHash !== undefined || st.fileIdx !== undefined || st.torrent === true);
 function slimPayload(data) {
-  if (Array.isArray(data)) data = data.filter((x) => !rawTorrent(x));
-  else if (data && typeof data === 'object' && Array.isArray(data.streams)) data = { ...data, streams: data.streams.filter((x) => !rawTorrent(x)) };
+  if (Array.isArray(data)) data = data.map(toMagnet).filter((x) => !rawTorrent(x));
+  else if (data && typeof data === 'object' && Array.isArray(data.streams)) data = { ...data, streams: data.streams.map(toMagnet).filter((x) => !rawTorrent(x)) };
   if (Array.isArray(data)) return data.map(slimStream);
   if (data && typeof data === 'object' && Array.isArray(data.streams)) return { ...data, streams: data.streams.map(slimStream) };
   return data;
