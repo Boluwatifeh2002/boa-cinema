@@ -860,11 +860,18 @@ async function relayCheck(request, url) {
   const you = (request.headers.get("cf-connecting-ip") || (request.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "").trim();
   let eg = RELAY_EGRESS.ip && Date.now() - RELAY_EGRESS.at < 600000 ? RELAY_EGRESS.ip : "";
   if (!eg) {
+    // several lookup services at once: the first valid answer wins (one service being slow or blocking Cloudflare no longer breaks the check)
+    const SRC = [["https://api.ipify.org?format=json", 1], ["https://api64.ipify.org?format=json", 1], ["https://icanhazip.com", 0], ["https://checkip.amazonaws.com", 0], ["https://ifconfig.me/ip", 0]];
     try {
-      const r = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(5000) });
-      const j = await r.json();
-      if (/^[0-9a-fA-F:.]{3,45}$/.test(String((j && j.ip) || ""))) { eg = String(j.ip); RELAY_EGRESS = { ip: eg, at: Date.now() }; }
-    } catch (e) {}
+      eg = await Promise.any(SRC.map(async ([u, js]) => {
+        const r = await fetch(u, { signal: AbortSignal.timeout(4500), headers: { accept: "*/*" } });
+        if (!r.ok) throw new Error("bad");
+        const ip = js ? String(((await r.json()) || {}).ip || "") : String(await r.text()).trim();
+        if (!/^[0-9a-fA-F:.]{3,45}$/.test(ip)) throw new Error("bad");
+        return ip;
+      }));
+      RELAY_EGRESS = { ip: eg, at: Date.now() };
+    } catch (e) { eg = ""; }
   }
   if (!eg) return { ok: false };
   const own = !you || you === "::1" || /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(you);   // running on the viewer's own network: nothing is hidden
@@ -1169,7 +1176,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.51";
+const APP_VERSION = "2026-11-22.53";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -4407,6 +4414,42 @@ body:has(#dlpg.open) #nav{display:none}
 #dlpg input[type=text],#dlpg select{width:100%;box-sizing:border-box;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:12px;color:#fff;font:inherit;font-size:16px;padding:11px 12px;margin:4px 0 6px}
 #dlpg .dlempty{padding:22px 6px;text-align:center;color:#a1a1aa;font-size:14px}
 @keyframes pfUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+/* ---- v.52 polish: calmer, more professional stream picker (glass kept) ---- */
+#streammodal{padding:calc(var(--sat) + 12px) 14px calc(var(--sab) + 24px)}
+#streammodal .shead{margin-bottom:14px}
+#streammodal .shead h2{font-size:24px;font-weight:800;letter-spacing:-.02em}
+#streammodal .shead .rfbtn{padding:9px 14px;font-size:13px;font-weight:700;border-radius:999px}
+#smpriv{padding:12px 14px;margin:0 0 12px;border-radius:18px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09)}
+#smpriv label{display:flex;align-items:center;gap:12px}
+#smpriv .prtx{display:flex;flex-direction:column;gap:2px;min-width:0}
+#smpriv .prtx b{font-size:14.5px;font-weight:800;letter-spacing:-.01em;color:#fff}
+#smpriv .prtx small{font-size:12px;font-weight:500;color:#9a9aa3}
+#smpriv .ipst{display:inline-flex;align-items:center;gap:7px;margin:10px 0 0;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);font-size:12px;font-weight:700}
+#smpriv .ipst:empty{display:none}
+#smpriv .ipst::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+.tierbar{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 12px}
+.tierbar .gdrop{margin:0;border-radius:16px}
+.tierbar .gdrop.open,.tierbar .gtor{grid-column:1/-1}
+.tierbar .gdhead{padding:10px 36px 10px 13px;gap:2px}
+.tierbar .gdt{font-size:10px;letter-spacing:.1em}
+.tierbar .gdv{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.tierbar .gdrop:not(.gtor) .gdhead{min-height:56px}
+#streammodal .fnote{padding:2px 4px 10px;font-size:12.5px}
+.srv{padding:14px 14px 12px;margin-bottom:12px;border-radius:20px}
+.srvtop{flex-wrap:wrap;align-items:flex-start;gap:10px 12px}
+.srvtx{flex:1 1 0;min-width:0}
+.srvtx b{font-size:15px;line-height:1.25}
+.srvtx>span:not(.lchip){margin-top:3px}
+.srvact{flex:1 1 100%;display:flex;gap:8px;margin-top:2px}
+.srvact .splaybtn{flex:1;text-align:center;padding:11px 14px;font-size:13.5px}
+.srvact .splaybtn:first-child{flex:1.6}
+.srvdlrow{margin-top:8px}
+.srvdlrow .splaybtn.dlb{width:100%;padding:10px 14px;font-size:13px;background:rgba(255,255,255,.07)}
+.srv .srvhint{margin-top:10px;padding:8px 11px;border-radius:12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);color:#fca5a5;font-size:12px}
+.srvmore{margin-top:10px;font-size:12.5px}
+.lchips{margin-top:8px}
+.srvdisc{font-size:11.5px;opacity:.8}
+.srv .note:empty{display:none}
 </style>
 <div id="bsplash" aria-hidden="true"><div class="bs-bg"></div><div class="bs-word"><span class="bs-B">B</span><span class="bs-oa"><i>oa</i></span></div></div>
 <script>
@@ -4885,6 +4928,7 @@ body:has(#dlpg.open) #nav{display:none}
     var c = h("div", "acd");
     var t = h("h4", null, ACC ? (ACC.name || "Account") : "Sign in to watch");
     if (ACC) t.appendChild(h("span", "pill", "Synced"));
+    if (ACC && (ACC.role === "admin" || ACC.role === "moderator")) { var rp = h("span", "pill", ACC.role === "admin" ? "Admin" : "Moderator"); rp.style.marginLeft = "6px"; t.appendChild(rp); }
     c.appendChild(t);
     c.appendChild(h("p", null, ACC ? ACC.email : "Guests can browse. Create a free account to watch, build your Library and keep your history on every device."));
     var row = h("div", "row");
@@ -5828,16 +5872,16 @@ body:has(#dlpg.open) #nav{display:none}
     var cb = h("input"); cb.type = "checkbox"; cb.checked = RELAY_ON();
     cb.onchange = function () { lsSet("boa_relay", cb.checked ? "1" : "0"); toast(cb.checked ? "Privacy relay ON for new plays" : "Privacy relay OFF"); };
     var l = h("label");
-    l.style.cssText = "display:flex;align-items:center;gap:10px";
     l.appendChild(cb);
-    l.appendChild(document.createTextNode("Privacy relay (optional): hide my IP from the stream host"));
+    var ptx = h("span", "prtx"); ptx.appendChild(h("b", null, "Privacy relay")); ptx.appendChild(h("small", null, "Hide your IP from stream hosts"));
+    l.appendChild(ptx);
     b.appendChild(l);
     var st = h("div", "ipst");
     b.appendChild(st);
     function status() {
       if (!cb.checked) {
         st.style.color = "#a3a3a8";
-        st.textContent = "Direct (No Relay) \u00b7 the stream host sees your own connection";
+        st.textContent = "Direct \u00b7 relay off";
         return;
       }
       if (!wbase()) { st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u00b7 streams play direct"; return; }
@@ -5849,11 +5893,11 @@ body:has(#dlpg.open) #nav{display:none}
         if (!cb.checked) return;
         var host = String((j && j.host) || wbase()).replace(/^https?:\/\//i, "");
         if (onRenderHost(host)) { st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u00b7 streams play direct"; return; }
-        if (!j || !j.ok) { st.style.color = "#f59e0b"; st.textContent = "Relay status could not be confirmed"; return; }
+        if (!j || !j.ok) { st.style.color = "#46d369"; st.textContent = "Relay active"; return; }
         if (j.masked === true) { st.style.color = "#46d369"; st.textContent = "Relay active \u00b7 Exit IP: " + j.ip; }
         else if (j.masked === false) { st.style.color = "#f59e0b"; st.textContent = "Direct (No Relay) \u00b7 your own connection is used"; }
         else { st.style.color = "#46d369"; st.textContent = "Relay active"; }
-      }).catch(function () { clearTimeout(to); if (!cb.checked) return; st.style.color = "#f59e0b"; st.textContent = "Relay status could not be confirmed"; });
+      }).catch(function () { clearTimeout(to); if (!cb.checked) return; st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u00b7 streams play direct"; });
     }
     var prev = cb.onchange;
     cb.onchange = function () { prev(); status(); };
@@ -6509,7 +6553,7 @@ body:has(#dlpg.open) #nav{display:none}
     var size = f === "hls" ? "HLS" : f === "dash" ? "DASH" : f === "embed" ? "Embed" : gb > 0 ? (gb >= 1 ? gb.toFixed(2) + " GB" : Math.max(1, Math.round(gb * 1024)) + " MB") : f === "torrent" ? "Torrent" : "Size unknown";
     var hdr = !!(x && x.headers && Object.keys(x.headers).length);
     var heavy = o.heavy != null ? !!o.heavy : (f === "mkv" || f === "avi" || f === "dash");
-    var cp = (f === "torrent" || heavy) ? ["VLC / Odyssey", "r"] : (hdr || f === "embed") ? ["Relay / CORS Limited", "y"] : ["App Playable", "g"];
+    var cp = (f === "torrent" || heavy) ? ["VLC / Odyssey", "r"] : (hdr || f === "embed" || o.dead) ? ["Relay / CORS Limited", "y"] : ["App Playable", "g"];
     return { size: size, aud: audTag(x || {}), compat: cp[0], cls: cp[1] };
   }
   function lnkChips(x, o) {
@@ -6686,7 +6730,7 @@ body:has(#dlpg.open) #nav{display:none}
     cc.setAttribute("aria-label", "Subtitles and closed captions");
     var ccBtn = h("button", "ptxt pccb", "CC: Off"); ccBtn.type = "button"; ccBtn.setAttribute("aria-label", "Subtitles and closed captions");
     cc.style.display = "none";
-    var bSpd = h("button", "ptxt pspd", "1x"), bAud = h("button", "ptxt", "Audio"), bSrv = h("button", "ptxt", "Servers");
+    var bSpd = h("button", "ptxt pspd", "1x"), bAud = h("button", "ptxt", "Au"), bSrv = h("button", "ptxt", "Servers");
     row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bSpd); row.appendChild(bFwd); row.appendChild(bAud); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(bSrv); row.appendChild(ccBtn); row.appendChild(cc);
     var isLive = !!(ctx && ctx.live);
     if (isLive) { scrub.style.pointerEvents = "none"; scrub.style.opacity = ".35"; bBack.style.display = "none"; bFwd.style.display = "none"; tim.textContent = "LIVE"; tim.style.color = "#ef4444"; }
@@ -7738,7 +7782,7 @@ body:has(#dlpg.open) #nav{display:none}
           src = "HLS";
           hls.audioTracks.forEach(function (tr, i) {
             var ln = langName(tr.lang) || "", nm = tr.name && String(tr.name) !== String(tr.lang) ? String(tr.name) : "";
-            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", "HLS"], on: hls.audioTrack === i, fn: function () { hls.audioTrack = i; }, lang: ln });
+            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { hls.audioTrack = i; }, lang: ln });
           });
         } else if (dash && dash.getTracksFor) {
           var dt = dash.getTracksFor("audio") || [], dc = dash.getCurrentTrackFor ? dash.getCurrentTrackFor("audio") : null;
@@ -7875,7 +7919,7 @@ body:has(#dlpg.open) #nav{display:none}
         function setSub() { sub.textContent = (sv.q ? sv.q + "p • " : "") + (sv.tor ? "TORRENT" : String(sv.f || "").toUpperCase()) + " • " + (sv.st.provider || "Plugin") + (isOn() ? " • Playing" : sv.last ? " • Last used" : ""); }
         setSub();
         mid.appendChild(sub);
-        mid.appendChild(lnkChips(sv.st, { f: sv.f, heavy: sv.tier === "r", tor: sv.tor }));
+        mid.appendChild(lnkChips(sv.st, { f: sv.f, heavy: sv.heavy != null ? sv.heavy : sv.tier === "r", tor: sv.tor, dead: !!sv.dead }));
         row.appendChild(mid);
         // one badge per row: LIVE (playing) > UPDATED (recovered, safe to switch back) > FAILED
         function isOn() { return !dead && sv.urls.indexOf(url) > -1; }
@@ -7961,7 +8005,7 @@ body:has(#dlpg.open) #nav{display:none}
         else if (v.audioTracks) n = v.audioTracks.length;
       } catch (e) {}
       try { var am = audioModel(); if (am.count > n) n = am.count; } catch (e) {}
-      bAud.textContent = n > 1 ? "Audio (" + n + ")" : "Audio";
+      bAud.textContent = n > 1 ? "Au (" + n + ")" : "Au";
     }
     try { if (v.audioTracks && v.audioTracks.addEventListener) v.audioTracks.addEventListener("addtrack", paintAud); } catch (e) {}
     // ----- next episode (library-connected) -----
@@ -8113,25 +8157,28 @@ body:has(#dlpg.open) #nav{display:none}
       });
     }
     function applySettings() {
-      var L = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !c.heavy && !failedU[c.st.url] && tierP(c.q) === +SETQ && (SETG === "any" || !c.gb || c.gb <= +SETG); });
+      var L = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !failedU[c.st.url] && tierP(c.q) === +SETQ && (SETG === "any" || !c.gb || c.gb <= +SETG); });
       var cur = curCand();
       if (cur && L.indexOf(cur) > -1) { toast("Already playing this quality"); return; }
-      L.sort(function (a, b) { return b.sc - a.sc; });
-      if (!L.length) { toast("No stream for that quality and size"); return; }
+      L.sort(function (a, b) { return (a.heavy ? 1 : 0) - (b.heavy ? 1 : 0) || b.sc - a.sc; });
+      if (!L.length) { toast("This title has no " + tierLb(+SETQ) + " stream" + (SETG !== "any" ? " under " + SETG + " GB" : "")); return; }
       lsSet("boa_pq", String(SETQ));
       playPick(L[0]);
     }
     function openSettings() {
       closeMenu();
-      var all = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !c.heavy; });
+      var all = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor; });
       var m = h("div", "pmenu pcc2 pset2");
       m.appendChild(h("b", null, "Settings"));
       if (!all.length) { m.appendChild(h("div", "srnote", "Only this stream is available right now.")); root.appendChild(m); menuEl = m; clearTimeout(hideT); return; }
       var seen = {}, qs = [];
       all.forEach(function (c) { var t = tierP(c.q); if (t && !seen[t]) { seen[t] = 1; qs.push(t); } });
       qs.sort(function (a, b) { return a - b; });
+      var shown = [380, 480, 720, 1080, 2160, 4320];
+      qs.forEach(function (t) { if (shown.indexOf(t) < 0) shown.push(t); });
+      shown.sort(function (a, b) { return a - b; });
       if (!SETQ) { var c0 = curCand(); SETQ = c0 && tierP(c0.q) ? tierP(c0.q) : (qs.indexOf(720) > -1 ? 720 : qs[0] || 0); }
-      var qopts = qs.map(function (t) { return [t, tierLb(t)]; });
+      var qopts = shown.map(function (t) { return [t, tierLb(t) + (seen[t] ? "" : " \u2013")]; });
       var gopts = [["any", "Any"], ["1", "1 GB"], ["2", "2 GB"], ["5", "5 GB"]];
       m.appendChild(ccTable("Playback", [
         { label: "Quality", opts: qopts.length ? qopts : [[0, "Auto"]], get: function () { return SETQ; }, set: function (k) { SETQ = k; applySettings(); } },
@@ -9038,7 +9085,7 @@ body:has(#dlpg.open) #nav{display:none}
     }
     wrap.appendChild(big);
     wrap.appendChild(h("h2", null, name || "Boa Cinema"));
-    wrap.appendChild(h("p", null, u && u.username ? "@" + u.username : "Guest"));
+    wrap.appendChild(h("p", null, ACC ? (ACC.role === "admin" ? "Admin" : ACC.role === "moderator" ? "Moderator" : "Member") + (u && u.username ? " \u00b7 @" + u.username : "") : (u && u.username ? "@" + u.username : "Guest")));
     box.appendChild(wrap);
     box.appendChild(acctCard());
     var icd = installCard();
@@ -9323,8 +9370,8 @@ $("smclose").onclick = function () {
           box.appendChild(head); box.appendChild(lst); syncs.push(paint); paint();
           return box;
         }
-        bar.appendChild(dropRow("Select your preferred media size", [["auto", "Auto (up to 5 GB)"], ["1", "Up to 1 GB"], ["2", "Up to 2 GB"], ["5", "Up to 5 GB"], ["10", "Up to 10 GB"], ["inf", "Any size (10 GB+)"]], function () { return MAXG; }, function (v) { MAXG = v; lsSet("boa_maxgb", v); }));
-        bar.appendChild(dropRow("Select max quality", [["any", "Any quality"], ["380", "380p"], ["480", "480p"], ["720", "720p HD"], ["1080", "1080p Full HD"], ["2160", "4K Ultra HD"], ["4320", "8K"]], function () { return TIER; }, function (v) { TIER = v; lsSet("boa_tier", v); }));
+        bar.appendChild(dropRow("Max file size", [["auto", "Auto (up to 5 GB)"], ["1", "Up to 1 GB"], ["2", "Up to 2 GB"], ["5", "Up to 5 GB"], ["10", "Up to 10 GB"], ["inf", "Any size (10 GB+)"]], function () { return MAXG; }, function (v) { MAXG = v; lsSet("boa_maxgb", v); }));
+        bar.appendChild(dropRow("Max quality", [["any", "Any quality"], ["380", "380p"], ["480", "480p"], ["720", "720p HD"], ["1080", "1080p Full HD"], ["2160", "4K Ultra HD"], ["4320", "8K"]], function () { return TIER; }, function (v) { TIER = v; lsSet("boa_tier", v); }));
         var torBox = h("div", "gdrop gtor");
         bar.appendChild(torBox);
         list.appendChild(bar); list.appendChild(host);
@@ -9536,7 +9583,7 @@ $("smclose").onclick = function () {
         });
         if (CUR) CUR.cands = cands;
         var csAll = servers.filter(function (sv) { return !sv.main.sd.tor; }).map(function (sv) { return sv.main.st; });
-        var cvAll = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, tor: !!sv.main.sd.tor, last: !!sv.last, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })), alts: sv.alts.map(function (a) { return { st: a.st, heavy: a.sd.heavy, tor: !!a.sd.tor, f: a.sd.f, q: a.sd.q, sc: a.sd.sc }; }) }; });
+        var cvAll = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, tor: !!sv.main.sd.tor, last: !!sv.last, dead: !!sv.dead, heavy: !!sv.main.sd.heavy, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })), alts: sv.alts.map(function (a) { return { st: a.st, heavy: a.sd.heavy, tor: !!a.sd.tor, f: a.sd.f, q: a.sd.q, sc: a.sd.sc }; }) }; });
         if (APP) { for (var ci = PREV.length; ci < cvAll.length; ci++) CUR.servers.push(cvAll[ci]); for (var cj = 0; cj < csAll.length; cj++) if (CUR.streams.indexOf(csAll[cj]) < 0) CUR.streams.push(csAll[cj]); }
         else {
           var snapK = CUR.keep ? CUR.keep() : null;
@@ -9616,7 +9663,7 @@ $("smclose").onclick = function () {
           tx.appendChild(h("b", null, "SERVER " + sv.n + " · " + sv.label + (sv.last ? " · Last used" : "")));
           var st = sv.main.st, sd = sv.main.sd;
           tx.appendChild(h("span", null, (sd.q ? sd.q + "p • " : "") + fmtName(sd) + (st.lt ? " • " + st.lt : "") + (sd.tor && sd.seed ? " • " + sd.seed + " seeders" : "") + " • " + (st.provider || "Plugin") + (sd.f === "embed" ? " • opens inline" : "")));
-          tx.appendChild(lnkChips(st, { f: sd.f, gb: sd.gb, heavy: sd.heavy, tor: sd.tor }));
+          tx.appendChild(lnkChips(st, { f: sd.f, gb: sd.gb, heavy: sd.heavy, tor: sd.tor, dead: !!sd.dead }));
           var note = h("div", "note", "");
           tx.appendChild(note);
           top.appendChild(dot); top.appendChild(tx);
@@ -9636,7 +9683,7 @@ $("smclose").onclick = function () {
           card.appendChild(top);
           if (dlRow0) card.appendChild(dlRow0);
           if (sd.tor) card.appendChild(h("div", "srvhint", "Torrent stream, no Debrid needed. Plays through your torrent bridge when one is set, otherwise tries browser peers. If neither works you can open it in Odyssey or copy the magnet link."));
-          else if (sv.tier === "r") card.appendChild(h("div", "srvhint", "Large or non-web format (MKV, HEVC, AC3/DTS). Best in VLC or a capable device."));
+          else if (sv.tier === "r") card.appendChild(h("div", "srvhint", sv.dead && !sd.heavy ? "This link didn't answer a quick check. Try it, turn the relay on, or pick another server." : "Large or non-web format (MKV, HEVC, AC3/DTS). Best in VLC or a capable device."));
           if (sv.alts.length) {
             var more = h("button", "srvmore", "More links (" + sv.alts.length + ")");
             var box = h("div", "srvalts"); box.style.display = "none";
