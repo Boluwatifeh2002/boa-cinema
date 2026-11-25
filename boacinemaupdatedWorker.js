@@ -9209,7 +9209,7 @@ $("smclose").onclick = function () {
           if (targ && targ.alts.length < 12) targ.alts.push(e);
         });
         if (!servers.length) {
-          var nm = h("div", "note center", total && (TIER !== "any" || MAXG !== "auto") ? "No streams match this quality / size selection." : "No playable stream found yet. Try again in a moment, or install a plugin in Add-ons.");
+          var nm = h("div", "note center", total && (TIER !== "any" || MAXG !== "auto") ? "No streams match this quality / size selection." : "No playable stream found yet. Try again in a moment.");
           if (total && (TIER !== "any" || MAXG !== "auto")) {
             var rs = h("button", "retry", "Show all streams");
             rs.onclick = function () { TIER = "any"; MAXG = "auto"; lsSet("boa_tier", "any"); lsSet("boa_maxgb", "auto"); if (bar._sync) bar._sync(); Array.prototype.forEach.call(bar.querySelectorAll(".tierrow"), function (r) { Array.prototype.forEach.call(r.querySelectorAll(".tierchip"), function (x, i) { x.className = "tierchip" + (i === 0 ? " on" : ""); }); }); renderServers(); };
