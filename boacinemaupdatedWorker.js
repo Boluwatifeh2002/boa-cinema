@@ -1005,7 +1005,10 @@ async function findSubs(env, mt, id, sNum, eNum) {
   const key = [mt, id, sNum, eNum].join("|");
   const hit = SUBS_CACHE.get(key);
   if (hit && Date.now() - hit.at < 3600000) return hit.v;
-  const addons = (await getAddons(env)).filter((a) => a.subs && a.enabled !== false && a.base);
+  let addons = (await getAddons(env)).filter((a) => a.subs && a.enabled !== false && a.base);
+  // Built-in fallback so every title is tried for subtitles even when no subtitle plugin is installed (set SUBS_FALLBACK to "off" to disable, or to another add-on address)
+  const fb = String(env.SUBS_FALLBACK == null ? "https://opensubtitles-v3.strem.io" : env.SUBS_FALLBACK).trim().replace(/\/+$/, "");
+  if (/^https:\/\/[^\s"'<>]+$/i.test(fb) && !addons.some((a) => String(a.base).replace(/\/+$/, "") === fb)) addons = addons.concat([{ name: "Subtitles", base: fb, subs: true }]);
   if (!addons.length) return [];
   const imdb = await imdbFor(env, mt, id);
   if (!imdb) return [];
@@ -1028,6 +1031,7 @@ async function findSubs(env, mt, id, sNum, eNum) {
     out.push({ lang: x.lang, n: seen[x.lang], from: x.from, u: "/api/sub?u=" + encodeURIComponent(x.url) + "&e=" + e + "&s=" + (await relayHmac(env, "sub|" + x.url + "|" + e)) });
   }
   out.sort((a, b) => (a.lang === "eng" ? 0 : 1) - (b.lang === "eng" ? 0 : 1) || a.lang.localeCompare(b.lang));
+  if (!out.length) return out;   // a miss is never cached: the next try asks again
   capSet(SUBS_CACHE, key, { at: Date.now(), v: out }, 100);
   if (SUBS_CACHE.size > 300) SUBS_CACHE.delete(SUBS_CACHE.keys().next().value);
   return out;
@@ -1176,7 +1180,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.56";
+const APP_VERSION = "2026-11-22.57";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -4060,6 +4064,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .phud.on{display:flex}
 #player .phud svg{width:22px;height:22px;flex:none}
 #player .prow2{display:flex;align-items:center;gap:8px;padding:8px 4px 0;overflow-x:auto;scrollbar-width:none}
+@media (max-width:760px){#player .ptxt,#player .pcc{padding:7px 11px;font-size:11.5px}#player .prow2{gap:6px;padding-top:6px}#player .pccb{max-width:96px}#player .prow2 .ptxt{flex:none}#player .prow .pspace{min-width:4px}}
 #player .prow2::-webkit-scrollbar{display:none}
 #player .ptxt{flex:none;background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:10px;padding:8px 12px;font-size:12px;font-weight:800;touch-action:manipulation}
 #player .pmenu{position:absolute;left:12px;right:12px;bottom:calc(var(--sab) + 130px);max-height:50%;overflow:auto;background:rgba(20,20,20,.97);border:1px solid #333;border-radius:14px;padding:8px;z-index:9;touch-action:pan-y}
@@ -6757,7 +6762,7 @@ body:has(#dlpg.open) #nav{display:none}
     var ccBtn = h("button", "ptxt pccb", "CC: Off"); ccBtn.type = "button"; ccBtn.setAttribute("aria-label", "Subtitles and closed captions");
     cc.style.display = "none";
     var bSpd = h("button", "ptxt pspd", "1x"), bAud = h("button", "ptxt", "Au"), bSrv = h("button", "ptxt", "Servers");
-    row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bSpd); row.appendChild(bFwd); row.appendChild(bAud); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(bSrv); row.appendChild(ccBtn); row.appendChild(cc);
+    row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bFwd); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(bSrv); row.appendChild(ccBtn); row.appendChild(cc);
     var isLive = !!(ctx && ctx.live);
     if (isLive) { scrub.style.pointerEvents = "none"; scrub.style.opacity = ".35"; bBack.style.display = "none"; bFwd.style.display = "none"; tim.textContent = "LIVE"; tim.style.color = "#ef4444"; }
     bot.appendChild(row);
@@ -6766,7 +6771,7 @@ body:has(#dlpg.open) #nav{display:none}
     bSet.setAttribute("aria-label", "Quality and size settings");
     bEps.setAttribute("aria-label", "Episodes and up next");
     bSpd.setAttribute("aria-label", "Playback speed"); bFit.setAttribute("aria-label", "Picture fit: fit, fill or stretch"); bAud.setAttribute("aria-label", "Audio track"); bSrv.setAttribute("aria-label", "Servers");
-    row2.appendChild(bFit);
+    row2.appendChild(bFit); row2.appendChild(bSpd); row2.appendChild(bAud);
     if (ctx && ctx.mt === "tv") row2.appendChild(bEps);
     row2.appendChild(sp2);
     if (ctx && (ctx.mt === "movie" || ctx.mt === "tv")) row2.appendChild(bSet);
