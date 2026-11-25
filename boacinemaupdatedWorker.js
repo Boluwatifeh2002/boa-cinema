@@ -1772,7 +1772,7 @@ async function authHandle(request, url, env) {
       try {
         await env.DB.prepare("INSERT INTO users (id,email,name,salt,hash,iters,created) VALUES (?,?,?,?,?,?,?)").bind(id, email, name, b64uEnc(saltB), hash, iters, Date.now()).run();
       } catch (e) { return authJson({ error: "That email already has an account. Try signing in." }, 409); }
-      return authJson({ token: await authToken(env, id), user: { name, email } });
+      return authJson({ token: await authToken(env, id), user: { name, email, role: roleFor(env, email) } });
     }
     if (path === "/api/auth/login" && request.method === "POST") {
       const email = String(body.email || "").trim().toLowerCase().slice(0, 120);
@@ -1781,7 +1781,7 @@ async function authHandle(request, url, env) {
       const salt = row ? b64uDec(row.salt) : new Uint8Array(16);
       const got = await authHash(pw, salt, row ? row.iters : authIters(env));
       if (!row || !authSame(got, row.hash)) return authJson({ error: "Wrong email or password." }, 401);
-      return authJson({ token: await authToken(env, row.id), user: { name: row.name, email: row.email } });
+      return authJson({ token: await authToken(env, row.id), user: { name: row.name, email: row.email, role: roleFor(env, row.email) } });
     }
     if (path.indexOf("/api/acct/") !== 0) return authJson({ error: "Not found" }, 404);
     const uid = await authUid(env, request);
@@ -1842,6 +1842,11 @@ function roleFor(env, email) {
 const sessCache = new Map();
 async function sessionOf(request, env) {
   try {
+    // Behind the Render server (env.AUTH_UPSTREAM is set only by server.js): it already checked the token with this Worker and passes the role on
+    if (env.AUTH_UPSTREAM === "1") {
+      const r = request.headers.get("x-boa-role");
+      if (r) return { ok: true, role: r === "admin" || r === "moderator" ? r : "user" };
+    }
     if (env.DB && env.AUTH_SECRET && String(env.AUTH_SECRET).length >= 32) {
       const uid = await authUid(env, request);
       if (uid) {
@@ -4693,8 +4698,9 @@ body:has(#dlpg.open) #nav{display:none}
       if (e || !j || !j.user) return;
       ACC = j.user; lsSet("boa_acc", JSON.stringify(ACC));
       dlGate();
+      if (tab === "me") renderMe();
     });
-  }, 1500);
+  }, 300);
   try {
     document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") acctFlush(true); });
     window.addEventListener("pagehide", function () { acctFlush(true); });
