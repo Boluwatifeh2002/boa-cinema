@@ -1176,7 +1176,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.54";
+const APP_VERSION = "2026-11-22.55";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -3926,7 +3926,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .srdl{margin-left:6px}
 #streammodal.qwait #smlist>.tierbar,#streammodal.qwait #smlist>.srvhost{display:none}
 #streammodal .qmsg{padding:40px 10px;text-align:center;color:#c9c9cf;font-weight:700}
-#player .shk-tx{position:absolute;left:0;right:0;top:0;bottom:calc(var(--sab) + 140px);z-index:2;pointer-events:none;transition:bottom .2s}
+#player .shk-tx{position:absolute;left:0;right:0;top:0;bottom:calc(var(--sab) + 140px);z-index:2;pointer-events:none;transition:bottom .2s;overflow:visible;opacity:1;visibility:visible;display:block}
 #player.hide .shk-tx{bottom:calc(var(--sab) + 26px)}
 #player.ccp-m .shk-tx{bottom:calc(var(--sab) + 176px)}
 #player.ccp-m.hide .shk-tx{bottom:calc(var(--sab) + 60px)}
@@ -5661,6 +5661,13 @@ body:has(#dlpg.open) #nav{display:none}
     return p;
   }
   // score bonus: reachable + fast is best; unreachable (gone / offline / web page) is pushed to the back
+  // 0 = checked and reachable, 1 = not checked yet, 2 = needs special headers / embed (relay-limited), 3 = failed or unreachable
+  function linkRank(e) {
+    var sd = e.sd || {}, st = e.st || {}, u = String(st.url || "");
+    if (sd.dead || sd.tor) return 3;
+    if ((st.headers && Object.keys(st.headers).length) || /\/embed\/|\.html?($|\?)/i.test(u)) return 2;
+    return healthBonus(u) > 0 ? 0 : 1;
+  }
   function healthBonus(u) {
     var r = hlFresh(u);
     if (!r) return 0;
@@ -6354,7 +6361,21 @@ body:has(#dlpg.open) #nav{display:none}
         } catch (e) {}
         return -1;
       },
-      set: function (i) { try { var a = auds(); if (a[i]) p.selectAudioLanguage(a[i].lang, a[i]._r); } catch (e) {} }
+      set: function (i) {
+        var a = auds(), t = a[i];
+        if (!t) return;
+        try { p.selectAudioLanguage(t.lang, t._r); } catch (e) {}
+        setTimeout(function () {
+          try {
+            var vs = p.getVariantTracks() || [], cur = null;
+            vs.forEach(function (x) { if (x.active) cur = x; });
+            if (cur && ((cur.language || "") !== t.lang || (cur.label || "") !== t.name)) {
+              var vt = vs.filter(function (x) { return (x.language || "") === t.lang && (x.label || "") === t.name; })[0];
+              if (vt) p.selectVariantTrack(vt, true);
+            }
+          } catch (e) {}
+        }, 700);
+      }
     });
     function txts() { return (p.getTextTracks() || []).map(function (t) { return { lang: t.language || "", name: t.label || "", _t: t }; }); }
     Object.defineProperty(o, "subtitleTracks", { get: function () { try { return txts(); } catch (e) { return []; } } });
@@ -6558,7 +6579,7 @@ body:has(#dlpg.open) #nav{display:none}
     var size = f === "hls" ? "HLS" : f === "dash" ? "DASH" : f === "embed" ? "Embed" : gb > 0 ? (gb >= 1 ? gb.toFixed(2) + " GB" : Math.max(1, Math.round(gb * 1024)) + " MB") : f === "torrent" ? "Torrent" : "Size unknown";
     var hdr = !!(x && x.headers && Object.keys(x.headers).length);
     var heavy = o.heavy != null ? !!o.heavy : (f === "mkv" || f === "avi" || (f === "dash" && !shakaOn()));
-    var cp = (f === "torrent" || heavy) ? ["Best in VLC", "r"] : (f === "embed" || o.dead) ? ["May not load", "y"] : ["Plays in app", "g"];
+    var cp = o.failed ? ["Failed", "r"] : (f === "torrent" || heavy) ? ["Best in VLC", "r"] : (f === "embed" || o.dead) ? ["May not load", "y"] : ["Plays in app", "g"];
     return { size: size, aud: audTag(x || {}), compat: cp[0], cls: cp[1] };
   }
   function lnkChips(x, o) {
@@ -6944,9 +6965,27 @@ body:has(#dlpg.open) #nav{display:none}
     function stepOrFail() {
       var L = (ctx && ctx.servers) || [];
       failedU[url] = 1;
+      var tp0 = curPos(); if (tp0 > 1 && !isLive) seekAfter = tp0;     // every link / server switch resumes from the same second
       if (curSrv > -1) { bad[curSrv] = 1; hadFail[curSrv] = 1; upd[curSrv] = 0; paintDots(); }
       console.warn("[Boa] playback failed on", url, why);
-      if (autoN++ < 14) {
+      if (autoN++ < 24) {
+        // 0) the next link inside the SAME server (its main link, then its more-links in order) before any other server is touched
+        var ck = curSrv;
+        if (ck < 0) for (var c0 = 0; c0 < L.length; c0++) if (L[c0].urls.indexOf(url) > -1) { ck = c0; break; }
+        if (ck > -1) {
+          var seq = [{ st: L[ck].st, heavy: L[ck].tier === "r", tor: L[ck].tor }].concat(L[ck].alts || []);
+          for (var z = 0; z < seq.length; z++) {
+            var za = seq[z];
+            if (za.tor || triedU[za.st.url] || failedU[za.st.url] || za.st.url === url || /\/embed\/|\.html?($|\?)/i.test(za.st.url)) continue;
+            if (za.heavy && L[ck].tier !== "r") continue;
+            curSt = za.st; url = za.st.url; relayed = false; retried = false; why = "";
+            curSrv = ck; tried[ck] = 1; bad[ck] = 0; paintDots();
+            msg.className = "pmsg"; msg.textContent = "";
+            tryEl.textContent = "Trying the next link on SERVER " + L[ck].n + "\u2026"; tryEl.className = "ptry on";
+            startSource(url, false);
+            return;
+          }
+        }
         // 1) the remaining web-friendly servers in rank order (SERVER 2-7)
         for (var i = 0; i < L.length; i++) {
           if (tried[i] || L[i].tier === "r" || L[i].tor || triedU[L[i].st.url] || failedU[L[i].st.url] || L[i].urls.indexOf(url) > -1) continue;
@@ -6984,7 +7023,7 @@ body:has(#dlpg.open) #nav{display:none}
       var isHls = /\.m3u8(\?|$)/i.test(src0), netFail = false, noShk = false, relayFell = false;
       // HLS needs the stream proxy only when the plugin demands custom headers (Referer / User-Agent) or a direct load was blocked (CORS / 403)
       var hdrNeed = !!(curSt && curSt.headers && Object.keys(curSt.headers).length);
-      var viaProxy = !RELAY_ON() && isHls && (!!useRelay || hdrNeed);
+      var viaProxy = !RELAY_ON() && !!useRelay;      // direct playback is always tried first; the proxy is only a fallback
       msg.textContent = "";
       function go(src) {
         if (closed || gen !== srcGen) return;
@@ -6995,10 +7034,11 @@ body:has(#dlpg.open) #nav{display:none}
         var onFatal = function () {
           clearTimeout(stallT);
           if (gen !== srcGen) return;
+          var tpf = curPos(); if (tpf > 1 && !isLive) seekAfter = tpf;
           // the toggle is read live: a relay retry only happens while it is ON, and never when it is OFF
           if (RELAY_ON() && !relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
           // privacy relay OFF: a blocked HLS playlist (CORS / 403 / network) gets one retry through the stream proxy, with its own message
-          if (!RELAY_ON() && isHls && !relayed && !retried && netFail) { retried = true; toast("Loading through the stream proxy"); startSource(src0, true); return; }
+          if (!RELAY_ON() && !relayed && !retried && ((isHls && netFail) || hdrNeed)) { retried = true; startSource(src0, true); return; }    // quiet: no "proxy" message, same position
           stepOrFail();
         };
         fatalFn = onFatal;
@@ -7024,7 +7064,12 @@ body:has(#dlpg.open) #nav{display:none}
             if (gen !== srcGen || closed || hls !== sh) return;
             try {
               var at = sh.audioTracks || [];
-              if (at.length > 1 && !AUDUSER && !sh._aud && ctx && ctx.ol) {
+              if (at.length > 1 && AUDPREF) {
+                var pi = -1;
+                at.forEach(function (t2, q) { if (pi < 0 && String(t2.lang || "") === AUDPREF.lang && (!AUDPREF.name || String(t2.name || "") === AUDPREF.name)) pi = q; });
+                if (pi > -1 && pi !== sh.audioTrack) sh.audioTrack = pi;      // the user's pick stays locked on every new link
+                sh._aud = 1;
+              } else if (at.length > 1 && !AUDUSER && !sh._aud && ctx && ctx.ol) {
                 sh._aud = 1;
                 var want = langName(ctx.ol).toLowerCase(), pick = -1;
                 at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
@@ -7061,9 +7106,47 @@ body:has(#dlpg.open) #nav{display:none}
             manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
           };
           if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
-          if (tx) { var ttx = tx; cfg.textDisplayFactory = function () { return new sk.text.UITextDisplayer(v, ttx); }; }
+          var cueN = 0;
+          if (tx) {
+            var ttx = tx;
+            cfg.textDisplayFactory = function () {
+              var inner = new sk.text.UITextDisplayer(v, ttx);
+              if (typeof Proxy !== "function") return inner;
+              return new Proxy(inner, { get: function (t, k) { if (k === "append") return function (c) { try { cueN += (c && c.length) || 0; } catch (e) {} return t.append.apply(t, arguments); }; var f = t[k]; return typeof f === "function" ? f.bind(t) : f; } });
+            };
+          }
+          // chosen stream captions that never produce a cue (CORS, empty track, bad format) switch to a fetched subtitle file
+          function vttFallback() {
+            var sel = /^h/.test(SUBSEL) ? (sh.subtitleTracks || [])[+SUBSEL.slice(1)] : null, want = sel ? String(sel.lang || "").slice(0, 2).toLowerCase() : "en", idx = -1, i;
+            for (i = 0; i < SUBS.length && idx < 0; i++) if (String(SUBS[i].lang || "").slice(0, 2).toLowerCase() === want) idx = i;
+            for (i = 0; i < SUBS.length && idx < 0; i++) if (isEn(SUBS[i])) idx = i;
+            if (idx < 0) return false;
+            SUBSEL = String(idx); SUBUSER = true;
+            try { sh.subtitleTrack = -1; } catch (e) {}
+            applySub(); fillCC();
+            return true;
+          }
+          function subFail(why0) {
+            if (sh._sf) return;
+            sh._sf = 1;
+            toast(vttFallback() ? "Stream captions aren't readable \u2022 using a subtitle file instead" : why0);
+          }
+          var wT = setInterval(function () {
+            if (gen !== srcGen || closed) { clearInterval(wT); return; }
+            if (sh._last !== SUBSEL) { sh._last = SUBSEL; sh._w = 0; sh._sf = 0; cueN = 0; }
+            if (!/^h/.test(SUBSEL) || v.paused || sh.subtitleTrack < 0) { sh._w = 0; return; }
+            var nat = 0;
+            try { for (var k = 0; k < v.textTracks.length; k++) if (!v.textTracks[k].__boa && v.textTracks[k].cues) nat += v.textTracks[k].cues.length; } catch (e) {}
+            if (cueN > 0 || nat > 0) { sh._w = 0; return; }
+            if (++sh._w >= 8) subFail("These captions can't be read on this stream. Try another subtitle or server.");
+          }, 1000);
           try { p.configure(cfg); } catch (e) {}
-          p.addEventListener("error", function (ev) { var d = ev && ev.detail; if (!d || d.severity !== 2) return; bad(d); });
+          p.addEventListener("error", function (ev) {
+            var d = ev && ev.detail;
+            if (!d) return;
+            if (d.severity !== 2) { if (d.category === 2) subFail("The caption track couldn't be loaded."); return; }     // TEXT errors are recoverable: switch captions, keep the video
+            bad(d);
+          });
           p.addEventListener("trackschanged", tracks);
           Promise.resolve(p.attach ? p.attach(v) : null).then(function () {
             if (closed || gen !== srcGen) { try { p.destroy(); } catch (e) {} return null; }
@@ -7110,7 +7193,7 @@ body:has(#dlpg.open) #nav{display:none}
               var at = hls.audioTracks || [];
               if (at.length && hls.audioTrack < 0) hls.audioTrack = 0;
               // several languages in the stream: start on the title's original language (Korean film -> Korean), never auto-switch after the viewer picks one
-              if (at.length > 1 && !AUDUSER && ctx && ctx.ol) {
+              if (at.length > 1 && !AUDUSER && !AUDPREF && ctx && ctx.ol) {
                 var want = langName(ctx.ol).toLowerCase(), pick = -1;
                 at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
                 if (pick > -1 && pick !== hls.audioTrack) hls.audioTrack = pick;
@@ -7778,7 +7861,7 @@ body:has(#dlpg.open) #nav{display:none}
       return x.split(".")[0].toUpperCase();
     }
     function chName(n) { n = +n; return n === 1 ? "Mono" : n === 2 ? "Stereo" : n === 6 ? "5.1" : n === 8 ? "7.1" : n > 0 ? n + "ch" : ""; }
-    var AUDUSER = false;
+    var AUDUSER = false, AUDPREF = null;
     function audioModel() {
       var rows = [], src = "", s0 = curSt || st || {};
       var meta = audioMeta([s0.title, s0.name, s0.description, s0.quality, s0.provider].filter(Boolean).join(" "));
@@ -7787,7 +7870,7 @@ body:has(#dlpg.open) #nav{display:none}
           src = "HLS";
           hls.audioTracks.forEach(function (tr, i) {
             var ln = langName(tr.lang) || "", nm = tr.name && String(tr.name) !== String(tr.lang) ? String(tr.name) : "";
-            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { hls.audioTrack = i; }, lang: ln });
+            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; hls.audioTrack = i; }, lang: ln });
           });
         } else if (dash && dash.getTracksFor) {
           var dt = dash.getTracksFor("audio") || [], dc = dash.getCurrentTrackFor ? dash.getCurrentTrackFor("audio") : null;
@@ -7863,15 +7946,20 @@ body:has(#dlpg.open) #nav{display:none}
         else { b.setAttribute("aria-disabled", "true"); b.onclick = function () { if (r.on) { toast("This is the audio playing now"); return; } offerLang(r); }; }
         m.appendChild(b);
       });
-      if (M.rows.some(function (r) { return r.info && !r.on; }) || M.src === "Stream info") {
+      if (M.rows.some(function (r) { return r.info && !r.on; }) || M.src === "Stream info" || M.switchable <= 1) {
         var fmt = String((curSt && curSt.url) || url || "").toLowerCase(), isH = !!(hls && hls.audioTracks && hls.audioTracks.length > 1);
         var why = isH ? "" : /\.m3u8/.test(fmt) ? "Why: this HLS stream carries one audio track only, so there is nothing to switch to here." :
           /\.mkv|\.mp4|\.webm|\.avi/.test(fmt) ? "Why: this is a single video file with the languages baked in. Phone and web browsers can only play the default track of such a file and cannot switch inside it. VLC or Odyssey can." :
           "Why: this server sends one combined audio track. Browsers can only switch audio when the stream lists separate tracks (HLS / DASH).";
         if (why) m.appendChild(h("div", "awhy", why));
-        var bh = h("button", "arow ahand", "Open in VLC / Odyssey to choose the audio"); bh.type = "button"; bh.style.cssText = "justify-content:center;font-weight:700";
-        bh.onclick = function () { closeMenu(); try { bVlc.onclick(); } catch (e) {} };
-        m.appendChild(bh);
+        if (M.switchable <= 1 && !why) m.appendChild(h("div", "awhy", "Why: this stream carries a single default audio track, so there is nothing to switch to."));
+        var hr = h("div", "ahrow"); hr.style.cssText = "display:flex;gap:8px;margin-top:8px";
+        [["VLC", function () { bVlc.onclick(); }], ["Odyssey", function () { bOdy.onclick(); }], ["Server Room", function () { openServers(); }]].forEach(function (x) {
+          var bb = h("button", "arow ahand", x[0]); bb.type = "button"; bb.style.cssText = "flex:1;justify-content:center;font-weight:700;margin:0;padding:11px 6px";
+          bb.onclick = function () { closeMenu(); try { x[1](); } catch (e) {} };
+          hr.appendChild(bb);
+        });
+        m.appendChild(hr);
       }
       m.appendChild(h("div", "anote", M.switchable > 1 ? "Tap a track to switch. Playback continues from the same spot." :
         M.src === "Stream info" ? "This provider exposes one combined / default audio track. Details above come from the stream's name. Another server may offer more languages." :
@@ -7905,7 +7993,10 @@ body:has(#dlpg.open) #nav{display:none}
       paintRf();
       if (!L.length) m.appendChild(h("div", "srnote", "Only this stream is available for this title."));
       var chk = 0;
-      L.forEach(function (sv, i) {
+      var ord = L.map(function (x, k) { return k; });
+      ord.sort(function (a, b) { return ((bad[a] || failedU[L[a].st.url]) ? 1 : 0) - ((bad[b] || failedU[L[b].st.url]) ? 1 : 0) || a - b; });
+      ord.forEach(function (i) {
+        var sv = L[i];
         var row = h("div", "srrow");
         row.tabIndex = 0; row.setAttribute("role", "button");
         row.appendChild(h("span", "srn", pad2(sv.n)));
@@ -7924,7 +8015,7 @@ body:has(#dlpg.open) #nav{display:none}
         function setSub() { sub.textContent = (sv.q ? sv.q + "p • " : "") + (sv.tor ? "TORRENT" : String(sv.f || "").toUpperCase()) + " • " + (sv.st.provider || "Plugin") + (isOn() ? " • Playing" : sv.last ? " • Last used" : ""); }
         setSub();
         mid.appendChild(sub);
-        mid.appendChild(lnkChips(sv.st, { f: sv.f, heavy: sv.heavy != null ? sv.heavy : sv.tier === "r", tor: sv.tor, dead: !!sv.dead }));
+        mid.appendChild(lnkChips(sv.st, { f: sv.f, heavy: sv.heavy != null ? sv.heavy : sv.tier === "r", tor: sv.tor, dead: !!sv.dead, failed: !!failedU[sv.st.url] }));
         row.appendChild(mid);
         // one badge per row: LIVE (playing) > UPDATED (recovered, safe to switch back) > FAILED
         function isOn() { return !dead && sv.urls.indexOf(url) > -1; }
@@ -7963,7 +8054,8 @@ body:has(#dlpg.open) #nav{display:none}
         if (sv.alts && sv.alts.length) {
           var mb = h("button", "srcp srmore", "More links (" + sv.alts.length + ")"); mb.type = "button"; mb.style.cssText = "margin:-4px 0 8px 40px;width:auto";
           var ml = h("div", "srlinks"); ml.style.cssText = "display:none;margin:0 0 10px 40px";
-          sv.alts.forEach(function (al, k) {
+          sv.alts.map(function (a0, k0) { return { a: a0, k: k0 }; }).sort(function (x, y) { return (failedU[x.a.st.url] ? 1 : 0) - (failedU[y.a.st.url] ? 1 : 0) || x.k - y.k; }).forEach(function (w0) {
+            var al = w0.a, k = w0.k;
             var q = al.st || {}, lb = h("button", "srcp", (al.q ? al.q + "p \u2022 " : "") + (al.tor ? "TORRENT" : String(al.f || "").toUpperCase()) + (q.lt ? " \u2022 " + q.lt : "") + " \u2022 " + (q.provider || "Link " + (k + 1)));
             lb.type = "button"; lb.style.cssText = "display:block;width:100%;text-align:left;margin:0";
             lb.onclick = function (ev) {
@@ -7973,7 +8065,7 @@ body:has(#dlpg.open) #nav{display:none}
               url = q.url; curSt = q; relayed = false; retried = false; why = ""; msg.className = "pmsg"; msg.textContent = ""; clearTry(); toast("SERVER " + sv.n + " \u2022 link " + (k + 2)); startSource(url, false);
             };
             var wr = h("div", "srwrap"); wr.style.cssText = "margin:4px 0 10px";
-            wr.appendChild(lb); wr.appendChild(lnkChips(q, { f: al.f, gb: al.gb, heavy: al.heavy, tor: al.tor }));
+            wr.appendChild(lb); wr.appendChild(lnkChips(q, { f: al.f, gb: al.gb, heavy: al.heavy, tor: al.tor, failed: !!failedU[q.url] }));
             if (dlOn() && !al.tor) {
               var dl2 = h("button", "srcp srdl", "Download"); dl2.type = "button"; dl2.style.cssText = "margin:6px 0 0";
               dl2.onclick = function (ev) { ev.stopPropagation(); var e2 = dlEligible(q); if (!e2.ok) { toast(e2.reason); return; } dlAdd(q, { q: al.q, f: al.f }, ctx); };
@@ -9463,7 +9555,7 @@ $("smclose").onclick = function () {
           }
         }
         if (MAXG === "auto" && pool.some(function (e) { return !e.sd.over || (LP && ukey(e.st.url) === lpK); })) pool = pool.filter(function (e) { return !e.sd.over || (LP && ukey(e.st.url) === lpK); });
-        pool.sort(function (a, b) { return b.sd.sc - a.sd.sc; });
+        pool.sort(function (a, b) { return linkRank(a) - linkRank(b) || b.sd.sc - a.sd.sc; });
         var light = pool.filter(function (e) { return !e.sd.heavy && !e.sd.dead; });
         var heavyL = pool.filter(function (e) { return e.sd.heavy && !e.sd.tor && !e.sd.dead; });
         var deadL = pool.filter(function (e) { return e.sd.dead && !e.sd.tor; });
@@ -9528,7 +9620,7 @@ $("smclose").onclick = function () {
         // Server 1 is always the strongest (and, once checked, fastest reachable) instantly playable direct HTTP/HLS stream when one exists
         (function () {
           var bi = -1, bs = -1e9;
-          servers.forEach(function (x, i) { var f0 = x.main.sd.f; if (x.tier === "y" && (f0 === "hls" || f0 === "mp4") && x.main.sd.sc > bs) { bs = x.main.sd.sc; bi = i; } });
+          servers.forEach(function (x, i) { var f0 = x.main.sd.f, k0 = x.main.sd.sc - linkRank(x.main) * 100000; if (x.tier === "y" && (f0 === "hls" || f0 === "mp4") && k0 > bs) { bs = k0; bi = i; } });
           if (bi > 0) servers.unshift(servers.splice(bi, 1)[0]);
         })();
         if (servers.length && servers[0].tier === "y" && servers[0].main.sd.sc >= 100) servers[0].tier = "g";
@@ -9552,6 +9644,8 @@ $("smclose").onclick = function () {
           if (!targ) targ = servers[servers.length - 1];
           if (targ && targ.alts.length < 12) targ.alts.push(e);
         });
+        // links inside a server are kept in "sure first" order: this is also the order automatic failover tries them
+        servers.forEach(function (sv0) { sv0.alts.sort(function (a, b) { return linkRank(a) - linkRank(b) || b.sd.sc - a.sd.sc; }); });
         if (!servers.length) {
           qdone();
           var nm = h("div", "note center", total && (TIER !== "any" || MAXG !== "auto") ? "No streams match this quality / size selection." : "No playable stream found yet. Try again in a moment, or install a plugin in Add-ons.");
