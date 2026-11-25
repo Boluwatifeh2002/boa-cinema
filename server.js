@@ -307,6 +307,26 @@ async function sendBuf(req, res, status, hdrs, buf, opts = {}) {
 
 const PORT = process.env.PORT || 8787;
 
+// ---- accounts: this server never touches D1, it asks the Worker who the caller is ----
+const WORKER_BASE = (process.env.WORKER_URL || 'https://silent-block-5183.adesanyaalexandra.workers.dev').replace(/\/+$/, '');
+const GATED_PATHS = new Set(['/api/streams', '/api/relay-sign', '/api/torrent-bridge', '/api/live']);   // the Worker code decides; this only passes the verified role
+const roleMemo = new Map();
+async function roleFromToken(auth) {
+  const m = /^Bearer\s+(\S+)/i.exec(String(auth || ''));
+  if (!m) return '';
+  const tok = m[1];
+  const hit = roleMemo.get(tok);
+  if (hit && hit.t > Date.now()) return hit.r;
+  let r = '';
+  try {
+    const x = await fetch(WORKER_BASE + '/api/acct/me', { headers: { authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(7000) });
+    if (x.ok) { const j = await x.json(); r = (j && j.user && j.user.role) || 'user'; }
+  } catch { return hit ? hit.r : ''; }   // Worker unreachable: do not cache the miss
+  if (roleMemo.size > 500) roleMemo.clear();
+  roleMemo.set(tok, { r, t: Date.now() + (r ? 60000 : 15000) });
+  return r;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const protocol = req.headers['x-forwarded-proto'] || 'http';
@@ -326,6 +346,7 @@ const server = createServer(async (req, res) => {
 
     // Attach local dev header so the admin panel unlocks in desktop browsers
     const headers = new Headers(req.headers);
+    headers.delete('x-boa-role');   // only this server may set it (after checking the login with the Worker); never trust a client copy
 // Admin bypass only on your own PC. Never on Render or any public host.
 const onRender = !!process.env.RENDER || process.env.NODE_ENV === 'production';
 if (!onRender) {
@@ -347,6 +368,7 @@ if (!onRender) {
       OWNER_ID: CONFIG.OWNER_ID,
       ALLOW_LOCAL_DEV: (process.env.RENDER || process.env.NODE_ENV === 'production') ? '' : '1',
       BOT_USERS: kvStore,
+      AUTH_UPSTREAM: '1',   // logins are checked against the Worker (which owns the D1 database); this server only passes the verified role on
     };
 
     // Stream backend route: runs before the worker so nothing can intercept it
@@ -389,8 +411,9 @@ if (!onRender) {
       passThroughOnException: () => {}
     };
 
-    if (reqUrl.pathname.startsWith('/api/auth')) {
-      const workerBase = (process.env.WORKER_URL || 'https://silent-block-5183.adesanyaalexandra.workers.dev').replace(/\/+$/, '');
+    // Accounts live in the Worker's D1 database, so sign-in and every /api/acct/* call (me, keys, get, sync, delete) go straight to the Worker.
+    if (reqUrl.pathname.startsWith('/api/auth') || reqUrl.pathname.startsWith('/api/acct')) {
+      const workerBase = WORKER_BASE;
       const targetUrl = `${workerBase}${reqUrl.pathname}${reqUrl.search}`;
       const fwdHeaders = new Headers(req.headers);
       fwdHeaders.delete('host');
@@ -405,11 +428,19 @@ if (!onRender) {
 
       const outHeaders = {};
       for (const [k, v] of proxyRes.headers.entries()) {
+        // fetch() already decoded the body, so the old encoding / length headers would corrupt it
+        if (/^(content-encoding|content-length|transfer-encoding|connection)$/i.test(k)) continue;
         outHeaders[k] = v;
       }
+      outHeaders['cache-control'] = 'no-store';
       const buf = Buffer.from(await proxyRes.arrayBuffer());
       await sendBuf(req, res, proxyRes.status, outHeaders, buf);
       return;
+    }
+    // Stream lookups, relay signing and torrent links need a signed-in account: check the Bearer token with the Worker and pass the role on.
+    if (GATED_PATHS.has(reqUrl.pathname)) {
+      const role = await roleFromToken(req.headers['authorization']);
+      if (role) request.headers.set('x-boa-role', role);
     }
     const response = await worker.fetch(request, env, ctx);
     const ctype = response.headers.get('content-type') || '';
