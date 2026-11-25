@@ -1176,7 +1176,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.53";
+const APP_VERSION = "2026-11-22.54";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1796,7 +1796,8 @@ async function authHandle(request, url, env) {
     if (path === "/api/acct/me") {
       const u = await env.DB.prepare("SELECT name,email FROM users WHERE id = ?").bind(uid).first();
       if (!u) return authJson({ error: "Account not found." }, 401);
-      return authJson({ user: { name: u.name, email: u.email, role: roleFor(env, u.email) } });
+      const cnt = (v) => String(v || "").split(/[\s,;]+/).filter(Boolean).length;
+      return authJson({ user: { name: u.name, email: u.email, role: roleFor(env, u.email), adm: cnt(env.ADMIN_EMAILS) } });
     }
     if (path === "/api/acct/keys") {
       const r = await env.DB.prepare("SELECT k FROM kv WHERE uid = ? LIMIT 1200").bind(uid).all();
@@ -4930,6 +4931,10 @@ body:has(#dlpg.open) #nav{display:none}
     if (ACC) t.appendChild(h("span", "pill", "Synced"));
     if (ACC && (ACC.role === "admin" || ACC.role === "moderator")) { var rp = h("span", "pill", ACC.role === "admin" ? "Admin" : "Moderator"); rp.style.marginLeft = "6px"; t.appendChild(rp); }
     c.appendChild(t);
+    if (ACC && ACC.role === "user" && typeof ACC.adm === "number") {
+      var dg = h("p", null, ACC.adm === 0 ? "Server note: no admin email is set on the server yet." : "Server note: the admin list doesn't include this email.");
+      dg.style.cssText = "font-size:12px;color:#fbbf24;margin:6px 0 0"; c.appendChild(dg);
+    }
     c.appendChild(h("p", null, ACC ? ACC.email : "Guests can browse. Create a free account to watch, build your Library and keep your history on every device."));
     var row = h("div", "row");
     function btn(txt, cls, fn) { var b = h("button", "acb" + (cls ? " " + cls : ""), txt); b.type = "button"; b.onclick = fn; row.appendChild(b); }
@@ -6552,8 +6557,8 @@ body:has(#dlpg.open) #nav{display:none}
     if (z && z.state === "ok" && z.bytes) gb = z.bytes / 1073741824;
     var size = f === "hls" ? "HLS" : f === "dash" ? "DASH" : f === "embed" ? "Embed" : gb > 0 ? (gb >= 1 ? gb.toFixed(2) + " GB" : Math.max(1, Math.round(gb * 1024)) + " MB") : f === "torrent" ? "Torrent" : "Size unknown";
     var hdr = !!(x && x.headers && Object.keys(x.headers).length);
-    var heavy = o.heavy != null ? !!o.heavy : (f === "mkv" || f === "avi" || f === "dash");
-    var cp = (f === "torrent" || heavy) ? ["VLC / Odyssey", "r"] : (hdr || f === "embed" || o.dead) ? ["Relay / CORS Limited", "y"] : ["App Playable", "g"];
+    var heavy = o.heavy != null ? !!o.heavy : (f === "mkv" || f === "avi" || (f === "dash" && !shakaOn()));
+    var cp = (f === "torrent" || heavy) ? ["Best in VLC", "r"] : (f === "embed" || o.dead) ? ["May not load", "y"] : ["Plays in app", "g"];
     return { size: size, aud: audTag(x || {}), compat: cp[0], cls: cp[1] };
   }
   function lnkChips(x, o) {
@@ -6743,7 +6748,7 @@ body:has(#dlpg.open) #nav{display:none}
     row2.appendChild(bFit);
     if (ctx && ctx.mt === "tv") row2.appendChild(bEps);
     row2.appendChild(sp2);
-    if (ctx && ctx.mt === "movie") row2.appendChild(bSet);
+    if (ctx && (ctx.mt === "movie" || ctx.mt === "tv")) row2.appendChild(bSet);
     bot.appendChild(row2);
     root.appendChild(bot);
     var fileIn = document.createElement("input");
@@ -9412,7 +9417,7 @@ $("smclose").onclick = function () {
           var heavy = f === "mkv" || f === "avi" || /hevc|x265|h\.?265|remux|dts|ac3|e-?ac-?3|dd\+?5|truehd|atmos|2160p|\b4k\b/i.test(t) || gb > 3;
           var qm = /(\d{3,4})p/i.exec(String(x.quality || "") + " " + t), q = qm ? +qm[1] : (/8k|4320/i.test(String(x.quality || "") + t) ? 4320 : (/4k|uhd/i.test(String(x.quality || "") + t) ? 2160 : 0));
           if (q >= 2160) heavy = true;
-          if (x.cx || f === "dash") heavy = true;                                    // HEVC / AC3 / DTS / MKV / MPD: not browser-safe
+          if (x.cx || (f === "dash" && !shakaOn())) heavy = true;                                    // HEVC / AC3 / DTS / MKV / MPD: not browser-safe
           if (f === "torrent") return { f: "torrent", heavy: true, tor: true, q: q, sc: 1 + Math.min(+x.seeders || 0, 1000) / 100, gb: gb, over: false, seed: +x.seeders || 0 };
           // format: HLS 100 > MP4 80 > MKV 10
           var sc = f === "hls" ? 100 : f === "mp4" ? 80 : f === "dash" ? 60 : f === "file" ? 50 : f === "embed" ? 20 : f === "mkv" ? 10 : f === "avi" ? 5 : 20;
