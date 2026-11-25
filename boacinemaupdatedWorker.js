@@ -1169,7 +1169,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.50";
+const APP_VERSION = "2026-11-22.51";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -3897,6 +3897,35 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .pcap span,#smplayer .pcap span{display:table;margin:3px auto 0;padding:2px 10px;border-radius:6px;background:rgba(0,0,0,.62);color:#fff;font:600 17px/1.35 system-ui,-apple-system,sans-serif;text-shadow:0 1px 3px #000,0 0 6px #000;white-space:pre-wrap}
 #player.ccs-s .pcap span{font-size:13px}
 #player.ccs-l .pcap span{font-size:23px}
+#player .prow{flex-wrap:wrap;row-gap:4px}
+#player .pspd{min-width:44px;padding:8px 10px}
+#player .pset{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.2)}
+#player .pcc2{background:rgba(18,18,22,.72)!important;-webkit-backdrop-filter:blur(22px) saturate(1.4);backdrop-filter:blur(22px) saturate(1.4);border:1px solid rgba(255,255,255,.14)!important;border-radius:18px!important}
+#player .pcc2 .cctab{margin-top:8px;padding:10px;border-radius:14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}
+#player .pcc2 .cctab>b{padding:0 2px 8px}
+#player .pcc2 .cctr{display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid rgba(255,255,255,.08)}
+#player .pcc2 .cctl{flex:none;width:62px;font-size:12px;font-weight:800;color:#c9c9cf;letter-spacing:.03em}
+#player .pcc2 .cctg{display:flex;flex-wrap:wrap;gap:6px;flex:1}
+#player .pmenu.pcc2 .cctab button.ccto{display:inline-block;width:auto;margin:0;padding:7px 12px;font-size:12px;font-weight:700;border-radius:999px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);color:#fff}
+#player .pmenu.pcc2 .cctab button.ccto.on{background:rgba(229,9,20,.3);border-color:rgba(229,9,20,.8);box-shadow:none}
+#player .pmenu.pcc2 .cctab button.ccto::after,#player .pmenu.pcc2 .cctab button.ccto::before{display:none!important;content:none!important}
+.lchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.lchip{flex:none!important;font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);color:#e5e5ea;line-height:1.3}
+.lchip.lcp.g{color:#4ade80;border-color:rgba(74,222,128,.45);background:rgba(34,197,94,.14)}
+.lchip.lcp.y{color:#fbbf24;border-color:rgba(251,191,36,.45);background:rgba(245,158,11,.14)}
+.lchip.lcp.r{color:#f87171;border-color:rgba(248,113,113,.45);background:rgba(239,68,68,.14)}
+.srvalt .splaybtn.dlb{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.18)}
+#player .srdl{margin-left:6px}
+#streammodal.qwait #smlist>.tierbar,#streammodal.qwait #smlist>.srvhost{display:none}
+#streammodal .qmsg{padding:40px 10px;text-align:center;color:#c9c9cf;font-weight:700}
+#player .shk-tx{position:absolute;left:0;right:0;top:0;bottom:calc(var(--sab) + 140px);z-index:2;pointer-events:none;transition:bottom .2s}
+#player.hide .shk-tx{bottom:calc(var(--sab) + 26px)}
+#player.ccp-m .shk-tx{bottom:calc(var(--sab) + 176px)}
+#player.ccp-m.hide .shk-tx{bottom:calc(var(--sab) + 60px)}
+#player .shk-tx .shaka-text-container{position:absolute!important;left:0;right:0;top:0;bottom:0;display:flex!important;flex-direction:column;justify-content:flex-end;align-items:center;pointer-events:none}
+#player .shk-tx span{background:rgba(0,0,0,.62)!important;color:#fff!important;border-radius:6px;padding:2px 10px;font:600 17px/1.35 system-ui,-apple-system,sans-serif!important;text-shadow:0 1px 3px #000;text-align:center}
+#player.ccs-s .shk-tx span{font-size:13px!important}
+#player.ccs-l .shk-tx span{font-size:23px!important}
 #player .pccb{max-width:112px;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #player .pccb.on{border-color:rgba(229,9,20,.7);background:rgba(229,9,20,.18)}
 #player video::cue{background:rgba(0,0,0,.6);color:#fff;font-size:.9em;text-shadow:0 1px 3px #000,0 0 6px #000}
@@ -4890,7 +4919,7 @@ body:has(#dlpg.open) #nav{display:none}
   function dlIsIOS() { var u = navigator.userAgent || ""; return /iPhone|iPad|iPod/.test(u) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); }
   function dlStandalone() { try { return !!navigator.standalone || (window.matchMedia && matchMedia("(display-mode: standalone)").matches); } catch (e) { return false; } }
   function dlRole() { return ACC && ACC.role ? ACC.role : ""; }
-  function dlAdmin() { return !!IS_OWNER || dlRole() === "admin" || dlRole() === "moderator"; }
+  function dlAdmin() { var r = dlRole(); return !!IS_OWNER || r === "admin" || r === "moderator" || r === "mod" || r === "owner"; }
   function dlOn() { return dlAdmin() || (DLU && !!ACC); }
   function dlWho() { return ACC && ACC.email ? ACC.email : (IS_OWNER ? "owner" : "guest"); }
   function dlMine() {
@@ -5790,7 +5819,7 @@ body:has(#dlpg.open) #nav{display:none}
   function relaySign(u, st0, dl) {
     if (!wbase()) { toast("Relay needs the Worker address (WORKER_URL)"); return Promise.resolve(""); }
     var hq = st0 && st0.headers ? "&h=" + encodeURIComponent(JSON.stringify(st0.headers)) : "";
-    return api("/api/relay-sign?u=" + encodeURIComponent(u) + hq + (dl ? "&dl=1" : ""), 0, 15000).then(function (r) { var x = /^https:\/\//i.test(r.u) ? r.u : wbase() + r.u; return onRenderHost(x) ? "" : x; }).catch(function () { toast(RELAY_ON() ? "Privacy relay unavailable" : "Stream proxy unavailable"); return ""; });
+    return api("/api/relay-sign?u=" + encodeURIComponent(u) + hq + (dl ? "&dl=1" : ""), 0, 15000).then(function (r) { var x = /^https:\/\//i.test(r.u) ? r.u : wbase() + r.u; return onRenderHost(x) ? "" : x; }).catch(function (e) { if (e && e.auth) return ""; toast(RELAY_ON() ? "Relay unavailable \u00b7 playing direct" : "Stream proxy unavailable"); return ""; });
   }
   function paintPriv() {
     var b = $("smpriv");
@@ -5808,23 +5837,23 @@ body:has(#dlpg.open) #nav{display:none}
     function status() {
       if (!cb.checked) {
         st.style.color = "#a3a3a8";
-        st.textContent = "Direct (No Relay) \u2022 the stream host sees your own connection";
+        st.textContent = "Direct (No Relay) \u00b7 the stream host sees your own connection";
         return;
       }
-      if (!wbase()) { st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u2022 Cloudflare Worker address not set \u2022 streams play direct"; return; }
+      if (!wbase()) { st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u00b7 streams play direct"; return; }
       st.style.color = "#a3a3a8";
-      st.textContent = "Checking Cloudflare Worker relay\u2026";
+      st.textContent = "Checking relay\u2026";
       var ctl = window.AbortController ? new AbortController() : null, to = setTimeout(function () { if (ctl) ctl.abort(); }, 8000);
       fetch(wbase() + "/api/relay-check", { cache: "no-store", signal: ctl ? ctl.signal : undefined }).then(function (r) { return r.json(); }).then(function (j) {
         clearTimeout(to);
         if (!cb.checked) return;
         var host = String((j && j.host) || wbase()).replace(/^https?:\/\//i, "");
-        if (onRenderHost(host)) { st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u2022 not running on the Cloudflare Worker \u2022 streams play direct"; return; }
-        if (!j || !j.ok) { st.style.color = "#f59e0b"; st.textContent = "Cloudflare Worker relay status could not be confirmed"; return; }
-        if (j.masked === true) { st.style.color = "#46d369"; st.textContent = "Relay active \u2022 Cloudflare Worker (" + host + ") \u2022 exit IP " + j.ip; }
-        else if (j.masked === false) { st.style.color = "#f59e0b"; st.textContent = "Direct (No Relay) \u2022 this relay runs on your own connection, so it doesn't hide your IP"; }
-        else { st.style.color = "#46d369"; st.textContent = "Relay active \u2022 Cloudflare Worker (" + host + ") \u2022 exit IP not confirmed"; }
-      }).catch(function () { clearTimeout(to); if (!cb.checked) return; st.style.color = "#f59e0b"; st.textContent = "Cloudflare Worker relay status could not be confirmed"; });
+        if (onRenderHost(host)) { st.style.color = "#f59e0b"; st.textContent = "Relay unavailable \u00b7 streams play direct"; return; }
+        if (!j || !j.ok) { st.style.color = "#f59e0b"; st.textContent = "Relay status could not be confirmed"; return; }
+        if (j.masked === true) { st.style.color = "#46d369"; st.textContent = "Relay active \u00b7 Exit IP: " + j.ip; }
+        else if (j.masked === false) { st.style.color = "#f59e0b"; st.textContent = "Direct (No Relay) \u00b7 your own connection is used"; }
+        else { st.style.color = "#46d369"; st.textContent = "Relay active"; }
+      }).catch(function () { clearTimeout(to); if (!cb.checked) return; st.style.color = "#f59e0b"; st.textContent = "Relay status could not be confirmed"; });
     }
     var prev = cb.onchange;
     cb.onchange = function () { prev(); status(); };
@@ -6239,6 +6268,60 @@ body:has(#dlpg.open) #nav{display:none}
     sc.onerror = function () { cb(); };
     document.head.appendChild(sc);
   }
+  // Shaka Player: primary engine for HLS / DASH. Loaded only when such a stream is played; any failure falls back to hls.js / dash.js / native.
+  var SHAKA_URL = "https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.compiled.js";
+  function shakaOn() { return lsGet("boa_engine", "shaka") !== "off"; }
+  function loadShaka(cb) {
+    if (window.shaka || window.__shkTried === 2) { cb(); return; }
+    if (window.__shkL) { window.__shkL.push(cb); return; }
+    window.__shkL = [cb]; window.__shkTried = 1;
+    var done = false;
+    function fin() { if (done) return; done = true; window.__shkTried = 2; var q = window.__shkL || []; window.__shkL = null; q.forEach(function (f) { try { f(); } catch (e) {} }); }
+    var sc = document.createElement("script");
+    sc.src = SHAKA_URL; sc.onload = fin; sc.onerror = fin;
+    setTimeout(fin, 9000);
+    document.head.appendChild(sc);
+  }
+  // hls.js-shaped view of a Shaka player, so the Audio menu, CC list and subtitle code keep working unchanged
+  function shkShim(p) {
+    var o = { _shk: p, destroy: function () { try { p.destroy(); } catch (e) {} }, startLoad: function () {} };
+    function auds() {
+      var seen = {}, out = [];
+      (p.getVariantTracks() || []).forEach(function (t) {
+        var k = (t.language || "") + "|" + (t.label || "");
+        if (seen[k]) return;
+        seen[k] = 1;
+        out.push({ lang: t.language || "", name: t.label || "", audioCodec: t.audioCodec || "", channels: t.channelsCount || 0, "default": !!t.primary, _r: (t.roles || [])[0] });
+      });
+      return out;
+    }
+    Object.defineProperty(o, "audioTracks", { get: function () { try { return auds(); } catch (e) { return []; } } });
+    Object.defineProperty(o, "audioTrack", {
+      get: function () {
+        try {
+          var a = auds(), cur = null;
+          (p.getVariantTracks() || []).forEach(function (t) { if (t.active) cur = t; });
+          for (var i = 0; cur && i < a.length; i++) if (a[i].lang === (cur.language || "") && a[i].name === (cur.label || "")) return i;
+        } catch (e) {}
+        return -1;
+      },
+      set: function (i) { try { var a = auds(); if (a[i]) p.selectAudioLanguage(a[i].lang, a[i]._r); } catch (e) {} }
+    });
+    function txts() { return (p.getTextTracks() || []).map(function (t) { return { lang: t.language || "", name: t.label || "", _t: t }; }); }
+    Object.defineProperty(o, "subtitleTracks", { get: function () { try { return txts(); } catch (e) { return []; } } });
+    Object.defineProperty(o, "subtitleTrack", {
+      get: function () { try { if (!p.isTextTrackVisible()) return -1; var tr = p.getTextTracks() || []; for (var i = 0; i < tr.length; i++) if (tr[i].active) return i; } catch (e) {} return -1; },
+      set: function (i) {
+        try {
+          if (i < 0) { if (p.isTextTrackVisible()) p.setTextTrackVisibility(false); return; }
+          var tr = p.getTextTracks() || [];
+          if (tr[i]) { if (!tr[i].active) p.selectTextTrack(tr[i]); if (!p.isTextTrackVisible()) p.setTextTrackVisibility(true); }
+        } catch (e) {}
+      }
+    });
+    Object.defineProperty(o, "subtitleDisplay", { set: function (b) { try { if (p.isTextTrackVisible() !== !!b) p.setTextTrackVisibility(!!b); } catch (e) {} } });
+    return o;
+  }
   function loadDash(cb) {
     if (window.dashjs) { cb(); return; }
     var sc = document.createElement("script");
@@ -6408,6 +6491,34 @@ body:has(#dlpg.open) #nav{display:none}
     var b = x ? +x.size : 0;
     return b > 1048576 ? b / 1073741824 : 0;
   }
+  // ---- per-link info shown on every stream row and in the Server Room: file size, audio tag, compatibility badge ----
+  // Uses only the metadata already fetched (plus a real size if a click already read it); nothing is requested while a list is drawn.
+  var ACODE = [["EN", /\b(english|eng)\b/], ["FR", /\b(french|francais|vf|vff|fre)\b/], ["ES", /\b(spanish|espanol|latino|castellano)\b/], ["DE", /\b(german|deutsch)\b/], ["IT", /\b(italian|italiano)\b/], ["PT", /\b(portuguese|portugues|brazilian)\b/], ["HI", /\b(hindi|hin)\b/], ["TA", /\btamil\b/], ["TE", /\btelugu\b/], ["JA", /\b(japanese|jpn)\b/], ["KO", /\b(korean|kor)\b/], ["ZH", /\b(chinese|mandarin|cantonese)\b/], ["RU", /\brussian\b/], ["AR", /\barabic\b/], ["TR", /\bturkish\b/]];
+  function audTag(x) {
+    var t = " " + [x.title, x.name, x.description, x.lt, x.quality].filter(Boolean).join(" ").toLowerCase().replace(/[._\[\](){}|\/,+-]+/g, " ") + " ", out = [];
+    ACODE.forEach(function (a) { if (a[1].test(t)) out.push(a[0]); });
+    if (/\b(dual audio|dual|multi audio|multi|multilang|multi lang)\b/.test(t) || out.length > 1) return "MULTI";
+    return out.length ? out[0] : "Single track";
+  }
+  function lnkInfo(x, o) {
+    o = o || {};
+    var u = String((x && x.url) || ""), f = o.f;
+    if (!f) f = /^magnet:/i.test(u) || x.tor ? "torrent" : /\/embed\/|\.html?($|\?)/i.test(u) ? "embed" : /\.m3u8(\?|$)/i.test(u) ? "hls" : /\.mpd(\?|$)/i.test(u) ? "dash" : /\.mkv(\?|$)/i.test(u) ? "mkv" : /\.avi(\?|$)/i.test(u) ? "avi" : "file";
+    var gb = o.gb != null ? +o.gb : stGB(x), z = SZC[u];
+    if (z && z.state === "ok" && z.bytes) gb = z.bytes / 1073741824;
+    var size = f === "hls" ? "HLS" : f === "dash" ? "DASH" : f === "embed" ? "Embed" : gb > 0 ? (gb >= 1 ? gb.toFixed(2) + " GB" : Math.max(1, Math.round(gb * 1024)) + " MB") : f === "torrent" ? "Torrent" : "Size unknown";
+    var hdr = !!(x && x.headers && Object.keys(x.headers).length);
+    var heavy = o.heavy != null ? !!o.heavy : (f === "mkv" || f === "avi" || f === "dash");
+    var cp = (f === "torrent" || heavy) ? ["VLC / Odyssey", "r"] : (hdr || f === "embed") ? ["Relay / CORS Limited", "y"] : ["App Playable", "g"];
+    return { size: size, aud: audTag(x || {}), compat: cp[0], cls: cp[1] };
+  }
+  function lnkChips(x, o) {
+    var i = lnkInfo(x, o), d = h("div", "lchips");
+    d.appendChild(h("span", "lchip lsz", i.size));
+    d.appendChild(h("span", "lchip lau", i.aud));
+    d.appendChild(h("span", "lchip lcp " + i.cls, i.compat));
+    return d;
+  }
   function sizeCheck(st0) {
     var u = String((st0 && st0.url) || "");
     if (!/^https?:/i.test(u) || /\.(m3u8|mpd)(\?|$)|\/embed\/|\.html?($|\?)/i.test(u)) return Promise.resolve({ state: "unknown" });
@@ -6575,17 +6686,20 @@ body:has(#dlpg.open) #nav{display:none}
     cc.setAttribute("aria-label", "Subtitles and closed captions");
     var ccBtn = h("button", "ptxt pccb", "CC: Off"); ccBtn.type = "button"; ccBtn.setAttribute("aria-label", "Subtitles and closed captions");
     cc.style.display = "none";
-    row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bFwd); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(ccBtn); row.appendChild(cc);
+    var bSpd = h("button", "ptxt pspd", "1x"), bAud = h("button", "ptxt", "Audio"), bSrv = h("button", "ptxt", "Servers");
+    row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bSpd); row.appendChild(bFwd); row.appendChild(bAud); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(bSrv); row.appendChild(ccBtn); row.appendChild(cc);
     var isLive = !!(ctx && ctx.live);
     if (isLive) { scrub.style.pointerEvents = "none"; scrub.style.opacity = ".35"; bBack.style.display = "none"; bFwd.style.display = "none"; tim.textContent = "LIVE"; tim.style.color = "#ef4444"; }
     bot.appendChild(row);
     var row2 = h("div", "prow2");
-    var bSpd = h("button", "ptxt", "1x"), bFit = h("button", "ptxt", "Fit"), bAud = h("button", "ptxt", "Audio"), bSrv = h("button", "ptxt", "Servers"), bEps = h("button", "ptxt", "Episodes"), bAa = h("button", "ptxt", "Aa");
-    bAa.setAttribute("aria-label", "Subtitle size and position");
+    var bFit = h("button", "ptxt", "Fit"), bEps = h("button", "ptxt", "Episodes"), bSet = h("button", "ptxt pset", "Settings"), sp2 = h("span", "pspace");
+    bSet.setAttribute("aria-label", "Quality and size settings");
     bEps.setAttribute("aria-label", "Episodes and up next");
     bSpd.setAttribute("aria-label", "Playback speed"); bFit.setAttribute("aria-label", "Picture fit: fit, fill or stretch"); bAud.setAttribute("aria-label", "Audio track"); bSrv.setAttribute("aria-label", "Servers");
-    row2.appendChild(bSpd); row2.appendChild(bFit); row2.appendChild(bAud); row2.appendChild(bAa); row2.appendChild(bSrv);
+    row2.appendChild(bFit);
     if (ctx && ctx.mt === "tv") row2.appendChild(bEps);
+    row2.appendChild(sp2);
+    if (ctx && ctx.mt === "movie") row2.appendChild(bSet);
     bot.appendChild(row2);
     root.appendChild(bot);
     var fileIn = document.createElement("input");
@@ -6609,13 +6723,39 @@ body:has(#dlpg.open) #nav{display:none}
       ccBtn.textContent = "CC: " + t;
       ccBtn.classList.toggle("on", SUBSEL !== "");
     }
-    function openCC() {
-      var items = [];
-      Array.prototype.forEach.call(cc.options, function (o) {
-        if (o.disabled) { items.push({ label: "No subtitles found for this title", on: false, fn: function () { toast("No subtitles available. You can upload an .srt / .vtt file."); } }); return; }
-        items.push({ label: String(o.textContent).replace(/^CC:\s*/, ""), on: o.value === SUBSEL, fn: function () { cc.value = o.value; if (typeof cc.onchange === "function") cc.onchange(); ccLabel(); } });
+    function ccTable(title, rows) {
+      var tb = h("div", "cctab");
+      tb.appendChild(h("b", null, title));
+      rows.forEach(function (R) {
+        var r = h("div", "cctr"), g = h("div", "cctg");
+        r.appendChild(h("span", "cctl", R.label));
+        function paintR() { Array.prototype.forEach.call(g.children, function (x, i) { x.className = "ccto" + (R.opts[i][0] === R.get() ? " on" : ""); }); }
+        R.opts.forEach(function (o) {
+          var b = h("button", "ccto", o[1]); b.type = "button";
+          b.onclick = function (ev) { ev.stopPropagation(); R.set(o[0]); paintR(); };
+          g.appendChild(b);
+        });
+        r.appendChild(g); tb.appendChild(r); paintR();
       });
-      popMenu("Subtitles", items);
+      return tb;
+    }
+    function openCC() {
+      closeMenu();
+      var m = h("div", "pmenu pcc2");
+      m.appendChild(h("b", null, "Subtitles"));
+      Array.prototype.forEach.call(cc.options, function (o) {
+        var b;
+        if (o.disabled) { b = h("button", "", "No subtitles found for this title"); b.onclick = function () { toast("No subtitles available. You can upload an .srt / .vtt file."); }; m.appendChild(b); return; }
+        b = h("button", o.value === SUBSEL ? "on" : "", String(o.textContent).replace(/^CC:\s*/, ""));
+        b.onclick = function () { closeMenu(); cc.value = o.value; if (typeof cc.onchange === "function") cc.onchange(); ccLabel(); };
+        m.appendChild(b);
+      });
+      m.appendChild(ccTable("Subtitle settings", [
+        { label: "Size", opts: [["s", "Small"], ["m", "Medium"], ["l", "Large"]], get: function () { return CCSIZE; }, set: function (k) { CCSIZE = k; lsSet("boa_ccsize", k); paintCCStyle(); } },
+        { label: "Position", opts: [["b", "Bottom"], ["m", "Lower"]], get: function () { return CCPOS; }, set: function (k) { CCPOS = k; lsSet("boa_ccpos", k); paintCCStyle(); } }
+      ]));
+      root.appendChild(m); menuEl = m;
+      clearTimeout(hideT);
     }
     ccBtn.onclick = tog("cc", openCC);
     var ccLb = setInterval(function () { if (closed) { clearInterval(ccLb); return; } ccLabel(); }, 1200);
@@ -6792,7 +6932,7 @@ body:has(#dlpg.open) #nav{display:none}
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
       triedU[src0] = 1; dead = false;
       if (/^http:/i.test(src0) && location.protocol === "https:") { why = "This link is plain HTTP and browsers block it on a secure page."; src0 = src0.replace(/^http:/i, "https:"); }
-      var isHls = /\.m3u8(\?|$)/i.test(src0), netFail = false;
+      var isHls = /\.m3u8(\?|$)/i.test(src0), netFail = false, noShk = false, relayFell = false;
       // HLS needs the stream proxy only when the plugin demands custom headers (Referer / User-Agent) or a direct load was blocked (CORS / 403)
       var hdrNeed = !!(curSt && curSt.headers && Object.keys(curSt.headers).length);
       var viaProxy = !RELAY_ON() && isHls && (!!useRelay || hdrNeed);
@@ -6814,6 +6954,90 @@ body:has(#dlpg.open) #nav{display:none}
         };
         fatalFn = onFatal;
         armWatch();
+        // ----- Shaka Player (primary for HLS / DASH): audio tracks, subtitle tracks and timing come from Shaka; any failure falls back below -----
+        function shkStart(sk, src, isMpd) {
+          var loaded = false, p = null, sh = null;
+          function fall(er) {
+            if (p) { try { p.destroy(); } catch (e) {} }
+            if (hls === sh) hls = null;
+            noShk = true; console.warn("[Boa] Shaka could not play this stream, using the fallback player", er);
+            go(src);
+          }
+          function bad(d) {
+            if (gen !== srcGen || closed) return;
+            var cat = d && d.category, code = d && d.code;
+            netFail = cat === 1;
+            why = cat === 1 ? "The stream host dropped the connection (link expired, blocked or geo-restricted)." : cat === 4 ? "The playlist couldn't be read (link expired or blocked by the host)." : cat === 3 ? "The codec isn't supported by your browser." : cat === 5 ? "Video segments failed to load (host too slow, blocked or link expired)." : "Playback error" + (code ? " (" + code + ")" : "") + ".";
+            if (!loaded && cat !== 1) { fall(code); return; }
+            onFatal();
+          }
+          function tracks() {
+            if (gen !== srcGen || closed || hls !== sh) return;
+            try {
+              var at = sh.audioTracks || [];
+              if (at.length > 1 && !AUDUSER && !sh._aud && ctx && ctx.ol) {
+                sh._aud = 1;
+                var want = langName(ctx.ol).toLowerCase(), pick = -1;
+                at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
+                if (pick > -1 && pick !== sh.audioTrack) sh.audioTrack = pick;
+              }
+            } catch (e) {}
+            paintAud();
+            try {
+              var tr = sh.subtitleTracks || [], i;
+              function en(t2) { var l = String(t2.lang || "").toLowerCase(); return l === "en" || l === "eng" || /^en[-_]/.test(l) || /english/i.test(t2.name || ""); }
+              if (!SUBUSER && !SUBEN && tr.length) {
+                for (i = 0; i < tr.length; i++) if (en(tr[i])) { SUBSEL = "h" + i; SUBEN = true; SUBHKEY = String(tr[i].lang || tr[i].name || ""); applySub(); break; }
+                if (!SUBEN && SUBSEL === "") {
+                  var wl = DM[String(navigator.language || "en").slice(0, 2).toLowerCase()] || [];
+                  for (i = 0; i < tr.length; i++) if (wl.indexOf(String(tr[i].lang || "").toLowerCase()) > -1) { SUBSEL = "h" + i; SUBHKEY = String(tr[i].lang || ""); break; }
+                }
+              }
+              if (/^h/.test(SUBSEL) && SUBHKEY) for (i = 0; i < tr.length; i++) if (String(tr[i].lang || tr[i].name || "") === SUBHKEY) { SUBSEL = "h" + i; break; }
+              if (/^h/.test(SUBSEL) && +SUBSEL.slice(1) < tr.length) { sh.subtitleDisplay = true; sh.subtitleTrack = +SUBSEL.slice(1); }
+              else if (SUBSEL !== "") sh.subtitleTrack = -1;
+              liftCues(v);
+            } catch (e) {}
+            fillCC();
+          }
+          try { if (sk.polyfill && !sk.__boaPoly) { sk.polyfill.installAll(); sk.__boaPoly = 1; } } catch (e) {}
+          try { p = new sk.Player(); } catch (e) { noShk = true; go(src); return; }
+          sh = hls = shkShim(p);
+          var tx = null;
+          try {
+            if (sk.text && sk.text.UITextDisplayer) { tx = root.querySelector(".shk-tx"); if (!tx) { tx = h("div", "shk-tx"); root.appendChild(tx); } tx.textContent = ""; }
+          } catch (e) { tx = null; }
+          var cfg = {
+            streaming: { bufferingGoal: 40, rebufferingGoal: 1.5, jumpLargeGaps: true, retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 } },
+            manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
+          };
+          if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
+          if (tx) { var ttx = tx; cfg.textDisplayFactory = function () { return new sk.text.UITextDisplayer(v, ttx); }; }
+          try { p.configure(cfg); } catch (e) {}
+          p.addEventListener("error", function (ev) { var d = ev && ev.detail; if (!d || d.severity !== 2) return; bad(d); });
+          p.addEventListener("trackschanged", tracks);
+          Promise.resolve(p.attach ? p.attach(v) : null).then(function () {
+            if (closed || gen !== srcGen) { try { p.destroy(); } catch (e) {} return null; }
+            return p.load(src, null, isMpd ? "application/dash+xml" : "application/x-mpegurl").then(function () { return 1; });
+          }).then(function (ok) {
+            if (!ok || closed || gen !== srcGen) return;
+            loaded = true; tracks();
+            var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
+          }).catch(function (er) {
+            if (closed || gen !== srcGen || (er && er.code === 7001)) return;
+            bad(er && er.category ? er : { category: 7, code: er && er.code });
+          });
+        }
+        var isMpd0 = /\.mpd(\?|$)/i.test(src0);
+        if ((isHls || isMpd0) && !noShk && shakaOn() && src.indexOf("/offline/") < 0 && !(isHls && isIOS() && v.canPlayType("application/vnd.apple.mpegurl"))) {
+          loadShaka(function () {
+            if (closed || gen !== srcGen) return;
+            var sk = window.shaka;
+            if (!sk || !sk.Player || !sk.Player.isBrowserSupported || !sk.Player.isBrowserSupported()) { noShk = true; go(src); return; }
+            shkStart(sk, src, isMpd0);
+          });
+          return;
+        }
         if (/\.mpd(\?|$)/i.test(src0)) {
           loadDash(function () {
             if (closed) return;
@@ -6881,7 +7105,8 @@ body:has(#dlpg.open) #nav{display:none}
           if (!RELAY_ON() && !viaProxy) { relayed = false; go(src0); return; }     // switched OFF while signing: go direct
           if (!ru) {
             if (!RELAY_ON()) { relayed = false; go(src0); return; }               // proxy unavailable: still try the direct link
-            why = "The privacy relay is unavailable right now. Turn it off to play directly."; fail(); return;
+            if (!relayFell) { relayFell = true; relayed = false; toast("Relay unavailable \u00b7 playing direct"); go(src0); return; }   // relay down: try the direct link; if that fails the normal server switching takes over
+            why = "The relay is unavailable right now."; stepOrFail(); return;
           }
           go(ru);
         });
@@ -7650,6 +7875,7 @@ body:has(#dlpg.open) #nav{display:none}
         function setSub() { sub.textContent = (sv.q ? sv.q + "p • " : "") + (sv.tor ? "TORRENT" : String(sv.f || "").toUpperCase()) + " • " + (sv.st.provider || "Plugin") + (isOn() ? " • Playing" : sv.last ? " • Last used" : ""); }
         setSub();
         mid.appendChild(sub);
+        mid.appendChild(lnkChips(sv.st, { f: sv.f, heavy: sv.tier === "r", tor: sv.tor }));
         row.appendChild(mid);
         // one badge per row: LIVE (playing) > UPDATED (recovered, safe to switch back) > FAILED
         function isOn() { return !dead && sv.urls.indexOf(url) > -1; }
@@ -7673,6 +7899,11 @@ body:has(#dlpg.open) #nav{display:none}
         var cp = h("button", "srcp", "Copy"); cp.setAttribute("aria-label", "Copy link for server " + sv.n);
         cp.onclick = function (ev) { ev.stopPropagation(); copyLink(sv.st.url); };
         row.appendChild(cp);
+        if (dlOn() && !sv.tor && !/\/offline\//.test(String(sv.st.url || ""))) {
+          var dl1 = h("button", "srcp srdl", "Download"); dl1.type = "button"; dl1.setAttribute("aria-label", "Download server " + sv.n);
+          dl1.onclick = function (ev) { ev.stopPropagation(); var e1 = dlEligible(sv.st); if (!e1.ok) { toast(e1.reason); return; } dlAdd(sv.st, { q: sv.q, f: sv.f }, ctx); };
+          row.appendChild(dl1);
+        }
         row.onclick = function () {
           if (sv.tor) { try { if (navigator.clipboard) navigator.clipboard.writeText(sv.st.url); } catch (e) {} toast("Opening your torrent app\u2026 (link also copied)"); try { location.href = sv.st.url; } catch (e) {} return; }
           closeMenu(); if (!isOn()) switchTo(i, false);
@@ -7685,14 +7916,21 @@ body:has(#dlpg.open) #nav{display:none}
           var ml = h("div", "srlinks"); ml.style.cssText = "display:none;margin:0 0 10px 40px";
           sv.alts.forEach(function (al, k) {
             var q = al.st || {}, lb = h("button", "srcp", (al.q ? al.q + "p \u2022 " : "") + (al.tor ? "TORRENT" : String(al.f || "").toUpperCase()) + (q.lt ? " \u2022 " + q.lt : "") + " \u2022 " + (q.provider || "Link " + (k + 1)));
-            lb.type = "button"; lb.style.cssText = "display:block;width:100%;text-align:left;margin:4px 0";
+            lb.type = "button"; lb.style.cssText = "display:block;width:100%;text-align:left;margin:0";
             lb.onclick = function (ev) {
               ev.stopPropagation();
               if (al.tor) { try { if (navigator.clipboard) navigator.clipboard.writeText(q.url); } catch (e) {} toast("Opening your torrent app\u2026 (link also copied)"); try { location.href = q.url; } catch (e) {} return; }
               closeMenu(); tried[i] = 1; curSrv = i; bad[i] = 0; upd[i] = 0; paintDots(); var t0 = curPos(); if (t0 > 1 && !isLive) seekAfter = t0;
               url = q.url; curSt = q; relayed = false; retried = false; why = ""; msg.className = "pmsg"; msg.textContent = ""; clearTry(); toast("SERVER " + sv.n + " \u2022 link " + (k + 2)); startSource(url, false);
             };
-            ml.appendChild(lb);
+            var wr = h("div", "srwrap"); wr.style.cssText = "margin:4px 0 10px";
+            wr.appendChild(lb); wr.appendChild(lnkChips(q, { f: al.f, gb: al.gb, heavy: al.heavy, tor: al.tor }));
+            if (dlOn() && !al.tor) {
+              var dl2 = h("button", "srcp srdl", "Download"); dl2.type = "button"; dl2.style.cssText = "margin:6px 0 0";
+              dl2.onclick = function (ev) { ev.stopPropagation(); var e2 = dlEligible(q); if (!e2.ok) { toast(e2.reason); return; } dlAdd(q, { q: al.q, f: al.f }, ctx); };
+              wr.appendChild(dl2);
+            }
+            ml.appendChild(wr);
           });
           mb.onclick = function (ev) { ev.stopPropagation(); ml.style.display = ml.style.display === "none" ? "block" : "none"; };
           m.appendChild(mb); m.appendChild(ml);
@@ -7855,6 +8093,55 @@ body:has(#dlpg.open) #nav{display:none}
       }).catch(function () {});
     }
     bEps.onclick = tog("eps", openEpisodes);
+    // movie Settings: Quality and Size only. Picks the best matching stream and keeps your place in the film.
+    var SETQ = "", SETG = lsGet("boa_setg", "any");
+    function tierP(q) { q = +q || 0; return !q ? 0 : q <= 400 ? 380 : q <= 576 ? 480 : q <= 900 ? 720 : q <= 1300 ? 1080 : q <= 2500 ? 2160 : 4320; }
+    function tierLb(t) { return t === 380 ? "380p" : t === 480 ? "480p" : t === 720 ? "720p HD" : t === 1080 ? "1080p" : t === 2160 ? "4K" : t === 4320 ? "8K" : "Auto"; }
+    function curCand() {
+      var L = (ctx && ctx.cands) || [], i;
+      for (i = 0; i < L.length; i++) if (L[i].st.url === url || (curSt && L[i].st.url === curSt.url)) return L[i];
+      return null;
+    }
+    function playPick(c) {
+      sizeGate(c.st, c.gb || 0, null, function () {
+        closeMenu();
+        curSrv = -1; var t0 = curPos(); if (t0 > 1 && !isLive) seekAfter = t0;
+        url = c.st.url; curSt = c.st; relayed = false; retried = false; why = ""; autoN = 0; failedU[url] = 0; triedU[url] = 0;
+        msg.className = "pmsg"; msg.textContent = ""; clearTry();
+        toast((c.q ? c.q + "p" : "Stream") + (c.gb ? " \u2022 " + (c.gb >= 1 ? c.gb.toFixed(1) + " GB" : Math.round(c.gb * 1024) + " MB") : ""));
+        startSource(url, false);
+      });
+    }
+    function applySettings() {
+      var L = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !c.heavy && !failedU[c.st.url] && tierP(c.q) === +SETQ && (SETG === "any" || !c.gb || c.gb <= +SETG); });
+      var cur = curCand();
+      if (cur && L.indexOf(cur) > -1) { toast("Already playing this quality"); return; }
+      L.sort(function (a, b) { return b.sc - a.sc; });
+      if (!L.length) { toast("No stream for that quality and size"); return; }
+      lsSet("boa_pq", String(SETQ));
+      playPick(L[0]);
+    }
+    function openSettings() {
+      closeMenu();
+      var all = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !c.heavy; });
+      var m = h("div", "pmenu pcc2 pset2");
+      m.appendChild(h("b", null, "Settings"));
+      if (!all.length) { m.appendChild(h("div", "srnote", "Only this stream is available right now.")); root.appendChild(m); menuEl = m; clearTimeout(hideT); return; }
+      var seen = {}, qs = [];
+      all.forEach(function (c) { var t = tierP(c.q); if (t && !seen[t]) { seen[t] = 1; qs.push(t); } });
+      qs.sort(function (a, b) { return a - b; });
+      if (!SETQ) { var c0 = curCand(); SETQ = c0 && tierP(c0.q) ? tierP(c0.q) : (qs.indexOf(720) > -1 ? 720 : qs[0] || 0); }
+      var qopts = qs.map(function (t) { return [t, tierLb(t)]; });
+      var gopts = [["any", "Any"], ["1", "1 GB"], ["2", "2 GB"], ["5", "5 GB"]];
+      m.appendChild(ccTable("Playback", [
+        { label: "Quality", opts: qopts.length ? qopts : [[0, "Auto"]], get: function () { return SETQ; }, set: function (k) { SETQ = k; applySettings(); } },
+        { label: "Size", opts: gopts, get: function () { return SETG; }, set: function (k) { SETG = k; lsSet("boa_setg", k); applySettings(); } }
+      ]));
+      var cur = curCand();
+      if (cur) m.appendChild(h("div", "srnote", "Now playing: " + (cur.q ? cur.q + "p" : "stream") + (cur.gb ? " \u2022 " + (cur.gb >= 1 ? cur.gb.toFixed(1) + " GB" : Math.round(cur.gb * 1024) + " MB") : "")));
+      root.appendChild(m); menuEl = m; clearTimeout(hideT);
+    }
+    bSet.onclick = tog("set", openSettings);
     // subtitle size and position, remembered on this device
     function openCCStyle() {
       function setS(k) { CCSIZE = k; lsSet("boa_ccsize", k); paintCCStyle(); openCCStyle(); }
@@ -7867,7 +8154,6 @@ body:has(#dlpg.open) #nav{display:none}
         { label: "Position: Lower-mid", on: CCPOS === "m", fn: function () { setP("m"); } }
       ]);
     }
-    bAa.onclick = tog("aa", openCCStyle);
     function nextEnded() {
       if (!nextInfo || nextDismissed || adActive) return;
       showNext();
@@ -8896,7 +9182,7 @@ $("smclose").onclick = function () {
     if (!canWatch()) { needAuth(); return; }
     paintPriv();
     loadSubs(mt, id, s, e);
-    CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0, auto: !!auto };
+    CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0, auto: !!auto || mt === "movie" };
     var slowT = setTimeout(function () {
       var f = $("smlist").firstChild;
       if (f && f.className === "note center") f.textContent = "Still searching providers… the first search for a title can take up to a minute.";
@@ -8910,6 +9196,10 @@ $("smclose").onclick = function () {
     list.textContent = "";
     list.appendChild(h("div", "note center", "Please Wait\u2026"));
     modal.classList.add("open");
+    function qdone() { modal.classList.remove("qwait"); var qm = list.querySelector(".qmsg"); if (qm && qm.parentNode) qm.parentNode.removeChild(qm); }
+    modal.classList.remove("qwait");
+    if (CUR.auto && mt === "movie") { modal.classList.add("qwait"); setTimeout(function () { if (STRM_TOK === tok0) qdone(); }, 25000); }
+    var tok0 = STRM_TOK + 1;
 
     var tok = ++STRM_TOK; clearTimeout(STRM_T);
     // Progressive fetch: the server answers with whatever has arrived so far (long-poll). The first playable stream builds the
@@ -8994,6 +9284,7 @@ $("smclose").onclick = function () {
         if (tok !== STRM_TOK) return;
         clearTimeout(slowT);
         list.textContent = "";
+        if (modal.classList.contains("qwait")) list.appendChild(h("div", "qmsg", "Finding the best 720p stream\u2026"));
         addStreamSubs(streams);
         // ---- size / resolution picker above the servers: filters what is shown, never what is fetched ----
         var host = h("div", "srvhost"), bar = h("div", "tierbar");
@@ -9095,11 +9386,12 @@ $("smclose").onclick = function () {
           if (MAXG !== "auto" && MAXG !== "inf" && sd.gb > +MAXG) return false;
           return true;
         }
-        var pool = [], seenU = {}, total = 0;
+        var pool = [], seenU = {}, total = 0, cands = [], seenC = {};
         streams.forEach(function (x) {
           if (!x || !x.url) return;
           var sd = scoreOf(x);
           total++;
+          if (!sd.tor && !seenC[ukey(x.url)]) { seenC[ukey(x.url)] = 1; cands.push({ st: x, q: sd.q, gb: sd.gb, heavy: sd.heavy, tor: false, sc: sd.sc, f: sd.f }); }
           if (!pickOk(sd)) return;
           var key = ukey(x.url);
           if (seenU[key]) return;
@@ -9209,7 +9501,8 @@ $("smclose").onclick = function () {
           if (targ && targ.alts.length < 12) targ.alts.push(e);
         });
         if (!servers.length) {
-          var nm = h("div", "note center", total && (TIER !== "any" || MAXG !== "auto") ? "No streams match this quality / size selection." : "No playable stream found yet. Try again in a moment.");
+          qdone();
+          var nm = h("div", "note center", total && (TIER !== "any" || MAXG !== "auto") ? "No streams match this quality / size selection." : "No playable stream found yet. Try again in a moment, or install a plugin in Add-ons.");
           if (total && (TIER !== "any" || MAXG !== "auto")) {
             var rs = h("button", "retry", "Show all streams");
             rs.onclick = function () { TIER = "any"; MAXG = "auto"; lsSet("boa_tier", "any"); lsSet("boa_maxgb", "auto"); if (bar._sync) bar._sync(); Array.prototype.forEach.call(bar.querySelectorAll(".tierrow"), function (r) { Array.prototype.forEach.call(r.querySelectorAll(".tierchip"), function (x, i) { x.className = "tierchip" + (i === 0 ? " on" : ""); }); }); renderServers(); };
@@ -9241,6 +9534,7 @@ $("smclose").onclick = function () {
         servers.forEach(function (sv) {
           sv.last = !!(LP && (ukey(sv.main.st.url) === lpK || sv.alts.some(function (a) { return ukey(a.st.url) === lpK; })));
         });
+        if (CUR) CUR.cands = cands;
         var csAll = servers.filter(function (sv) { return !sv.main.sd.tor; }).map(function (sv) { return sv.main.st; });
         var cvAll = servers.map(function (sv) { return { n: sv.n, tier: sv.tier, label: sv.label, st: sv.main.st, q: sv.main.sd.q, f: sv.main.sd.f, tor: !!sv.main.sd.tor, last: !!sv.last, urls: [sv.main.st.url].concat(sv.alts.map(function (a) { return a.st.url; })), alts: sv.alts.map(function (a) { return { st: a.st, heavy: a.sd.heavy, tor: !!a.sd.tor, f: a.sd.f, q: a.sd.q, sc: a.sd.sc }; }) }; });
         if (APP) { for (var ci = PREV.length; ci < cvAll.length; ci++) CUR.servers.push(cvAll[ci]); for (var cj = 0; cj < csAll.length; cj++) if (CUR.streams.indexOf(csAll[cj]) < 0) CUR.streams.push(csAll[cj]); }
@@ -9298,6 +9592,18 @@ $("smclose").onclick = function () {
           if (CUR && (!w0 || w0.nx || w0.e !== CUR.e || w0.s !== CUR.s)) recordWatch(CUR, 1, 0, true);
         }
         var firstPlay = null, firstPlay0 = null;
+        function fireAuto() {
+          qdone();
+          var PQ = +lsGet("boa_pq", "720") || 720, best = null, bd = 1e9;
+          if (CUR && CUR.mt === "movie") pool.forEach(function (e) {
+            var s0 = e.sd;
+            if (s0.tor || s0.dead || s0.heavy || s0.f === "embed") return;
+            var d = s0.q ? Math.abs(s0.q - PQ) : 300;
+            if (d < bd || (d === bd && best && s0.sc > best.sd.sc)) { bd = d; best = e; }
+          });
+          if (best) playStream(best.st, h("div", "note"));
+          else if (firstPlay) firstPlay.click();
+        }
         var fromSi = APP ? PREV.length : 0;
         if (APP) { var dsc0 = host.querySelector(".srvdisc"); if (dsc0 && dsc0.parentNode) dsc0.parentNode.removeChild(dsc0); }
         servers.forEach(function (sv, si) {
@@ -9310,6 +9616,7 @@ $("smclose").onclick = function () {
           tx.appendChild(h("b", null, "SERVER " + sv.n + " · " + sv.label + (sv.last ? " · Last used" : "")));
           var st = sv.main.st, sd = sv.main.sd;
           tx.appendChild(h("span", null, (sd.q ? sd.q + "p • " : "") + fmtName(sd) + (st.lt ? " • " + st.lt : "") + (sd.tor && sd.seed ? " • " + sd.seed + " seeders" : "") + " • " + (st.provider || "Plugin") + (sd.f === "embed" ? " • opens inline" : "")));
+          tx.appendChild(lnkChips(st, { f: sd.f, gb: sd.gb, heavy: sd.heavy, tor: sd.tor }));
           var note = h("div", "note", "");
           tx.appendChild(note);
           top.appendChild(dot); top.appendChild(tx);
@@ -9320,7 +9627,7 @@ $("smclose").onclick = function () {
           vb.onclick = function () { if (sd.tor) copyMagnet(st); else openVlc(st); };
           acts.appendChild(pb); acts.appendChild(vb);
           if (dlOn()) {
-            var del0 = dlEligible(st), dbt = h("button", "splaybtn dlb" + (del0.ok ? "" : " off"), del0.ok ? "Save" : "No save");
+            var del0 = dlEligible(st), dbt = h("button", "splaybtn dlb" + (del0.ok ? "" : " off"), del0.ok ? "Download" : "No download");
             dbt.onclick = function () { if (!del0.ok) { toast(del0.reason); return; } dlAdd(st, sd, CUR); };
             dlRow0 = h("div", "srvdlrow"); dlRow0.appendChild(dbt);
             if (!del0.ok) note.textContent = del0.reason;
@@ -9343,7 +9650,13 @@ $("smclose").onclick = function () {
                   var nn = h("div", "note", "");
                   var b1 = h("button", "splaybtn", al.sd.tor ? "Play" : "Play"); b1.onclick = function () { if (al.sd.tor) openMagnet(al.st); else playStream(al.st, nn); };
                   var b2 = h("button", "splaybtn vlc", al.sd.tor ? "Copy" : "VLC"); b2.onclick = function () { if (al.sd.tor) copyMagnet(al.st); else openVlc(al.st); };
-                  r.appendChild(tt); r.appendChild(b1); r.appendChild(b2); r.appendChild(nn);
+                  r.appendChild(tt); r.appendChild(lnkChips(al.st, { f: al.sd.f, gb: al.sd.gb, heavy: al.sd.heavy, tor: al.sd.tor })); r.appendChild(b1); r.appendChild(b2);
+                  if (dlOn()) {
+                    var ad0 = dlEligible(al.st), ab = h("button", "splaybtn dlb" + (ad0.ok ? "" : " off"), ad0.ok ? "Download" : "No download");
+                    ab.onclick = function () { if (!ad0.ok) { toast(ad0.reason); return; } dlAdd(al.st, al.sd, CUR); };
+                    r.appendChild(ab);
+                  }
+                  r.appendChild(nn);
                   box.appendChild(r);
                 });
               }
@@ -9379,14 +9692,14 @@ $("smclose").onclick = function () {
               var rfr = !!CUR.rfr; CUR.rfr = false;
               if ((!playerOpen() || rfr) && (deadAny || (bestU && servers[0] && !servers[0].main.sd.tor && servers[0].tier !== "r" && bestU !== servers[0].main.st.url))) { renderServers(); if (rfr && CUR.reopen) CUR.reopen(); rfFin(); return; }
               rfFin();
-              if (CUR && CUR.auto && firstPlay && !playerOpen()) { CUR.auto = false; firstPlay.click(); }
+              if (CUR && CUR.auto && firstPlay && !playerOpen()) { CUR.auto = false; fireAuto(); } else if (CUR && !CUR.auto) qdone();
             }).catch(function () { rfFin(); });
           } else { hlReady = true; CUR.hlDone = true; CUR.rfr = false; rfFin(); }
         } else if (APP) hlReady = true;
         if (CUR && CUR.auto && firstPlay && !playerOpen() && (hlReady || CUR.hlDone)) {
           CUR.auto = false;
-          firstPlay.click();
-        }
+          fireAuto();
+        } else if (!(CUR && CUR.auto && !hlReady && !CUR.hlDone)) qdone();
         }
         more = function () { renderServers(true); };
         rer = function () { renderServers(); };
