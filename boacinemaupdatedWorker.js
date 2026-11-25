@@ -1176,7 +1176,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.55";
+const APP_VERSION = "2026-11-22.56";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1797,7 +1797,7 @@ async function authHandle(request, url, env) {
       const u = await env.DB.prepare("SELECT name,email FROM users WHERE id = ?").bind(uid).first();
       if (!u) return authJson({ error: "Account not found." }, 401);
       const cnt = (v) => String(v || "").split(/[\s,;]+/).filter(Boolean).length;
-      return authJson({ user: { name: u.name, email: u.email, role: roleFor(env, u.email), adm: cnt(env.ADMIN_EMAILS) } });
+      return authJson({ user: { name: u.name, email: u.email, role: roleFor(env, u.email), adm: cnt(env.ADMIN_EMAILS || env.ADMIN_EMAIL) } });
     }
     if (path === "/api/acct/keys") {
       const r = await env.DB.prepare("SELECT k FROM kv WHERE uid = ? LIMIT 1200").bind(uid).all();
@@ -1844,7 +1844,7 @@ async function authHandle(request, url, env) {
 function roleFor(env, email) {
   const rl = (v) => String(v || "").toLowerCase().split(/[\s,;]+/).filter(Boolean);
   email = String(email || "").toLowerCase();
-  return rl(env.ADMIN_EMAILS).indexOf(email) > -1 ? "admin" : rl(env.MOD_EMAILS).indexOf(email) > -1 ? "moderator" : "user";
+  return rl(env.ADMIN_EMAILS || env.ADMIN_EMAIL).indexOf(email) > -1 ? "admin" : rl(env.MOD_EMAILS).indexOf(email) > -1 ? "moderator" : "user";
 }
 // Who is calling? A signed-in account (checked against D1, cached for a minute) or the Telegram owner. Everyone else is a guest.
 const sessCache = new Map();
