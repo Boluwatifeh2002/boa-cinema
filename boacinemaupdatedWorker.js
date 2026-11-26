@@ -2340,29 +2340,6 @@ async function handleMessage(msg, env) {
           : `👥 <b>${n.toLocaleString("en-US")}</b> active member${n === 1 ? "" : "s"} in the last ${ACTIVE_DAYS} days.`
       );
     }
-    if (cmd === "/broadcast" && msg.from && ownerIds(env).includes(String(msg.from.id)) && msg.chat.type === "private") {
-      const body = arg.trim();
-      if (!body) return say(env, chatId, "Usage: /broadcast <message>");
-      const n = await activeUsers(env, true);
-      if (n === null) return say(env, chatId, "BOT_USERS isn't connected; can't broadcast.");
-      let sent = 0, fail = 0;
-      let cursor;
-      try {
-        for (let i = 0; i < 40; i++) {
-          const page = await env.BOT_USERS.list({ prefix: "u:", cursor });
-          for (const k of page.keys) {
-            const uid = String(k.name).slice(2);
-            try {
-              await tg(env, "sendMessage", { chat_id: Number(uid), text: "📢 <b>Boa Cinema update</b>\n\n" + esc(body), parse_mode: "HTML", disable_web_page_preview: true });
-              sent++;
-            } catch (e) { fail++; }
-          }
-          if (page.list_complete) break;
-          cursor = page.cursor;
-        }
-      } catch (e) {}
-      return say(env, chatId, `Broadcast sent: ${sent} delivered, ${fail} failed.`);
-    }
     if (cmd === "/book" || cmd === "/pdf") return handleBookSearch(env, chatId, arg, mid);
     if (cmd === "/song" || cmd === "/music") return handleSongSearch(env, chatId, arg, mid);
     if (cmd === "/random") {
@@ -3739,16 +3716,6 @@ body.lock #nav{display:none}
 .chip{background:var(--card);border-radius:999px;padding:8px 15px;font-size:13.5px;font-weight:600;color:#e4e4e7}
 .acts{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 16px}
 .btn{border:0;border-radius:12px;padding:13px 20px;font-size:15px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:8px}
-.rate{position:relative;padding:10px 14px;font-size:13px}
-.rate.on.like{color:#22c55e;border-color:#22c55e;background:rgba(34,197,94,.15)}
-.rate.on.love{color:#f43f5e;border-color:#f43f5e;background:rgba(244,63,94,.15)}
-.rate svg{width:16px;height:16px}
-.ratenc{margin-left:6px;font-weight:800;opacity:.9}
-.btn.share{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18)}
-.locked .ptop,.locked .pbot{pointer-events:none;opacity:.55!important}
-#lockoverlay{position:absolute;inset:0;z-index:2000;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;backdrop-filter:blur(6px)}
-#lockoverlay.on{display:flex}
-#lockoverlay .lockbtn{border:0;border-radius:999px;background:#fff;color:#000;font-weight:800;font-size:16px;padding:14px 34px;box-shadow:0 6px 20px rgba(0,0,0,.3)}
 .btn svg{width:18px;height:18px}
 .btn.primary{background:#fff;color:#000}
 .btn.ghost{background:#3a3a3e;color:#fff}
@@ -4880,44 +4847,6 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   var LIB = [];
   var timer = null, toastTimer = null;
   var segEl = document.getElementById("seg");
-
-  // Global engagement state (no payment/VIP gating)
-  var RATINGS = {};        // tmdbKey -> { like: n, love: n, mine: "" }
-  var RATLOAD = {};        // tmdbKey -> promise
-  var PUSH_SUB = null;     // push subscription object
-  var PUSH_READY = false;  // service worker supports push
-  var SW_REG = null;       // service worker registration
-  var SCREEN_LOCKED = false;
-
-  function ratingKey(d) { return String(d.mt || d.type) + ":" + String(d.id); }
-  function ratingDefault() { return { like: 0, love: 0, mine: "" }; }
-  function ratingLoad(k) {
-    if (RATLOAD[k]) return RATLOAD[k];
-    RATLOAD[k] = (function () {
-      var p = Promise.resolve().then(function () {
-        var raw = lsGet("boa_rating_" + k, null);
-        if (!raw) return ratingDefault();
-        try { var j = JSON.parse(raw); if (typeof j.like === "number" && typeof j.love === "number") return j; } catch (e) {}
-        return ratingDefault();
-      });
-      return p;
-    })();
-    return RATLOAD[k];
-  }
-  function ratingSave(k, v) {
-    RATINGS[k] = v;
-    try { lsSet("boa_rating_" + k, JSON.stringify(v)); } catch (e) {}
-    if (AT && cloud) { try { cloud.setItem("rating_" + k, JSON.stringify(v)); } catch (e) {} }
-  }
-  function ratingToggle(k, kind) {
-    ratingLoad(k).then(function (v) {
-      v = v || ratingDefault();
-      if (v.mine === kind) { v.mine = ""; v[kind] = Math.max(0, (v[kind] || 0) - 1); }
-      else { if (v.mine) { v[v.mine] = Math.max(0, (v[v.mine] || 0) - 1); } v.mine = kind; v[kind] = (v[kind] || 0) + 1; }
-      ratingSave(k, v);
-      return v;
-    });
-  }
 
   var ICON = {
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
@@ -6199,7 +6128,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     return p;
   }
   // score bonus: reachable + fast is best; unreachable (gone / offline / web page) is pushed to the back
-  // 0 = checked and reachable (web-ready), 1 = not checked yet, 2 = needs special headers / embed (relay-limited), 3 = failed or dead
+  // 0 = checked and reachable, 1 = not checked yet, 2 = needs special headers / embed (relay-limited), 3 = failed or unreachable
   function linkRank(e) {
     var sd = e.sd || {}, st = e.st || {}, u = String(st.url || "");
     if (sd.dead || sd.tor) return 3;
@@ -6220,7 +6149,6 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   var SUBSEL = "", SUBUSER = false, SUBEN = false, SUBHKEY = "";
   var TIER = lsGet("boa_tier", "any"), MAXG = lsGet("boa_maxgb", "auto");   // stream picker: resolution tier + hard file-size ceiling (GB)
   var CCSIZE = lsGet("boa_ccsize", "m"), CCPOS = lsGet("boa_ccpos", "b"), CCHID = false;   // caption size (s/m/l) and position (b = bottom, m = lower-mid)
-var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio language
   function isEn(x) { return !!x && (x.lang === "eng" || x.lang === "en" || /english/i.test(x.label || x.name || "")); }
   var LANGS = { eng: "English", spa: "Spanish", fre: "French", fra: "French", por: "Portuguese", ara: "Arabic", ger: "German", deu: "German", ita: "Italian", rus: "Russian", hin: "Hindi", tur: "Turkish", chi: "Chinese", zho: "Chinese", jpn: "Japanese", kor: "Korean", dut: "Dutch", pol: "Polish", ind: "Indonesian", swa: "Swahili", yor: "Yoruba" };
   var DM = { en: ["eng"], fr: ["fre", "fra"], es: ["spa"], pt: ["por"], ar: ["ara"], de: ["ger", "deu"], it: ["ita"], ru: ["rus"], hi: ["hin"], tr: ["tur"], zh: ["chi", "zho"], ja: ["jpn"], ko: ["kor"], nl: ["dut"], pl: ["pol"], id: ["ind"], sw: ["swa"] };
@@ -7324,16 +7252,8 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
     if (ctx && ctx.mt === "tv") row2.appendChild(bEps);
     row2.appendChild(sp2);
     if (ctx && (ctx.mt === "movie" || ctx.mt === "tv")) row2.appendChild(bSet);
-    var bLock = h("button", "ptxt", "🔒"); bLock.type = "button"; bLock.setAttribute("aria-label", "Screen lock"); bLock.title = "Lock screen";
-    row2.insertBefore(bLock, row2.firstChild);
     bot.appendChild(row2);
     root.appendChild(bot);
-    var lockEl = h("div", "lockoverlay");
-    var lockBtn = h("button", "lockbtn", "Unlock Screen");
-    lockBtn.type = "button";
-    lockBtn.onclick = function () { setLock(false); };
-    lockEl.appendChild(lockBtn);
-    root.appendChild(lockEl);
     var fileIn = document.createElement("input");
     fileIn.type = "file"; fileIn.accept = ".srt,.vtt,text/vtt"; fileIn.style.display = "none";
     root.appendChild(fileIn);
@@ -7530,7 +7450,6 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
       var tp0 = curPos(); if (tp0 > 1 && !isLive) seekAfter = tp0;     // every link / server switch resumes from the same second
       if (curSrv > -1) { bad[curSrv] = 1; hadFail[curSrv] = 1; upd[curSrv] = 0; paintDots(); }
       console.warn("[Boa] playback failed on", url, why);
-      replenishServers();
       if (autoN++ < 24) {
         // 0) the next link inside the SAME server (its main link, then its more-links in order) before any other server is touched
         var ck = curSrv;
@@ -7579,59 +7498,6 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
       }
       fail();
     }
-    // Background auto-replenishment: when a server/link fails, re-query upstream (hard refresh r=1) and
-    // merge fresh, playable links into the failing server's alts so SERVER 1 stays stocked seamlessly.
-    var REP = {};
-    function replenishServers() {
-      var L = (ctx && ctx.servers) || [], pending = 0;
-      function rFmtOf(x) {
-        var u = String(x.url || ""), t = String(x.title || "") + " " + String(x.name || "");
-        if (!u || /^magnet:/i.test(u)) return "torrent";
-        if (/\/embed\/|\.html?($|\?)/i.test(u)) return "embed";
-        if (/\.m3u8(\?|$)/i.test(u)) return "hls";
-        if (/\.mp4(\?|$)/i.test(u)) return "mp4";
-        if (/\.mkv(\?|$)/i.test(u)) return "mkv";
-        if (/\.avi(\?|$)/i.test(u)) return "avi";
-        if (/\.mpd(\?|$)/i.test(u)) return "dash";
-        if (/\bmkv\b/i.test(t)) return "mkv";
-        return "file";
-      }
-      function rSizeGB(x) {
-        var m = /(\d+(?:\.\d+)?)\s?(GB|GiB|MB|MiB)/i.exec(String(x.title || "") + " " + String(x.name || "") + " " + (typeof x.size === "string" ? x.size : ""));
-        if (m) return /G/i.test(m[2]) ? +m[1] : +m[1] / 1024;
-        var b = +x.size;
-        return b > 1048576 ? b / 1073741824 : 0;
-      }
-      L.forEach(function (sv, i) {
-        if (!bad[i] && !failedU[sv.st.url]) return;
-        if (REP[i]) return;   // already replenishing this server
-        REP[i] = true; pending++;
-        api("/api/streams?p=1&type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1) + "&r=1", 0, 15000)
-          .then(function (r) {
-            delete REP[i];
-            if (!r || !Array.isArray(r.streams)) return;
-            var fresh = [];
-            r.streams.forEach(function (x) {
-              if (!x || !x.url || /\/embed\/|\.html?($|\?)/i.test(x.url)) return;
-              if (failedU[x.url] || triedU[x.url]) return;
-              var key = ukey(x.url);
-              var have = false;
-              L.forEach(function (o) { if (o.urls.indexOf(x.url) > -1) have = true; (o.alts || []).forEach(function (a) { if (a.st.url === x.url) have = true; }); });
-              if (have) return;
-              fresh.push(x);
-            });
-            if (!fresh.length) return;
-            sv.alts = (sv.alts || []).slice();
-            fresh.forEach(function (x) {
-              var st0 = { title: x.title || "", url: x.url, provider: x.provider || "Plugin", quality: x.quality || "", lt: x.lt || "", headers: x.headers || {} };
-              sv.alts.push({ st: st0, heavy: /mkv|hevc|ac3|dts|2160p|\b4k\b/i.test(String(x.title||"")+" "+String(x.name||"")), tor: /^magnet:/i.test(x.url), f: rFmtOf(x), q: 0, gb: rSizeGB(x) });
-            });
-            sv.alts.sort(function (a, b) { return linkRank(a) - linkRank(b) || b.sd.sc - a.sd.sc; });
-            if (menuEl && /srvroom/.test(menuEl.className)) paintDots();
-            toast("Server " + sv.n + " restocked with fresh links");
-          }).catch(function () { delete REP[i]; });
-      });
-    }
     function startSource(src0, useRelay) {
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
       triedU[src0] = 1; dead = false;
@@ -7652,7 +7518,9 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
           if (gen !== srcGen) return;
           var tpf = curPos(); if (tpf > 1 && !isLive) seekAfter = tpf;
           // the toggle is read live: a relay retry only happens while it is ON, and never when it is OFF
-          if (RELAY_ON() && !relayed && !retried) { retried = true; relayed = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
+          if (RELAY_ON() && !relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
+          // privacy relay OFF: a blocked HLS playlist (CORS / 403 / network) gets one retry through the stream proxy, with its own message
+          if (!RELAY_ON() && !relayed && !retried && ((isHls && netFail) || hdrNeed)) { retried = true; startSource(src0, true); return; }    // quiet: no "proxy" message, same position
           stepOrFail();
         };
         fatalFn = onFatal;
@@ -7681,12 +7549,7 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
               if (at.length > 1 && AUDPREF) {
                 var pi = -1;
                 at.forEach(function (t2, q) { if (pi < 0 && String(t2.lang || "") === AUDPREF.lang && (!AUDPREF.name || String(t2.name || "") === AUDPREF.name)) pi = q; });
-                if (pi > -1 && pi !== sh.audioTrack) sh.audioTrack = pi;
-                sh._aud = 1;
-              } else if (at.length > 1 && !AUDUSER && !sh._aud) {
-                var want = (AUDLANG || (ctx && ctx.ol ? langName(ctx.ol) : "")).toLowerCase(), pick = -1;
-                at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
-                if (pick > -1 && pick !== sh.audioTrack) sh.audioTrack = pick;
+                if (pi > -1 && pi !== sh.audioTrack) sh.audioTrack = pi;      // the user's pick stays locked on every new link
                 sh._aud = 1;
               } else if (at.length > 1 && !AUDUSER && !sh._aud && ctx && ctx.ol) {
                 sh._aud = 1;
@@ -7720,19 +7583,11 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
           try {
             if (sk.text && sk.text.UITextDisplayer) { tx = root.querySelector(".shk-tx"); if (!tx) { tx = h("div", "shk-tx"); root.appendChild(tx); } tx.textContent = ""; }
           } catch (e) { tx = null; }
-          var isLive = !!(ctx && ctx.live);
           var cfg = {
-            streaming: {
-              bufferingGoal: isLive ? 30 : 40,
-              rebufferingGoal: isLive ? 6 : 1.5,
-              jumpLargeGaps: true,
-              liveSync: { targetLatency: 10, maxBehind: 30 },
-              retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 }
-            },
+            streaming: { bufferingGoal: 40, rebufferingGoal: 1.5, jumpLargeGaps: true, retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 } },
             manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
           };
-          var prefLang = AUDLANG || (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol)) ? String(ctx.ol).toLowerCase() : "");
-          if (prefLang) cfg.preferredAudioLanguage = prefLang;
+          if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
           var cueN = 0;
           if (tx) {
             var ttx = tx;
@@ -7819,9 +7674,9 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
             try {
               var at = hls.audioTracks || [];
               if (at.length && hls.audioTrack < 0) hls.audioTrack = 0;
-              // several languages in the stream: start on the global preference / original language, never auto-switch after the viewer picks one
-              if (at.length > 1 && !AUDUSER) {
-                var want = (AUDLANG || (ctx && ctx.ol ? langName(ctx.ol) : "")).toLowerCase(), pick = -1;
+              // several languages in the stream: start on the title's original language (Korean film -> Korean), never auto-switch after the viewer picks one
+              if (at.length > 1 && !AUDUSER && !AUDPREF && ctx && ctx.ol) {
+                var want = langName(ctx.ol).toLowerCase(), pick = -1;
                 at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
                 if (pick > -1 && pick !== hls.audioTrack) hls.audioTrack = pick;
               }
@@ -7857,10 +7712,19 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
           var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
         }
       }
-      // Direct playback is always tried first (no "loading through proxy" state). The relay is only a fallback,
-      // attempted from onFatal when direct playback fails for CORS/network reasons and the relay is enabled.
-      relayed = false;
-      go(src0);
+      if (RELAY_ON() || viaProxy) {
+        relayed = true;
+        relaySign(src0, curSt).then(function (ru) {
+          if (gen !== srcGen || closed) return;
+          if (!RELAY_ON() && !viaProxy) { relayed = false; go(src0); return; }     // switched OFF while signing: go direct
+          if (!ru) {
+            if (!RELAY_ON()) { relayed = false; go(src0); return; }               // proxy unavailable: still try the direct link
+            if (!relayFell) { relayFell = true; relayed = false; toast("Relay unavailable \u00b7 playing direct"); go(src0); return; }   // relay down: try the direct link; if that fails the normal server switching takes over
+            why = "The relay is unavailable right now."; stepOrFail(); return;
+          }
+          go(ru);
+        });
+      } else { relayed = false; go(src0); }
     }
     // ----- VAST ads (pre-roll, mid-roll) -----
     function hms(x) { x = Math.max(0, x || 0); var a = Math.floor(x / 3600), b = Math.floor(x % 3600 / 60), c = (x % 60).toFixed(3); return (a < 10 ? "0" : "") + a + ":" + (b < 10 ? "0" : "") + b + ":" + (c < 10 ? "0" : "") + c; }
@@ -8295,20 +8159,10 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
       if (CAN_VOL) vol.value = String(m ? 0 : v.volume);
     }
     v.addEventListener("volumechange", function () { if (CAN_VOL && !v.muted && v.volume > 0) lastVol = v.volume; paintVol(); });
-    function setLock(on) {
-      SCREEN_LOCKED = !!on;
-      root.classList.toggle("locked", SCREEN_LOCKED);
-      if (lockEl) lockEl.classList.toggle("on", SCREEN_LOCKED);
-      bLock.textContent = SCREEN_LOCKED ? "🔓" : "🔒";
-      bLock.title = SCREEN_LOCKED ? "Unlock screen" : "Lock screen";
-      toast(SCREEN_LOCKED ? "Screen locked" : "Screen unlocked");
-    }
-    bLock.onclick = function () { setLock(!SCREEN_LOCKED); };
-    function maybeLock() { if (SCREEN_LOCKED) return; }
-    bPlay.onclick = function (ev) { if (SCREEN_LOCKED) return; toggle(); };
-    bBack.onclick = function (ev) { if (SCREEN_LOCKED) return; seekBy(-10); };
-    bFwd.onclick = function (ev) { if (SCREEN_LOCKED) return; seekBy(10); };
-    bMute.onclick = function (ev) { if (SCREEN_LOCKED) return;
+    bPlay.onclick = toggle;
+    bBack.onclick = function () { seekBy(-10); };
+    bFwd.onclick = function () { seekBy(10); };
+    bMute.onclick = function () {
       if (isMuted()) { v.muted = false; if (CAN_VOL && v.volume === 0) v.volume = lastVol > 0 ? lastVol : 0.5; }   // unmuting from 0 restores a audible level
       else v.muted = true;
       paintVol();
@@ -8513,7 +8367,7 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
           src = "HLS";
           hls.audioTracks.forEach(function (tr, i) {
             var ln = langName(tr.lang) || "", nm = tr.name && String(tr.name) !== String(tr.lang) ? String(tr.name) : "";
-            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; AUDLANG = String(tr.lang || ""); lsSet("boa_audlang", AUDLANG); hls.audioTrack = i; }, lang: ln });
+            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; hls.audioTrack = i; }, lang: ln });
           });
         } else if (dash && dash.getTracksFor) {
           var dt = dash.getTracksFor("audio") || [], dc = dash.getCurrentTrackFor ? dash.getCurrentTrackFor("audio") : null;
@@ -10083,7 +9937,7 @@ $("smclose").onclick = function () {
             if (r && Array.isArray(r.streams)) {
               r.streams.forEach(function (x) { if (x && x.url && !nseen[x.url]) { nseen[x.url] = 1; nacc.push(x); } });
               if (r.done || Date.now() - t0 > 50000) return stop(true);
-              return step(r.n || seen, true);   // hard refresh: every poll forces a fresh upstream query (r=1)
+              return step(r.n || seen, false);
             }
             if (++errs > 2) return stop(false);
             return new Promise(function (res) { setTimeout(res, 1200); }).then(function () { step(seen, false); });
@@ -10641,36 +10495,6 @@ $("smclose").onclick = function () {
     var acts = h("div", "acts");
     var unrel = isUnreleased(d);
     var wEnt = watchGet(d.mt, d.id);
-    var rk = ratingKey(d);
-    var shareBtn = h("button", "btn ghost");
-    shareBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="14" y1="2" x2="3" y2="2"></line><path d="M5 10v5c0 .6.4 1 1 1h3c.6 0 1-.4 1-1V5c0-.6-.4-1-1-1H2c-.6 0-1 .4-1 1v3c0 .6.4 1 1 1h3c.6 0 1-.4 1-1V6c0-.6-.4-1-1-1z"></path><path d="M17 14v3c0 .6.4 1 1 1h3c.6 0 1-.4 1-1v-3c0-.6-.4-1-1-1h-3c-.6 0-1 .4-1 1z"></path></svg>';
-    shareBtn.appendChild(document.createTextNode(" Share"));
-    shareBtn.onclick = function () {
-      var u = location.origin + "/?id=" + d.id + "&type=" + d.mt;
-      function doShare() { try { navigator.share({ title: d.t, url: u }); return; } catch (e) {} var t = document.createElement("textarea"); t.value = u; t.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(t); t.select(); try { document.execCommand("copy"); toast("Link copied"); } catch (e2) { toast("Could not copy link"); } t.remove(); }
-      if (tg && tg.share) { try { tg.share({ text: d.t, url: u }); return; } catch (e) {} }
-      doShare();
-    };
-    acts.appendChild(streamBtn);
-
-    var likeBtn = h("button", "btn ghost rate like");
-    likeBtn.type = "button";
-    var loveBtn = h("button", "btn ghost rate love");
-    loveBtn.type = "button";
-    var likeN = h("span", "ratenc", "0"), loveN = h("span", "ratenc", "0");
-    function paintRating(v) {
-      v = v || ratingDefault();
-      likeBtn.className = "btn ghost rate like" + (v.mine === "like" ? " on" : "");
-      loveBtn.className = "btn ghost rate love" + (v.mine === "love" ? " on" : "");
-      likeN.textContent = String(v.like || 0);
-      loveN.textContent = String(v.love || 0);
-    }
-    likeBtn.onclick = function () { var t = ratingToggle(rk, "like"); t.then(paintRating); };
-    loveBtn.onclick = function () { var t = ratingToggle(rk, "love"); t.then(paintRating); };
-    ratingLoad(rk).then(paintRating);
-    likeBtn.appendChild(likeN); loveBtn.appendChild(loveN);
-    acts.appendChild(likeBtn); acts.appendChild(loveBtn); acts.appendChild(shareBtn);
-
     var streamBtn = h("button", "btn primary" + (unrel ? " disabled" : ""));
     streamBtn.innerHTML = ICON.play;
     var lbl = "Play";
