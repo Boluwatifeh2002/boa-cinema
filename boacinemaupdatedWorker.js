@@ -2340,6 +2340,29 @@ async function handleMessage(msg, env) {
           : `👥 <b>${n.toLocaleString("en-US")}</b> active member${n === 1 ? "" : "s"} in the last ${ACTIVE_DAYS} days.`
       );
     }
+    if (cmd === "/broadcast" && msg.from && ownerIds(env).includes(String(msg.from.id)) && msg.chat.type === "private") {
+      const body = arg.trim();
+      if (!body) return say(env, chatId, "Usage: /broadcast <message>");
+      const n = await activeUsers(env, true);
+      if (n === null) return say(env, chatId, "BOT_USERS isn't connected; can't broadcast.");
+      let sent = 0, fail = 0;
+      let cursor;
+      try {
+        for (let i = 0; i < 40; i++) {
+          const page = await env.BOT_USERS.list({ prefix: "u:", cursor });
+          for (const k of page.keys) {
+            const uid = String(k.name).slice(2);
+            try {
+              await tg(env, "sendMessage", { chat_id: Number(uid), text: "📢 <b>Boa Cinema update</b>\n\n" + esc(body), parse_mode: "HTML", disable_web_page_preview: true });
+              sent++;
+            } catch (e) { fail++; }
+          }
+          if (page.list_complete) break;
+          cursor = page.cursor;
+        }
+      } catch (e) {}
+      return say(env, chatId, `Broadcast sent: ${sent} delivered, ${fail} failed.`);
+    }
     if (cmd === "/book" || cmd === "/pdf") return handleBookSearch(env, chatId, arg, mid);
     if (cmd === "/song" || cmd === "/music") return handleSongSearch(env, chatId, arg, mid);
     if (cmd === "/random") {
@@ -3716,6 +3739,16 @@ body.lock #nav{display:none}
 .chip{background:var(--card);border-radius:999px;padding:8px 15px;font-size:13.5px;font-weight:600;color:#e4e4e7}
 .acts{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 16px}
 .btn{border:0;border-radius:12px;padding:13px 20px;font-size:15px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.rate{position:relative;padding:10px 14px;font-size:13px}
+.rate.on.like{color:#22c55e;border-color:#22c55e;background:rgba(34,197,94,.15)}
+.rate.on.love{color:#f43f5e;border-color:#f43f5e;background:rgba(244,63,94,.15)}
+.rate svg{width:16px;height:16px}
+.ratenc{margin-left:6px;font-weight:800;opacity:.9}
+.btn.share{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18)}
+.locked .ptop,.locked .pbot{pointer-events:none;opacity:.55!important}
+#lockoverlay{position:absolute;inset:0;z-index:2000;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;backdrop-filter:blur(6px)}
+#lockoverlay.on{display:flex}
+#lockoverlay .lockbtn{border:0;border-radius:999px;background:#fff;color:#000;font-weight:800;font-size:16px;padding:14px 34px;box-shadow:0 6px 20px rgba(0,0,0,.3)}
 .btn svg{width:18px;height:18px}
 .btn.primary{background:#fff;color:#000}
 .btn.ghost{background:#3a3a3e;color:#fff}
@@ -4847,6 +4880,44 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   var LIB = [];
   var timer = null, toastTimer = null;
   var segEl = document.getElementById("seg");
+
+  // Global engagement state (no payment/VIP gating)
+  var RATINGS = {};        // tmdbKey -> { like: n, love: n, mine: "" }
+  var RATLOAD = {};        // tmdbKey -> promise
+  var PUSH_SUB = null;     // push subscription object
+  var PUSH_READY = false;  // service worker supports push
+  var SW_REG = null;       // service worker registration
+  var SCREEN_LOCKED = false;
+
+  function ratingKey(d) { return String(d.mt || d.type) + ":" + String(d.id); }
+  function ratingDefault() { return { like: 0, love: 0, mine: "" }; }
+  function ratingLoad(k) {
+    if (RATLOAD[k]) return RATLOAD[k];
+    RATLOAD[k] = (function () {
+      var p = Promise.resolve().then(function () {
+        var raw = lsGet("boa_rating_" + k, null);
+        if (!raw) return ratingDefault();
+        try { var j = JSON.parse(raw); if (typeof j.like === "number" && typeof j.love === "number") return j; } catch (e) {}
+        return ratingDefault();
+      });
+      return p;
+    })();
+    return RATLOAD[k];
+  }
+  function ratingSave(k, v) {
+    RATINGS[k] = v;
+    try { lsSet("boa_rating_" + k, JSON.stringify(v)); } catch (e) {}
+    if (AT && cloud) { try { cloud.setItem("rating_" + k, JSON.stringify(v)); } catch (e) {} }
+  }
+  function ratingToggle(k, kind) {
+    ratingLoad(k).then(function (v) {
+      v = v || ratingDefault();
+      if (v.mine === kind) { v.mine = ""; v[kind] = Math.max(0, (v[kind] || 0) - 1); }
+      else { if (v.mine) { v[v.mine] = Math.max(0, (v[v.mine] || 0) - 1); } v.mine = kind; v[kind] = (v[kind] || 0) + 1; }
+      ratingSave(k, v);
+      return v;
+    });
+  }
 
   var ICON = {
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
@@ -7253,8 +7324,16 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
     if (ctx && ctx.mt === "tv") row2.appendChild(bEps);
     row2.appendChild(sp2);
     if (ctx && (ctx.mt === "movie" || ctx.mt === "tv")) row2.appendChild(bSet);
+    var bLock = h("button", "ptxt", "🔒"); bLock.type = "button"; bLock.setAttribute("aria-label", "Screen lock"); bLock.title = "Lock screen";
+    row2.insertBefore(bLock, row2.firstChild);
     bot.appendChild(row2);
     root.appendChild(bot);
+    var lockEl = h("div", "lockoverlay");
+    var lockBtn = h("button", "lockbtn", "Unlock Screen");
+    lockBtn.type = "button";
+    lockBtn.onclick = function () { setLock(false); };
+    lockEl.appendChild(lockBtn);
+    root.appendChild(lockEl);
     var fileIn = document.createElement("input");
     fileIn.type = "file"; fileIn.accept = ".srt,.vtt,text/vtt"; fileIn.style.display = "none";
     root.appendChild(fileIn);
@@ -8216,10 +8295,20 @@ var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio la
       if (CAN_VOL) vol.value = String(m ? 0 : v.volume);
     }
     v.addEventListener("volumechange", function () { if (CAN_VOL && !v.muted && v.volume > 0) lastVol = v.volume; paintVol(); });
-    bPlay.onclick = toggle;
-    bBack.onclick = function () { seekBy(-10); };
-    bFwd.onclick = function () { seekBy(10); };
-    bMute.onclick = function () {
+    function setLock(on) {
+      SCREEN_LOCKED = !!on;
+      root.classList.toggle("locked", SCREEN_LOCKED);
+      if (lockEl) lockEl.classList.toggle("on", SCREEN_LOCKED);
+      bLock.textContent = SCREEN_LOCKED ? "🔓" : "🔒";
+      bLock.title = SCREEN_LOCKED ? "Unlock screen" : "Lock screen";
+      toast(SCREEN_LOCKED ? "Screen locked" : "Screen unlocked");
+    }
+    bLock.onclick = function () { setLock(!SCREEN_LOCKED); };
+    function maybeLock() { if (SCREEN_LOCKED) return; }
+    bPlay.onclick = function (ev) { if (SCREEN_LOCKED) return; toggle(); };
+    bBack.onclick = function (ev) { if (SCREEN_LOCKED) return; seekBy(-10); };
+    bFwd.onclick = function (ev) { if (SCREEN_LOCKED) return; seekBy(10); };
+    bMute.onclick = function (ev) { if (SCREEN_LOCKED) return;
       if (isMuted()) { v.muted = false; if (CAN_VOL && v.volume === 0) v.volume = lastVol > 0 ? lastVol : 0.5; }   // unmuting from 0 restores a audible level
       else v.muted = true;
       paintVol();
@@ -10552,6 +10641,36 @@ $("smclose").onclick = function () {
     var acts = h("div", "acts");
     var unrel = isUnreleased(d);
     var wEnt = watchGet(d.mt, d.id);
+    var rk = ratingKey(d);
+    var shareBtn = h("button", "btn ghost");
+    shareBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="14" y1="2" x2="3" y2="2"></line><path d="M5 10v5c0 .6.4 1 1 1h3c.6 0 1-.4 1-1V5c0-.6-.4-1-1-1H2c-.6 0-1 .4-1 1v3c0 .6.4 1 1 1h3c.6 0 1-.4 1-1V6c0-.6-.4-1-1-1z"></path><path d="M17 14v3c0 .6.4 1 1 1h3c.6 0 1-.4 1-1v-3c0-.6-.4-1-1-1h-3c-.6 0-1 .4-1 1z"></path></svg>';
+    shareBtn.appendChild(document.createTextNode(" Share"));
+    shareBtn.onclick = function () {
+      var u = location.origin + "/?id=" + d.id + "&type=" + d.mt;
+      function doShare() { try { navigator.share({ title: d.t, url: u }); return; } catch (e) {} var t = document.createElement("textarea"); t.value = u; t.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(t); t.select(); try { document.execCommand("copy"); toast("Link copied"); } catch (e2) { toast("Could not copy link"); } t.remove(); }
+      if (tg && tg.share) { try { tg.share({ text: d.t, url: u }); return; } catch (e) {} }
+      doShare();
+    };
+    acts.appendChild(streamBtn);
+
+    var likeBtn = h("button", "btn ghost rate like");
+    likeBtn.type = "button";
+    var loveBtn = h("button", "btn ghost rate love");
+    loveBtn.type = "button";
+    var likeN = h("span", "ratenc", "0"), loveN = h("span", "ratenc", "0");
+    function paintRating(v) {
+      v = v || ratingDefault();
+      likeBtn.className = "btn ghost rate like" + (v.mine === "like" ? " on" : "");
+      loveBtn.className = "btn ghost rate love" + (v.mine === "love" ? " on" : "");
+      likeN.textContent = String(v.like || 0);
+      loveN.textContent = String(v.love || 0);
+    }
+    likeBtn.onclick = function () { var t = ratingToggle(rk, "like"); t.then(paintRating); };
+    loveBtn.onclick = function () { var t = ratingToggle(rk, "love"); t.then(paintRating); };
+    ratingLoad(rk).then(paintRating);
+    likeBtn.appendChild(likeN); loveBtn.appendChild(loveN);
+    acts.appendChild(likeBtn); acts.appendChild(loveBtn); acts.appendChild(shareBtn);
+
     var streamBtn = h("button", "btn primary" + (unrel ? " disabled" : ""));
     streamBtn.innerHTML = ICON.play;
     var lbl = "Play";
