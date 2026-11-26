@@ -3607,6 +3607,31 @@ body.lock #nav{display:none}
 .me .big img{width:100%;height:100%;object-fit:cover}
 .me h2{margin:14px 0 2px;font-size:22px;font-weight:800}
 .me p{margin:0;color:var(--muted);font-size:14px}
+
+/* Profile sections - Netflix-grade grouped cards */
+.me-section{margin:22px 16px 0;background:var(--card);border-radius:22px;overflow:hidden}
+.me-section-title{margin:0;padding:16px 16px 8px;font-size:13px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-align:left}
+.me-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:0 12px 16px}
+@media (max-width: 480px){.me-grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width: 380px){.me-grid{grid-template-columns:1fr}}
+.me-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px 14px;text-align:center;cursor:pointer;transition:background .15s,transform .12s,box-shadow .15s}
+.me-card:active{transform:scale(.97);background:rgba(255,255,255,.08)}
+.me-card:hover{background:rgba(255,255,255,.07)}
+.me-card.danger{background:rgba(239,68,68,.06);border-color:rgba(239,68,68,.15)}
+.me-card.danger:hover{background:rgba(239,68,68,.1)}
+.me-card-icon{font-size:28px;margin-bottom:8px;display:flex;justify-content:center;align-items:center}
+.me-card-icon .big{width:56px;height:56px;font-size:24px}
+.me-card-label{font-size:13px;font-weight:700;color:#fff;margin-bottom:2px;letter-spacing:-.01em}
+.me-card-value{font-size:12px;color:var(--muted);font-weight:500}
+.me-section-bottom{margin-bottom:calc(var(--sab) + 20px)}
+
+.libtabs{display:flex;gap:8px;overflow-x:auto;padding:0 16px 12px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.libtabs::-webkit-scrollbar{display:none}
+.libtabs .pill{flex:0 0 auto;white-space:nowrap}
+
+.dbadge{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:rgba(70,211,105,.9);color:#000;font-size:14px;font-weight:800;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.4);z-index:3}
+.dbadge[title]{cursor:help}
+
 .list{margin:22px 16px 0;background:var(--card);border-radius:22px;overflow:hidden}
 .li{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;border:0;background:none;padding:18px 18px;font-size:16px;font-weight:600;border-bottom:1px solid var(--line);text-align:left}
 .li:last-child{border-bottom:0}
@@ -4983,6 +5008,24 @@ body:has(#dlpg.open) #nav{display:none}
     return out;
   }
   function dlCount() { var n = 0; dlMine().forEach(function (x) { if (x.status === "done") n++; }); return n; }
+  function dlIsInLibrary(mt, id) {
+    var dls = dlMine();
+    for (var i = 0; i < dls.length; i++) {
+      if (dls[i].mt === mt && String(dls[i].tid) === String(id) && dls[i].status === "done") return true;
+    }
+    return false;
+  }
+  function dlFindByTitle(mt, id, title) {
+    var dls = dlMine();
+    for (var i = 0; i < dls.length; i++) {
+      if (dls[i].mt === mt && String(dls[i].tid) === String(id) && dls[i].status === "done") return dls[i];
+    }
+    // fallback by title
+    for (var i = 0; i < dls.length; i++) {
+      if (dls[i].status === "done" && dls[i].title.toLowerCase() === (title || "").toLowerCase()) return dls[i];
+    }
+    return null;
+  }
   function dlGate() {
     if (!dlOn()) return;
     dlEnsure().then(function () {
@@ -5920,7 +5963,7 @@ body:has(#dlpg.open) #nav{display:none}
     cb.onchange = function () { prev(); status(); };
     status();
   }
-  var LIBF = "all", LIBSORT = "recent", LIBEDIT = false;
+  var LIBF = "all", LIBSORT = "recent", LIBEDIT = false, LIBTAB = "list";
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
   function pById(id) { for (var i = 0; i < PROFILES.length; i++) if (PROFILES[i].id === id) return PROFILES[i]; return null; }
@@ -8673,6 +8716,12 @@ body:has(#dlpg.open) #nav{display:none}
     b.setAttribute("data-k", m.mt + "_" + m.id);
     if (opts.nolib) b.setAttribute("data-nl", "1");
     else if (libHas(m.mt, m.id)) p.appendChild(h("span", "inlib", "\u2713"));
+    if (opts.downloaded) {
+      var dlBadge = h("span", "dbadge");
+      dlBadge.textContent = "\u2713";
+      if (opts.dlSize) dlBadge.setAttribute("title", "Downloaded: " + opts.dlSize);
+      p.appendChild(dlBadge);
+    }
     var unrelC = isUnreleased(m);
     var plBadge = h("span", "pplay" + (unrelC ? " off" : ""));
     plBadge.innerHTML = ICON.play;
@@ -9125,53 +9174,96 @@ body:has(#dlpg.open) #nav{display:none}
 
     var cont = WATCH.filter(function (w) { return !w.nx; }).sort(function (a, b) { return (b.a || 0) - (a.a || 0); });
     var next = WATCH.filter(function (w) { return w.nx; }).sort(function (a, b) { return (b.a || 0) - (a.a || 0); });
-    if (cont.length) {
+
+    // Filter pills for Library sections
+    var libTabs = h("div", "libtabs");
+    var tabs = [
+      { id: "continue", label: "Continue Watching", count: cont.length },
+      { id: "next", label: "Watch Next", count: next.length },
+      { id: "list", label: "My List", count: LIB.length },
+      { id: "downloads", label: "Downloads", count: dlCount() }
+    ];
+    tabs.forEach(function (t) {
+      var active = LIBTAB === t.id;
+      var b = h("button", "pill" + (active ? " sel" : ""), t.label + (t.count ? " (" + t.count + ")" : ""));
+      b.onclick = function () { LIBTAB = t.id; renderLib(); };
+      libTabs.appendChild(b);
+    });
+    box.appendChild(libTabs);
+
+    if (LIBTAB === "continue" && cont.length) {
       var s1 = libSection("Continue Watching");
       var st1 = h("div", "strip");
       cont.forEach(function (o) { st1.appendChild(watchCard(o)); });
       s1.appendChild(st1);
       box.appendChild(s1);
     }
-    if (next.length) {
+    if (LIBTAB === "next" && next.length) {
       var s2 = libSection("Watch Next");
       var st2 = h("div", "strip");
       next.forEach(function (o) { st2.appendChild(watchCard(o)); });
       s2.appendChild(st2);
       box.appendChild(s2);
     }
-    var s3 = libSection("My List (" + LIB.length + ")");
-    var bar = h("div", "libbar");
-    [["all", "All"], ["movie", "Movies"], ["tv", "Series"]].forEach(function (f) {
-      var pb = h("button", "pill" + (LIBF === f[0] ? " sel" : ""), f[1]);
-      pb.onclick = function () { LIBF = f[0]; renderLib(); };
-      bar.appendChild(pb);
-    });
-    var sb = h("button", "pill", LIBSORT === "recent" ? "Recent" : "A–Z");
-    sb.onclick = function () { LIBSORT = LIBSORT === "recent" ? "az" : "recent"; renderLib(); };
-    bar.appendChild(sb);
-    var eb = h("button", "pill" + (LIBEDIT ? " sel" : ""), LIBEDIT ? "Done" : "Edit");
-    eb.onclick = function () { LIBEDIT = !LIBEDIT; renderLib(); };
-    bar.appendChild(eb);
-    s3.appendChild(bar);
-    var items = LIB.filter(function (o) { return LIBF === "all" || o.m === LIBF; });
-    items.sort(LIBSORT === "az" ? function (a, b) { return String(a.t).localeCompare(String(b.t)); } : function (a, b) { return (b.a || 0) - (a.a || 0); });
-    if (!items.length) {
-      s3.appendChild(h("div", "note center", LIB.length ? "Nothing here with this filter." : "Your list is empty. Open any title and tap + to save it here."));
-    } else {
-      var g = h("div", "grid");
-      items.forEach(function (o) {
-        var c = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true, nolib: true });
-        if (LIBEDIT) {
-          var x = h("button", "xbtn", "×");
-          x.setAttribute("aria-label", "Remove");
-          x.onclick = function (ev) { ev.stopPropagation(); libRemove(o.m, o.i); renderLib(); };
-          c.firstChild.appendChild(x);
-        }
-        g.appendChild(c);
+    if (LIBTAB === "list") {
+      var s3 = libSection("My List (" + LIB.length + ")");
+      var bar = h("div", "libbar");
+      [["all", "All"], ["movie", "Movies"], ["tv", "Series"]].forEach(function (f) {
+        var pb = h("button", "pill" + (LIBF === f[0] ? " sel" : ""), f[1]);
+        pb.onclick = function () { LIBF = f[0]; renderLib(); };
+        bar.appendChild(pb);
       });
-      s3.appendChild(g);
+      var sb = h("button", "pill", LIBSORT === "recent" ? "Recent" : "A–Z");
+      sb.onclick = function () { LIBSORT = LIBSORT === "recent" ? "az" : "recent"; renderLib(); };
+      bar.appendChild(sb);
+      var eb = h("button", "pill" + (LIBEDIT ? " sel" : ""), LIBEDIT ? "Done" : "Edit");
+      eb.onclick = function () { LIBEDIT = !LIBEDIT; renderLib(); };
+      bar.appendChild(eb);
+      s3.appendChild(bar);
+      var items = LIB.filter(function (o) { return LIBF === "all" || o.m === LIBF; });
+      items.sort(LIBSORT === "az" ? function (a, b) { return String(a.t).localeCompare(String(b.t)); } : function (a, b) { return (b.a || 0) - (a.a || 0); });
+      if (!items.length) {
+        s3.appendChild(h("div", "note center", LIB.length ? "Nothing here with this filter." : "Your list is empty. Open any title and tap + to save it here."));
+      } else {
+        var g = h("div", "grid");
+        items.forEach(function (o) {
+          var isDownloaded = dlIsInLibrary(o.m, o.i);
+          var c = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true, nolib: true, downloaded: isDownloaded });
+          if (LIBEDIT) {
+            var x = h("button", "xbtn", "×");
+            x.setAttribute("aria-label", "Remove");
+            x.onclick = function (ev) { ev.stopPropagation(); libRemove(o.m, o.i); renderLib(); };
+            c.firstChild.appendChild(x);
+          }
+          if (isDownloaded) {
+            c.onclick = function () {
+              var it = dlFindByTitle(o.m, o.i, o.t);
+              if (it && it.status === "done") { dlPlay(it); return; }
+              openTitle(o.m, o.i);
+            };
+          }
+          g.appendChild(c);
+        });
+        s3.appendChild(g);
+      }
+      box.appendChild(s3);
     }
-    box.appendChild(s3);
+    if (LIBTAB === "downloads") {
+      var s4 = libSection("Downloads (" + dlCount() + ")");
+      var dls = dlMine().filter(function (x) { return x.status === "done"; });
+      if (!dls.length) {
+        s4.appendChild(h("div", "note center", "No downloads yet. Open a title, pick a server and tap Save."));
+      } else {
+        var g = h("div", "grid");
+        dls.forEach(function (it) {
+          var c = makeCard({ id: it.tid, mt: it.mt, t: it.title, p: it.pimg ? "" : (it.meta && it.meta.p) || "", y: "" }, { badge: true, nolib: true, downloaded: true, dlSize: fmtB(it.total || it.bytes) });
+          c.onclick = function () { dlPlay(it); };
+          g.appendChild(c);
+        });
+        s4.appendChild(g);
+      }
+      box.appendChild(s4);
+    }
   }
   function renderMe() {
     var box = $("v-me");
@@ -9189,43 +9281,177 @@ body:has(#dlpg.open) #nav{display:none}
     wrap.appendChild(h("h2", null, name || "Boa Cinema"));
     wrap.appendChild(h("p", null, ACC ? (ACC.role === "admin" ? "Admin" : ACC.role === "moderator" ? "Moderator" : "Member") + (u && u.username ? " \u00b7 @" + u.username : "") : (u && u.username ? "@" + u.username : "Guest")));
     box.appendChild(wrap);
-    box.appendChild(acctCard());
+
+    // Account card for signed-in users
+    if (ACC) {
+      box.appendChild(acctCard());
+    }
+
+    // Install card for guests/PWA
     var icd = installCard();
     if (icd) box.appendChild(icd);
-    box.appendChild(themeCard());
-    var list = h("div", "list");
-    function item(label, val, fn, cls) {
-      var b = h("button", "li" + (cls ? " " + cls : ""), label);
-      if (val) b.appendChild(h("span", null, val));
-      b.onclick = fn;
-      list.appendChild(b);
+
+    // ---- Section 1: Account & Viewing ----
+    var sec1 = h("div", "me-section");
+    sec1.appendChild(h("h3", "me-section-title", "Account & Viewing"));
+    var grid1 = h("div", "me-grid");
+
+    // Profile avatar card
+    var profCard = h("div", "me-card");
+    profCard.appendChild(h("div", "me-card-icon", big.cloneNode(true)));
+    profCard.appendChild(h("div", "me-card-label", "Profile"));
+    profCard.appendChild(h("div", "me-card-value", curProfile().n));
+    profCard.onclick = function () { openProfiles(true); };
+    grid1.appendChild(profCard);
+
+    // Who's watching card
+    var whoCard = h("div", "me-card");
+    whoCard.appendChild(h("div", "me-card-icon", "\ud83d\udc64"));
+    whoCard.appendChild(h("div", "me-card-label", "Who's Watching"));
+    whoCard.appendChild(h("div", "me-card-value", curProfile().n));
+    whoCard.onclick = function () { openProfiles(true); };
+    grid1.appendChild(whoCard);
+
+    // Library card
+    var libCard = h("div", "me-card");
+    libCard.appendChild(h("div", "me-card-icon", "\ud83d\udcda"));
+    libCard.appendChild(h("div", "me-card-label", "Library"));
+    libCard.appendChild(h("div", "me-card-value", LIB.length + (LIB.length === 1 ? " title" : " titles")));
+    libCard.onclick = function () { showTab("lib"); };
+    grid1.appendChild(libCard);
+
+    // Your region card
+    if (myCC) {
+      var regCard = h("div", "me-card");
+      regCard.appendChild(h("div", "me-card-icon", "\ud83c\udf0d"));
+      regCard.appendChild(h("div", "me-card-label", "Your Region"));
+      regCard.appendChild(h("div", "me-card-value", flag(myCC) + " " + cname(myCC)));
+      grid1.appendChild(regCard);
     }
-    if (canWatch()) item("Who's watching", curProfile().n, function () { openProfiles(true); });
-    item("Library", canWatch() ? LIB.length + (LIB.length === 1 ? " title" : " titles") : "Sign in", function () { showTab("lib"); });
-    if (canWatch() && WATCH.length) item("Clear watch history", WATCH.length + "", function () { watchClear(); renderMe(); toast("History cleared"); }, "danger");
-    if (myCC) item("Your region", flag(myCC) + " " + cname(myCC), function () {});
-    item("Open the bot", "@Boa_entertainment_bot", function () {
+
+    sec1.appendChild(grid1);
+    box.appendChild(sec1);
+
+    // ---- Section 2: Appearance ----
+    var sec2 = h("div", "me-section");
+    sec2.appendChild(h("h3", "me-section-title", "Appearance"));
+    sec2.appendChild(themeCard());
+    box.appendChild(sec2);
+
+    // ---- Section 3: Media & Bot / Add-ons ----
+    var sec3 = h("div", "me-section");
+    sec3.appendChild(h("h3", "me-section-title", "Media & Bot / Add-ons"));
+    var grid3 = h("div", "me-grid");
+
+    // Open the bot
+    var botCard = h("div", "me-card");
+    botCard.appendChild(h("div", "me-card-icon", "\ud83e\udd16"));
+    botCard.appendChild(h("div", "me-card-label", "Open the Bot"));
+    botCard.appendChild(h("div", "me-card-value", "@Boa_entertainment_bot"));
+    botCard.onclick = function () {
       var url = "https://t.me/Boa_entertainment_bot";
       if (tg && tg.openTelegramLink) { try { tg.openTelegramLink(url); return; } catch (e) {} }
       openLink(url);
-    });
-    if (dlOn()) item("Downloads", dlCount() + " saved", function () { openDL("list"); });
-    if (dlAdmin()) item("Download dashboard", "Admin", function () { openDL("dash"); });
-    if (IS_OWNER) item("Owner panel", "Only you", openAdmin);
-    item("Get the add-on", "Stremio style", function () { openLink(location.origin + "/addon"); });
-    if (LIB.length) item("Clear library", "", function () {
-      function wipe() {
-        if (cloud) { LIB.forEach(function (o) { try { cloud.removeItem(libKey(o.m, o.i)); } catch (e) {} }); }
-        watchClear();
-        LIB = [];
-        libSaveLocal();
-        renderMe();
-        toast("Library cleared");
+    };
+    grid3.appendChild(botCard);
+
+    // Downloads shortcut
+    if (dlOn()) {
+      var dlCard = h("div", "me-card");
+      dlCard.appendChild(h("div", "me-card-icon", "\u2b07\ufe0f"));
+      dlCard.appendChild(h("div", "me-card-label", "Downloads"));
+      dlCard.appendChild(h("div", "me-card-value", dlCount() + " saved"));
+      dlCard.onclick = function () { openDL("list"); };
+      grid3.appendChild(dlCard);
+    }
+
+    // Download dashboard (admin)
+    if (dlAdmin()) {
+      var dashCard = h("div", "me-card");
+      dashCard.appendChild(h("div", "me-card-icon", "\ud83d\udcca"));
+      dashCard.appendChild(h("div", "me-card-label", "Download Dashboard"));
+      dashCard.appendChild(h("div", "me-card-value", "Admin"));
+      dashCard.onclick = function () { openDL("dash"); };
+      grid3.appendChild(dashCard);
+    }
+
+    // Get the add-on
+    var addonCard = h("div", "me-card");
+    addonCard.appendChild(h("div", "me-card-icon", "\ud83e\udde9"));
+    addonCard.appendChild(h("div", "me-card-label", "Get the Add-on"));
+    addonCard.appendChild(h("div", "me-card-value", "Stremio style"));
+    addonCard.onclick = function () { openLink(location.origin + "/addon"); };
+    grid3.appendChild(addonCard);
+
+    // Owner panel
+    if (IS_OWNER) {
+      var ownerCard = h("div", "me-card");
+      ownerCard.appendChild(h("div", "me-card-icon", "\ud83d\udc51"));
+      ownerCard.appendChild(h("div", "me-card-label", "Owner Panel"));
+      ownerCard.appendChild(h("div", "me-card-value", "Only you"));
+      ownerCard.onclick = openAdmin;
+      grid3.appendChild(ownerCard);
+    }
+
+    sec3.appendChild(grid3);
+    box.appendChild(sec3);
+
+    // ---- Section 4: Data & Session (bottom-anchored) ----
+    var sec4 = h("div", "me-section me-section-bottom");
+    sec4.appendChild(h("h3", "me-section-title", "Data & Session"));
+    var grid4 = h("div", "me-grid");
+
+    // Clear watch history
+    if (canWatch() && WATCH.length) {
+      var histCard = h("div", "me-card danger");
+      histCard.appendChild(h("div", "me-card-icon", "\ud83d\uddd1\ufe0f"));
+      histCard.appendChild(h("div", "me-card-label", "Clear Watch History"));
+      histCard.appendChild(h("div", "me-card-value", WATCH.length + " items"));
+      histCard.onclick = function () {
+        watchClear(); renderMe(); toast("History cleared");
+      };
+      grid4.appendChild(histCard);
+    }
+
+    // Clear library
+    if (LIB.length) {
+      var libClearCard = h("div", "me-card danger");
+      libClearCard.appendChild(h("div", "me-card-icon", "\ud83d\uddd1\ufe0f"));
+      libClearCard.appendChild(h("div", "me-card-label", "Clear Library"));
+      libClearCard.appendChild(h("div", "me-card-value", LIB.length + " titles"));
+      libClearCard.onclick = function () {
+        function wipe() {
+          if (cloud) { LIB.forEach(function (o) { try { cloud.removeItem(libKey(o.m, o.i)); } catch (e) {} }); }
+          watchClear();
+          LIB = [];
+          libSaveLocal();
+          renderMe();
+          toast("Library cleared");
+        }
+        if (tg && tg.showConfirm) { try { tg.showConfirm("Remove every saved title?", function (ok) { if (ok) wipe(); }); return; } catch (e) {} }
+        if (window.confirm("Remove every saved title?")) wipe();
+      };
+      grid4.appendChild(libClearCard);
+    }
+
+    // Sign out / Sign in
+    var authCard = h("div", "me-card" + (ACC ? " danger" : ""));
+    authCard.appendChild(h("div", "me-card-icon", ACC ? "\ud83d\udeaa" : "\ud83d\udd10"));
+    authCard.appendChild(h("div", "me-card-label", ACC ? "Sign Out" : "Sign In"));
+    authCard.appendChild(h("div", "me-card-value", ACC ? "" : "Create account to sync"));
+    authCard.onclick = function () {
+      if (ACC) {
+        acctDrop(false); toast("Signed out");
+      } else {
+        openAuth("login");
       }
-      if (tg && tg.showConfirm) { try { tg.showConfirm("Remove every saved title?", function (ok) { if (ok) wipe(); }); return; } catch (e) {} }
-      if (window.confirm("Remove every saved title?")) wipe();
-    }, "danger");
-    box.appendChild(list);
+    };
+    grid4.appendChild(authCard);
+
+    sec4.appendChild(grid4);
+    box.appendChild(sec4);
+
+    // Footer
     var f = h("footer");
     f.appendChild(h("p", null, "Movie data and images by TMDB. Streaming availability by JustWatch. This product uses the TMDB API but is not endorsed or certified by TMDB. Boa Entertainment is a discovery platform and does not host or stream any media. Netflix is a trademark of Netflix, Inc. Boa Entertainment is not affiliated with Netflix."));
     box.appendChild(f);
