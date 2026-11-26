@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-26.63";
+const APP_VERSION = "2026-11-26.64";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1757,6 +1757,9 @@ async function authSetup(env) {
     env.DB.prepare("CREATE TABLE IF NOT EXISTS kv (uid TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, u INTEGER NOT NULL, PRIMARY KEY (uid, k))"),
     // Moderation (v2.0): one row per sanctioned account, plus an audit log. Written only when staff act or a user appeals.
     env.DB.prepare("CREATE TABLE IF NOT EXISTS sanctions (uid TEXT PRIMARY KEY, email TEXT, status TEXT NOT NULL DEFAULT 'active', until INTEGER, reason TEXT, note TEXT, warns INTEGER NOT NULL DEFAULT 0, warn_note TEXT, warn_at INTEGER, ack_at INTEGER, appeal TEXT, appeal_at INTEGER, by TEXT, at INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS wall_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, parent INTEGER NOT NULL DEFAULT 0, uid TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open', replies INTEGER NOT NULL DEFAULT 0)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS wall_idx ON wall_posts (parent, id)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS wall_rep (post INTEGER NOT NULL, uid TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (post, uid))"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS modlog (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, arole TEXT NOT NULL, uid TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL, reason TEXT, note TEXT)"),
   ]);
   authReady = true;
@@ -1834,6 +1837,85 @@ async function authHandle(request, url, env) {
         env.DB.prepare("INSERT INTO modlog (at,actor,arole,uid,target,action,reason,note) VALUES (?,?,?,?,?,?,?,?)").bind(now, me.email, "user", uid, me.email, "appeal", "", text.slice(0, 200)),
       ]);
       return authJson({ ok: true });
+    }
+    if (path.indexOf("/api/acct/wall/") === 0) {
+      // Community wall (v2.0): text only, one level of replies, own tables, never touches streaming. Hidden = removed from view by reports or staff.
+      const wm = await env.DB.prepare("SELECT u.name AS name, u.email AS email, s.status AS status, s.until AS until FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE u.id = ?").bind(uid).first();
+      if (!wm) return authJson({ error: "Account not found." }, 401);
+      const staff = roleFor(env, wm.email) !== "user", wsn = staff ? "active" : sanctionNow(wm);
+      if (wsn === "suspended" || wsn === "blocked") return authJson({ error: "Your account is suspended.", suspended: true }, 403);
+      const meOut = { staff: staff, muted: wsn === "muted", name: wm.name };
+      const hid = staff ? "(0,1)" : "(0)";
+      const map = (r) => ({ id: r.id, name: r.name, body: r.body, at: r.at, hidden: r.hidden === 1, status: r.status, replies: r.replies || 0, mine: r.uid === uid, staff: roleFor(env, r.email) !== "user" });
+      const pid = parseInt(body.id, 10) || 0;
+      if (path === "/api/acct/wall/list") {
+        const before = parseInt(body.before, 10) || 0, f = body.filter === "open" || body.filter === "resolved" ? body.filter : "";
+        const rows = await env.DB.prepare("SELECT p.id AS id, p.uid AS uid, p.name AS name, p.body AS body, p.at AS at, p.hidden AS hidden, p.status AS status, p.replies AS replies, u.email AS email FROM wall_posts p LEFT JOIN users u ON u.id = p.uid WHERE p.parent = 0 AND p.hidden IN " + hid + (f ? " AND p.status = ?" : "") + (before ? " AND p.id < ?" : "") + " ORDER BY p.id DESC LIMIT 21").bind(...(f ? [f] : []), ...(before ? [before] : [])).all();
+        const list = rows.results || [];
+        return authJson({ me: meOut, posts: list.slice(0, 20).map(map), more: list.length > 20 });
+      }
+      if (path === "/api/acct/wall/thread") {
+        const p = await env.DB.prepare("SELECT p.id AS id, p.uid AS uid, p.name AS name, p.body AS body, p.at AS at, p.hidden AS hidden, p.status AS status, p.replies AS replies, u.email AS email FROM wall_posts p LEFT JOIN users u ON u.id = p.uid WHERE p.id = ? AND p.parent = 0 AND p.hidden IN " + hid).bind(pid).first();
+        if (!p) return authJson({ error: "That post is no longer available." }, 404);
+        const rr = await env.DB.prepare("SELECT p.id AS id, p.uid AS uid, p.name AS name, p.body AS body, p.at AS at, p.hidden AS hidden, p.status AS status, p.replies AS replies, u.email AS email FROM wall_posts p LEFT JOIN users u ON u.id = p.uid WHERE p.parent = ? AND p.hidden IN " + hid + " ORDER BY p.id ASC LIMIT 100").bind(pid).all();
+        return authJson({ me: meOut, post: map(p), replies: (rr.results || []).map(map) });
+      }
+      if (path === "/api/acct/wall/post" && request.method === "POST") {
+        if (meOut.muted) return authJson({ error: "You are muted right now, so you can read but not post." }, 403);
+        const text = String(body.text || "").replace(/[\u0000-\u0009\u000b-\u001f<>]/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 500);
+        if (text.length < 3) return authJson({ error: "Write a little more." }, 400);
+        if (/https?:|www\.|\bt\.me\b|\b[a-z0-9-]{2,}\.(com|net|org|io|xyz|ru|tk|ly|me|co|app|link|click|info|biz)\b/i.test(text)) return authJson({ error: "Links aren't allowed on the wall." }, 400);
+        const parent = parseInt(body.parent, 10) || 0, now = Date.now();
+        if (parent) {
+          const pp = await env.DB.prepare("SELECT id FROM wall_posts WHERE id = ? AND parent = 0 AND hidden IN " + hid).bind(parent).first();
+          if (!pp) return authJson({ error: "That post is no longer available." }, 404);
+        }
+        if (!staff) {
+          const last = await env.DB.prepare("SELECT MAX(at) AS t FROM wall_posts WHERE uid = ?").bind(uid).first();
+          if (last && last.t && now - Number(last.t) < 20000) return authJson({ error: "Slow down a little. Try again in a few seconds." }, 429);
+          const dup = await env.DB.prepare("SELECT id FROM wall_posts WHERE uid = ? AND body = ? AND at > ? LIMIT 1").bind(uid, text, now - 600000).first();
+          if (dup) return authJson({ error: "You already posted that." }, 429);
+          if (parent) {
+            const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wall_posts WHERE uid = ? AND parent > 0 AND at > ?").bind(uid, now - 3600000).first();
+            if (c && c.n >= 20) return authJson({ error: "That's a lot of replies. Please try again later." }, 429);
+          } else {
+            const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wall_posts WHERE uid = ? AND parent = 0 AND at > ?").bind(uid, now - 86400000).first();
+            if (c && c.n >= 3) return authJson({ error: "You can start 3 posts a day. You can still reply to others." }, 429);
+          }
+        }
+        const st = [env.DB.prepare("INSERT INTO wall_posts (parent,uid,name,body,at) VALUES (?,?,?,?,?)").bind(parent, uid, wm.name, text, now)];
+        if (parent) st.push(env.DB.prepare("UPDATE wall_posts SET replies = replies + 1 WHERE id = ?").bind(parent));
+        await env.DB.batch(st);
+        return authJson({ ok: true });
+      }
+      if (path === "/api/acct/wall/report" && request.method === "POST") {
+        const p = await env.DB.prepare("SELECT id, uid, hidden FROM wall_posts WHERE id = ?").bind(pid).first();
+        if (!p || p.hidden === 2) return authJson({ error: "That post is no longer available." }, 404);
+        if (p.uid === uid) return authJson({ error: "You can't report your own post." }, 400);
+        await env.DB.prepare("INSERT OR IGNORE INTO wall_rep (post, uid, at) VALUES (?,?,?)").bind(pid, uid, Date.now()).run();
+        const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM wall_rep WHERE post = ?").bind(pid).first();
+        if (n && n.n >= 3 && p.hidden === 0) await env.DB.prepare("UPDATE wall_posts SET hidden = 1 WHERE id = ? AND hidden = 0").bind(pid).run();
+        return authJson({ ok: true });
+      }
+      if (path === "/api/acct/wall/del" && request.method === "POST") {
+        const r = await env.DB.prepare("UPDATE wall_posts SET hidden = 2 WHERE id = ? AND uid = ? AND hidden != 2").bind(pid, uid).run();
+        return authJson({ ok: true });
+      }
+      if (path === "/api/acct/wall/mod" && request.method === "POST") {
+        if (!staff) return authJson({ error: "Staff only." }, 403);
+        const op = String(body.op || ""), p = await env.DB.prepare("SELECT p.id AS id, p.uid AS uid, p.parent AS parent, p.body AS body, p.hidden AS hidden, u.email AS email FROM wall_posts p LEFT JOIN users u ON u.id = p.uid WHERE p.id = ?").bind(pid).first();
+        if (!p || p.hidden === 2) return authJson({ error: "That post is no longer available." }, 404);
+        const now = Date.now(), st = [];
+        if (op === "hide") st.push(env.DB.prepare("UPDATE wall_posts SET hidden = 1 WHERE id = ? AND hidden = 0").bind(pid));
+        else if (op === "unhide") { st.push(env.DB.prepare("UPDATE wall_posts SET hidden = 0 WHERE id = ? AND hidden = 1").bind(pid)); st.push(env.DB.prepare("DELETE FROM wall_rep WHERE post = ?").bind(pid)); }
+        else if (op === "resolve" && !p.parent) st.push(env.DB.prepare("UPDATE wall_posts SET status = 'resolved' WHERE id = ?").bind(pid));
+        else if (op === "reopen" && !p.parent) st.push(env.DB.prepare("UPDATE wall_posts SET status = 'open' WHERE id = ?").bind(pid));
+        else return authJson({ error: "Unknown action." }, 400);
+        if (op === "hide" || op === "unhide") st.push(env.DB.prepare("INSERT INTO modlog (at,actor,arole,uid,target,action,reason,note) VALUES (?,?,?,?,?,?,?,?)").bind(now, wm.email, roleFor(env, wm.email), p.uid, p.email || "", "wall " + op + " #" + pid, "", String(p.body).slice(0, 120)));
+        await env.DB.batch(st);
+        return authJson({ ok: true });
+      }
+      return authJson({ error: "Not found" }, 404);
     }
     if (path.indexOf("/api/acct/mod/") === 0) {
       const mu = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(uid).first();
@@ -1987,6 +2069,10 @@ async function watchGate(request, url, env) {
     if (!DOWNLOAD_RELAY_FOR_USERS) return authJson({ error: "direct only" }, 403);
   }
   return null;
+}
+const WALL_HTML = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=\"robots\" content=\"noindex\"><meta name=\"theme-color\" content=\"#0a0a0a\"><title>Community Wall \u00b7 Boa Cinema</title>\n<style>\n:root{--a:#e50914;--ar:229,9,20;--oa:#fff;--bg:#0a0a0a;--card:rgba(255,255,255,.06);--line:rgba(255,255,255,.1);--mut:#a1a1aa}\n*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}\nbody{margin:0;background:var(--bg);color:#e4e4e7;font:15px/1.5 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;padding:max(14px,env(safe-area-inset-top)) 14px calc(40px + env(safe-area-inset-bottom))}\nbody.amoled{background:#000}\nmain{max-width:640px;margin:0 auto}\n.top{display:flex;align-items:center;gap:10px;padding:4px 2px 12px}\n.top a,.top button.back{color:#fff;text-decoration:none;border:1px solid var(--line);background:rgba(255,255,255,.08);border-radius:999px;padding:8px 14px;font:inherit;font-size:13px;font-weight:700}\n.top b{font-size:22px;color:#fff;flex:1}\n.rules{padding:11px 13px;border-radius:14px;background:rgba(var(--ar),.1);border:1px solid rgba(var(--ar),.28);color:#d4d4d8;font-size:13px;margin:0 0 12px}\n.box{border-radius:18px;background:var(--card);border:1px solid var(--line);padding:12px;margin:0 0 12px}\ntextarea{width:100%;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:12px;color:#fff;font:inherit;font-size:15px;padding:11px;resize:none;min-height:84px}\n.row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px}\n.cnt{font-size:12px;color:var(--mut)}\n.pri{border:0;border-radius:999px;background:var(--a);color:var(--oa);font:inherit;font-weight:800;font-size:14px;padding:11px 22px}\n.pri:disabled{opacity:.5}\n.pills{display:flex;gap:8px;margin:0 0 12px;overflow-x:auto;scrollbar-width:none}\n.pill{flex:none;border:1px solid var(--line);background:rgba(255,255,255,.06);color:#fff;border-radius:999px;padding:8px 15px;font:inherit;font-size:13px;font-weight:700}\n.pill.sel{background:var(--a);color:var(--oa);border-color:transparent}\n.post{border-radius:18px;background:var(--card);border:1px solid var(--line);padding:13px 14px;margin:0 0 10px}\n.post.rep{margin-left:14px;background:rgba(255,255,255,.04)}\n.post.hid{opacity:.6;border-style:dashed}\n.ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}\n.ph b{color:#fff;font-size:14px}\n.ph span.t{font-size:12px;color:var(--mut)}\n.tag{font-size:10.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}\n.tag.st{color:#fff;background:var(--a);border-color:transparent}\n.tag.ok{color:#46d369;border-color:rgba(70,211,105,.4)}\n.tag.hd{color:#fbbf24;border-color:rgba(251,191,36,.4)}\n.bd{white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;color:#e4e4e7;margin:0 0 8px;font-size:15px}\n.acts{display:flex;gap:6px;flex-wrap:wrap}\n.acts button{border:0;background:rgba(255,255,255,.07);color:#d4d4d8;border-radius:999px;font:inherit;font-size:12.5px;font-weight:700;padding:7px 12px}\n.acts button.d{color:#ff6b6b}\n.note{padding:26px 10px;text-align:center;color:var(--mut)}\n.err{color:#ff6b6b;font-size:13px;margin:6px 0 0}\n.more{display:block;width:100%;margin:6px 0 0;padding:13px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.06);color:#fff;font:inherit;font-weight:700}\n#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);background:rgba(30,30,34,.96);color:#fff;border:1px solid var(--line);padding:10px 16px;border-radius:999px;font-size:13px;font-weight:700;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90%;text-align:center}\n#toast.on{opacity:1}\n</style></head><body><main id=\"app\"><div class=\"note\">Loading...</div></main><div id=\"toast\"></div>\n<script>\n(function () {\n  var TOK = \"\", ME = { staff: false, muted: false, name: \"\" }, filter = \"all\", view = \"list\", posts = [], more = false, openId = 0;\n  try { TOK = localStorage.getItem(\"boa_tok\") || \"\"; } catch (e) {}\n  function $(i) { return document.getElementById(i); }\n  function h(t, c, x) { var e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; }\n  var TH = { crimson: [\"#e50914\", \"229,9,20\", \"#fff\"], white: [\"#ffffff\", \"255,255,255\", \"#000\"], ocean: [\"#0ea5e9\", \"14,165,233\", \"#fff\"], emerald: [\"#10b981\", \"16,185,129\", \"#fff\"] };\n  try {\n    var t = localStorage.getItem(\"boa_theme\") || \"crimson\", c = TH[t] || TH.crimson;\n    if (t === \"custom\") {\n      var hx = localStorage.getItem(\"boa_custom\") || \"#e50914\", m = /^#?([0-9a-f]{6})$/i.exec(hx), n = parseInt(m ? m[1] : \"e50914\", 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;\n      c = [\"#\" + (m ? m[1] : \"e50914\"), r + \",\" + g + \",\" + b, (r * 299 + g * 587 + b * 114) / 1000 > 150 ? \"#000\" : \"#fff\"];\n    }\n    var st = document.documentElement.style; st.setProperty(\"--a\", c[0]); st.setProperty(\"--ar\", c[1]); st.setProperty(\"--oa\", c[2]);\n    if (localStorage.getItem(\"boa_amoled\") === \"1\") document.body.className = \"amoled\";\n  } catch (e) {}\n  var tt = 0;\n  function toast(x) { var e = $(\"toast\"); e.textContent = x; e.className = \"on\"; clearTimeout(tt); tt = setTimeout(function () { e.className = \"\"; }, 2600); }\n  function api(path, body, cb) {\n    fetch(path, { method: \"POST\", headers: { \"content-type\": \"application/json\", authorization: \"Bearer \" + TOK }, body: JSON.stringify(body || {}) })\n      .then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j || {} }; }, function () { return { s: r.status, j: {} }; }); })\n      .then(function (x) { if (x.s >= 200 && x.s < 300) cb(null, x.j); else cb({ s: x.s, m: x.j.error || \"Something went wrong.\", sus: !!x.j.suspended }, null); }, function () { cb({ s: 0, m: \"No connection. Check your internet and try again.\" }, null); });\n  }\n  function ago(ms) {\n    var s = Math.max(1, Math.round((Date.now() - ms) / 1000));\n    if (s < 60) return \"just now\"; var m = Math.round(s / 60); if (m < 60) return m + \"m ago\";\n    var hh = Math.round(m / 60); if (hh < 24) return hh + \"h ago\"; var d = Math.round(hh / 24); if (d < 30) return d + \"d ago\";\n    try { return new Date(ms).toLocaleDateString(undefined, { day: \"numeric\", month: \"short\" }); } catch (e) { return \"\"; }\n  }\n  var app = $(\"app\");\n  function shell(title, backFn) {\n    app.textContent = \"\";\n    var top = h(\"div\", \"top\");\n    if (backFn) { var bb = h(\"button\", \"back\", \"\u2190 Back\"); bb.type = \"button\"; bb.onclick = backFn; top.appendChild(bb); }\n    else { var a = h(\"a\", null, \"\u2190 Boa Cinema\"); a.href = \"/app\"; top.appendChild(a); }\n    top.appendChild(h(\"b\", null, title));\n    app.appendChild(top);\n  }\n  function blocked(msg, withApp) {\n    shell(\"Community Wall\");\n    var n = h(\"div\", \"note\", msg); app.appendChild(n);\n    if (withApp) { var a = h(\"a\", \"pri\", \"Open Boa Cinema\"); a.href = \"/app\"; a.style.cssText = \"display:block;text-align:center;text-decoration:none;margin:10px auto;max-width:260px\"; app.appendChild(a); }\n  }\n  function fail(e) {\n    if (e.s === 401) return blocked(\"Please sign in to Boa Cinema first, then come back to the wall.\", true);\n    if (e.sus) return blocked(\"Your account is suspended, so the wall is closed for now. Open Boa Cinema to read why and to appeal.\", true);\n    toast(e.m);\n  }\n  function composer(parent, onDone) {\n    var box = h(\"div\", \"box\");\n    if (ME.muted) { box.appendChild(h(\"div\", \"note\", \"You are muted right now, so you can read but not post.\")); box.firstChild.style.padding = \"8px\"; return box; }\n    var ta = document.createElement(\"textarea\"); ta.maxLength = 500; ta.placeholder = parent ? \"Write a reply\" : \"Share a problem or an idea\";\n    box.appendChild(ta);\n    var row = h(\"div\", \"row\"), cnt = h(\"span\", \"cnt\", \"0 / 500\"), go = h(\"button\", \"pri\", parent ? \"Reply\" : \"Post\"); go.type = \"button\";\n    row.appendChild(cnt); row.appendChild(go); box.appendChild(row);\n    var er = h(\"div\", \"err\", \"\"); box.appendChild(er);\n    ta.oninput = function () { cnt.textContent = ta.value.length + \" / 500\"; };\n    go.onclick = function () {\n      var v = ta.value.trim(); er.textContent = \"\";\n      if (v.length < 3) { er.textContent = \"Write a little more.\"; return; }\n      go.disabled = true; go.textContent = \"Sending...\";\n      api(\"/api/acct/wall/post\", { parent: parent || 0, text: v }, function (e) {\n        go.disabled = false; go.textContent = parent ? \"Reply\" : \"Post\";\n        if (e) { if (e.s === 401 || e.sus) return fail(e); er.textContent = e.m; return; }\n        ta.value = \"\"; cnt.textContent = \"0 / 500\"; toast(parent ? \"Reply sent\" : \"Posted\"); onDone();\n      });\n    };\n    return box;\n  }\n  function card(p, isReply, refresh) {\n    var c = h(\"div\", \"post\" + (isReply ? \" rep\" : \"\") + (p.hidden ? \" hid\" : \"\"));\n    var hd = h(\"div\", \"ph\"); hd.appendChild(h(\"b\", null, p.name || \"Member\"));\n    if (p.staff) hd.appendChild(h(\"span\", \"tag st\", \"Staff\"));\n    if (p.status === \"resolved\" && !isReply) hd.appendChild(h(\"span\", \"tag ok\", \"Resolved\"));\n    if (p.hidden) hd.appendChild(h(\"span\", \"tag hd\", \"Hidden\"));\n    hd.appendChild(h(\"span\", \"t\", ago(p.at))); c.appendChild(hd);\n    c.appendChild(h(\"p\", \"bd\", p.body));\n    var ac = h(\"div\", \"acts\");\n    function btn(txt, cls, fn) { var b = h(\"button\", cls || \"\", txt); b.type = \"button\"; b.onclick = function (ev) { ev.stopPropagation(); fn(b); }; ac.appendChild(b); }\n    if (!isReply && view === \"list\") btn(\"Reply\" + (p.replies ? \" \u00b7 \" + p.replies : \"\"), \"\", function () { openThread(p.id); });\n    if (!p.mine) btn(\"Report\", \"\", function (b) { api(\"/api/acct/wall/report\", { id: p.id }, function (e) { if (e) return fail(e); b.textContent = \"Reported\"; b.disabled = true; toast(\"Thanks. A moderator will take a look.\"); }); });\n    if (p.mine) btn(\"Delete\", \"d\", function () { if (!window.confirm(\"Delete this post?\")) return; api(\"/api/acct/wall/del\", { id: p.id }, function (e) { if (e) return fail(e); toast(\"Deleted\"); if (!isReply && view === \"thread\") { loadList(true); } else refresh(); }); });\n    if (ME.staff) {\n      btn(p.hidden ? \"Unhide\" : \"Hide\", \"\", function () { api(\"/api/acct/wall/mod\", { id: p.id, op: p.hidden ? \"unhide\" : \"hide\" }, function (e) { if (e) return fail(e); refresh(); }); });\n      if (!isReply) btn(p.status === \"resolved\" ? \"Reopen\" : \"Resolve\", \"\", function () { api(\"/api/acct/wall/mod\", { id: p.id, op: p.status === \"resolved\" ? \"reopen\" : \"resolve\" }, function (e) { if (e) return fail(e); refresh(); }); });\n    }\n    c.appendChild(ac);\n    return c;\n  }\n  function loadList(reset) {\n    if (reset) { view = \"list\"; posts = []; more = false; }\n    api(\"/api/acct/wall/list\", { filter: filter, before: posts.length ? posts[posts.length - 1].id : 0 }, function (e, j) {\n      if (e) return fail(e);\n      ME = j.me || ME; posts = posts.concat(j.posts || []); more = !!j.more; drawList();\n    });\n  }\n  function drawList() {\n    shell(\"Community Wall\");\n    app.appendChild(h(\"div\", \"rules\", \"Share problems or ideas, and help each other. Be kind. Text only: no links or images. Staff reply here.\"));\n    app.appendChild(composer(0, function () { loadList(true); }));\n    var pl = h(\"div\", \"pills\");\n    [[\"all\", \"All\"], [\"open\", \"Open\"], [\"resolved\", \"Resolved\"]].forEach(function (f) {\n      var b = h(\"button\", \"pill\" + (filter === f[0] ? \" sel\" : \"\"), f[1]); b.type = \"button\";\n      b.onclick = function () { filter = f[0]; loadList(true); }; pl.appendChild(b);\n    });\n    app.appendChild(pl);\n    if (!posts.length) app.appendChild(h(\"div\", \"note\", \"Nothing here yet. Be the first to post.\"));\n    posts.forEach(function (p) {\n      var c = card(p, false, function () { loadList(true); });\n      c.onclick = function () { openThread(p.id); }; c.style.cursor = \"pointer\";\n      app.appendChild(c);\n    });\n    if (more) { var mb = h(\"button\", \"more\", \"Load more\"); mb.type = \"button\"; mb.onclick = function () { loadList(false); }; app.appendChild(mb); }\n  }\n  function openThread(id) {\n    openId = id; view = \"thread\";\n    api(\"/api/acct/wall/thread\", { id: id }, function (e, j) {\n      if (e) { view = \"list\"; return fail(e); }\n      ME = j.me || ME;\n      shell(\"Thread\", function () { loadList(true); });\n      app.appendChild(card(j.post, false, function () { openThread(id); }));\n      var rl = h(\"div\", \"\"); app.appendChild(rl);\n      if (!(j.replies || []).length) rl.appendChild(h(\"div\", \"note\", \"No replies yet.\"));\n      (j.replies || []).forEach(function (r) { rl.appendChild(card(r, true, function () { openThread(id); })); });\n      app.appendChild(composer(id, function () { openThread(id); }));\n    });\n  }\n  if (!TOK) blocked(\"Please sign in to Boa Cinema first, then come back to the wall.\", true);\n  else loadList(true);\n})();\n</script></body></html>\n";
+function wallPage() {
+  return new Response(WALL_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
 }
 function legalPage(kind) {
   const priv = kind === "privacy";
@@ -9667,6 +9753,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     });
     if (dlOn()) item(l3, "Downloads", dlCount() + " saved", function () { LIBVIEW = "dl"; showTab("lib"); });
     if (dlAdmin()) item(l3, "Download dashboard", "Admin", function () { openDL("dash"); });
+    if (ACC && ACC.role !== "blocked") item(l3, "Community wall", "Share & reply", function () { location.href = "/wall"; });
     if (isStaff()) item(l3, "Moderation", ACC.role === "admin" ? "Admin" : "Moderator", openMod);
     if (IS_OWNER) item(l3, "Owner panel", "Only you", openAdmin);
     item(l3, "Get the add-on", "Stremio style", function () { openLink(location.origin + "/addon"); });
@@ -13679,6 +13766,7 @@ export default {
       if (addonRes) return addonRes;
       { const pw = pwaResponse(url.pathname); if (pw) return pw; }
       if (url.pathname === "/privacy" || url.pathname === "/terms") return legalPage(url.pathname.slice(1));
+      if (url.pathname === "/wall") return wallPage();
       if (url.pathname === "/" || url.pathname === "/app") return appPage(env, url);
       const asset = siteAsset(url.pathname);
       if (asset) return asset;
