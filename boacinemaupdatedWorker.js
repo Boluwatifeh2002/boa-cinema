@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.61";
+const APP_VERSION = "2026-11-26.63";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1755,6 +1755,9 @@ async function authSetup(env) {
   await env.DB.batch([
     env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, salt TEXT NOT NULL, hash TEXT NOT NULL, iters INTEGER NOT NULL, created INTEGER NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS kv (uid TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, u INTEGER NOT NULL, PRIMARY KEY (uid, k))"),
+    // Moderation (v2.0): one row per sanctioned account, plus an audit log. Written only when staff act or a user appeals.
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS sanctions (uid TEXT PRIMARY KEY, email TEXT, status TEXT NOT NULL DEFAULT 'active', until INTEGER, reason TEXT, note TEXT, warns INTEGER NOT NULL DEFAULT 0, warn_note TEXT, warn_at INTEGER, ack_at INTEGER, appeal TEXT, appeal_at INTEGER, by TEXT, at INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS modlog (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, arole TEXT NOT NULL, uid TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL, reason TEXT, note TEXT)"),
   ]);
   authReady = true;
 }
@@ -1779,6 +1782,8 @@ async function authHandle(request, url, env) {
       if (pw.length > 100) return authJson({ error: "Password is too long." }, 400);
       const dup = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
       if (dup) return authJson({ error: "That email already has an account. Try signing in." }, 409);
+      const bn = await env.DB.prepare("SELECT status, until FROM sanctions WHERE email = ? LIMIT 1").bind(email).first();
+      if (bn && (sanctionNow(bn) === "blocked" || sanctionNow(bn) === "suspended")) return authJson({ error: "This email can't be used to sign up." }, 403);
       const id = crypto.randomUUID().replace(/-/g, "");
       const saltB = crypto.getRandomValues(new Uint8Array(16));
       const iters = authIters(env);
@@ -1801,10 +1806,83 @@ async function authHandle(request, url, env) {
     const uid = await authUid(env, request);
     if (!uid) return authJson({ error: "Session expired. Please sign in again." }, 401);
     if (path === "/api/acct/me") {
-      const u = await env.DB.prepare("SELECT name,email FROM users WHERE id = ?").bind(uid).first();
+      const u = await env.DB.prepare("SELECT u.name AS name, u.email AS email, s.status AS status, s.until AS until, s.reason AS reason, s.warns AS warns, s.warn_note AS warn_note, s.warn_at AS warn_at, s.ack_at AS ack_at, s.appeal AS appeal FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE u.id = ?").bind(uid).first();
       if (!u) return authJson({ error: "Account not found." }, 401);
       const cnt = (v) => String(v || "").split(/[\s,;]+/).filter(Boolean).length;
-      return authJson({ user: { name: u.name, email: u.email, role: roleFor(env, u.email), adm: cnt(env.ADMIN_EMAILS || env.ADMIN_EMAIL) } });
+      let role = roleFor(env, u.email);
+      const sn = role === "user" ? sanctionNow(u) : "active";
+      const out = { name: u.name, email: u.email, role: sn === "suspended" || sn === "blocked" ? "blocked" : role, adm: cnt(env.ADMIN_EMAILS || env.ADMIN_EMAIL) };
+      if (sn !== "active" || (u.warn_at && (!u.ack_at || u.ack_at < u.warn_at))) {
+        out.sn = { status: sn, until: u.until || 0, reason: u.reason ? (MOD_REASONS[u.reason] || u.reason) : "", appeal: !!u.appeal };
+        if (u.warn_at && (!u.ack_at || u.ack_at < u.warn_at)) out.sn.warn = String(u.warn_note || "");
+      }
+      return authJson({ user: out });
+    }
+    if (path === "/api/acct/ack") {
+      await env.DB.prepare("UPDATE sanctions SET ack_at = ? WHERE uid = ?").bind(Date.now(), uid).run();
+      return authJson({ ok: true });
+    }
+    if (path === "/api/acct/appeal" && request.method === "POST") {
+      const text = String(body.text || "").replace(/[\u0000-\u001f<>]/g, " ").trim().slice(0, 500);
+      if (text.length < 5) return authJson({ error: "Tell us a little more (at least a few words)." }, 400);
+      const me = await env.DB.prepare("SELECT u.email AS email, s.status AS status, s.until AS until, s.appeal_at AS appeal_at FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE u.id = ?").bind(uid).first();
+      if (!me || !me.status || sanctionNow(me) === "active") return authJson({ error: "There is nothing to appeal on this account." }, 400);
+      if (me.appeal_at && Date.now() - Number(me.appeal_at) < 12 * 3600000) return authJson({ error: "You already sent an appeal. Please wait for a reply." }, 429);
+      const now = Date.now();
+      await env.DB.batch([
+        env.DB.prepare("UPDATE sanctions SET appeal = ?, appeal_at = ? WHERE uid = ?").bind(text, now, uid),
+        env.DB.prepare("INSERT INTO modlog (at,actor,arole,uid,target,action,reason,note) VALUES (?,?,?,?,?,?,?,?)").bind(now, me.email, "user", uid, me.email, "appeal", "", text.slice(0, 200)),
+      ]);
+      return authJson({ ok: true });
+    }
+    if (path.indexOf("/api/acct/mod/") === 0) {
+      const mu = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(uid).first();
+      const myRole = mu ? roleFor(env, mu.email) : "user";
+      if (myRole !== "admin" && myRole !== "moderator") return authJson({ error: "Staff only." }, 403);
+      if (path === "/api/acct/mod/users") {
+        const q = String(body.q || "").trim().slice(0, 60).replace(/[%_\\]/g, " ");
+        const like = "%" + q + "%";
+        const rows = await env.DB.prepare("SELECT u.id AS id, u.name AS name, u.email AS email, u.created AS created, s.status AS status, s.until AS until, s.reason AS reason, s.warns AS warns, s.appeal AS appeal, s.appeal_at AS appeal_at FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE (? = '' OR u.email LIKE ? OR u.name LIKE ?)" + (body.appeals ? " AND s.appeal IS NOT NULL AND s.status IN ('suspended','blocked','muted')" : "") + " ORDER BY (s.appeal IS NOT NULL) DESC, u.created DESC LIMIT 25").bind(q, like, like).all();
+        return authJson({ role: myRole, users: (rows.results || []).map((r) => ({ id: r.id, name: r.name, email: r.email, created: r.created, role: roleFor(env, r.email), status: sanctionNow(r), until: r.until || 0, reason: r.reason || "", warns: r.warns || 0, appeal: r.appeal || "" })) });
+      }
+      if (path === "/api/acct/mod/log") {
+        if (myRole !== "admin") return authJson({ error: "Admins only." }, 403);
+        const rows = await env.DB.prepare("SELECT at, actor, arole, target, action, reason, note FROM modlog ORDER BY id DESC LIMIT 60").all();
+        return authJson({ log: rows.results || [] });
+      }
+      if (path === "/api/acct/mod/act" && request.method === "POST") {
+        const action = String(body.action || "");
+        const allowed = myRole === "admin" ? ["warn", "mute", "unmute", "suspend", "block", "unblock"] : ["warn", "mute", "unmute"];
+        if (allowed.indexOf(action) < 0) return authJson({ error: myRole === "admin" ? "Unknown action." : "Moderators can warn and mute. Ask an admin to suspend or block." }, 403);
+        const reason = String(body.reason || "other");
+        if (!MOD_REASONS[reason]) return authJson({ error: "Pick a reason." }, 400);
+        const note = String(body.note || "").replace(/[\u0000-\u001f<>]/g, " ").trim().slice(0, 200);
+        if (reason === "other" && !note && action !== "unmute" && action !== "unblock") return authJson({ error: "Add a short note when the reason is Other." }, 400);
+        const t = await env.DB.prepare("SELECT id, email FROM users WHERE id = ?").bind(String(body.uid || "")).first();
+        if (!t) return authJson({ error: "User not found." }, 404);
+        if (t.id === uid) return authJson({ error: "You can't act on your own account." }, 400);
+        if (roleFor(env, t.email) !== "user") return authJson({ error: "Staff accounts can't be sanctioned here." }, 403);
+        const now = Date.now();
+        let days = parseInt(body.days, 10) || 0;
+        if (days < 0) days = 0;
+        if (days > 30) days = 30;
+        const st = [];
+        if (action === "warn") {
+          const wn = (MOD_REASONS[reason] + (note ? ": " + note : "")).slice(0, 260);
+          st.push(env.DB.prepare("INSERT INTO sanctions (uid,email,status,reason,note,warns,warn_note,warn_at,by,at) VALUES (?,?,'active',?,?,1,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET warns = warns + 1, warn_note = excluded.warn_note, warn_at = excluded.warn_at, reason = excluded.reason, note = excluded.note, by = excluded.by, at = excluded.at, email = excluded.email").bind(t.id, t.email, reason, note, wn, now, mu.email, now));
+        } else {
+          let status = "active", until = null;
+          if (action === "mute") { status = "muted"; until = days ? now + days * 86400000 : null; }
+          if (action === "suspend") { if (days < 1) return authJson({ error: "Choose how many days (1 to 30)." }, 400); status = "suspended"; until = now + days * 86400000; }
+          if (action === "block") status = "blocked";
+          st.push(env.DB.prepare("INSERT INTO sanctions (uid,email,status,until,reason,note,by,at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET status = excluded.status, until = excluded.until, reason = excluded.reason, note = excluded.note, by = excluded.by, at = excluded.at, email = excluded.email, appeal = NULL, appeal_at = NULL").bind(t.id, t.email, status, until, reason, note, mu.email, now));
+        }
+        st.push(env.DB.prepare("INSERT INTO modlog (at,actor,arole,uid,target,action,reason,note) VALUES (?,?,?,?,?,?,?,?)").bind(now, mu.email, myRole, t.id, t.email, action + (days && (action === "suspend" || action === "mute") ? " " + days + "d" : ""), reason, note));
+        await env.DB.batch(st);
+        sessCache.delete(t.id);
+        return authJson({ ok: true });
+      }
+      return authJson({ error: "Not found" }, 404);
     }
     if (path === "/api/acct/keys") {
       const r = await env.DB.prepare("SELECT k FROM kv WHERE uid = ? LIMIT 1200").bind(uid).all();
@@ -1839,7 +1917,7 @@ async function authHandle(request, url, env) {
       if (!row) return authJson({ ok: true });
       const got = await authHash(String(body.password || "").slice(0, 100), b64uDec(row.salt), row.iters);
       if (!authSame(got, row.hash)) return authJson({ error: "Wrong password." }, 401);
-      await env.DB.batch([env.DB.prepare("DELETE FROM kv WHERE uid = ?").bind(uid), env.DB.prepare("DELETE FROM users WHERE id = ?").bind(uid)]);
+      await env.DB.batch([env.DB.prepare("DELETE FROM kv WHERE uid = ?").bind(uid), env.DB.prepare("DELETE FROM users WHERE id = ?").bind(uid), env.DB.prepare("DELETE FROM sanctions WHERE uid = ? AND status NOT IN ('suspended','blocked')").bind(uid)]);
       sessCache.delete(uid);
       return authJson({ ok: true });
     }
@@ -1847,6 +1925,14 @@ async function authHandle(request, url, env) {
   } catch (e) {
     return authJson({ error: "Account service error. Please try again." }, 500);
   }
+}
+const MOD_REASONS = { harassment: "Harassment or hate", spam: "Spam or advertising", illegal: "Illegal or harmful content", abuse: "Abusing invites, reports or the service", security: "Attacking or breaking the service", other: "Other (see note)" };
+// status of a sanction row right now: a suspension whose date has passed counts as active again
+function sanctionNow(r) {
+  if (!r || !r.status) return "active";
+  if (r.status === "suspended" && r.until && Number(r.until) < Date.now()) return "active";
+  if (r.status === "muted" && r.until && Number(r.until) < Date.now()) return "active";
+  return r.status;
 }
 function roleFor(env, email) {
   const rl = (v) => String(v || "").toLowerCase().split(/[\s,;]+/).filter(Boolean);
@@ -1860,6 +1946,7 @@ async function sessionOf(request, env) {
     // Behind the Render server (env.AUTH_UPSTREAM is set only by server.js): it already checked the token with this Worker and passes the role on
     if (env.AUTH_UPSTREAM === "1") {
       const r = request.headers.get("x-boa-role");
+      if (r === "blocked") return { ok: false, blocked: true, status: "blocked" };
       if (r) return { ok: true, role: r === "admin" || r === "moderator" ? r : "user" };
     }
     if (env.DB && env.AUTH_SECRET && String(env.AUTH_SECRET).length >= 32) {
@@ -1868,9 +1955,12 @@ async function sessionOf(request, env) {
         const c = sessCache.get(uid);
         if (c && c.t > Date.now()) return c.v;
         await authSetup(env);
-        const u = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(uid).first();
+        const u = await env.DB.prepare("SELECT u.email AS email, s.status AS status, s.until AS until, s.reason AS reason FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE u.id = ?").bind(uid).first();
         if (u) {
-          const v = { ok: true, role: roleFor(env, u.email), email: u.email };
+          const rl = roleFor(env, u.email), sn = rl === "user" ? sanctionNow(u) : "active";
+          const v = sn === "suspended" || sn === "blocked"
+            ? { ok: false, blocked: true, status: sn, until: u.until || 0, reason: u.reason || "", email: u.email }
+            : { ok: true, role: rl, email: u.email, muted: sn === "muted" };
           if (sessCache.size > 500) sessCache.clear();
           sessCache.set(uid, { v, t: Date.now() + 60000 });
           return v;
@@ -1890,6 +1980,7 @@ async function watchGate(request, url, env) {
   const p = url.pathname;
   if (p !== "/api/streams" && p !== "/api/relay-sign" && p !== "/api/torrent-bridge") return null;
   const s = await sessionOf(request, env);
+  if (!s.ok && s.blocked) return authJson({ error: "Your account is suspended. Open the app to read why and to appeal.", suspended: true, status: s.status, until: s.until || 0, reason: s.reason || "" }, 403);
   if (!s.ok) return authJson({ error: "Sign in to watch.", auth: true }, 401);
   if (p === "/api/relay-sign" && url.searchParams.get("dl") === "1" && s.role !== "admin" && s.role !== "moderator") {
     if (!DOWNLOADS_ENABLED_FOR_USERS) return authJson({ error: "Downloads are not enabled yet." }, 403);
@@ -4424,6 +4515,46 @@ body:has(#dlpg.open) #nav{display:none}
 #dlpg input[type=text],#dlpg select{width:100%;box-sizing:border-box;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:12px;color:#fff;font:inherit;font-size:16px;padding:11px 12px;margin:4px 0 6px}
 #dlpg .dlempty{padding:22px 6px;text-align:center;color:#a1a1aa;font-size:14px}
 .vrfok{display:inline-block;margin:4px 0 0;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:800;letter-spacing:.03em;background:rgba(70,211,105,.16);color:#46d369;border:1px solid rgba(70,211,105,.3)}
+#player .adnote{position:absolute;left:50%;transform:translateX(-50%);top:calc(var(--sat) + 46px);z-index:7;max-width:86%;text-align:center;padding:8px 14px;border-radius:999px;background:rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.25);color:#fff;font-size:12.5px;font-weight:700;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+#suspg,#warnpg,#modpg{position:fixed;inset:0;z-index:95;display:none;overflow:auto;background:radial-gradient(120% 80% at 50% 0%,rgba(var(--accent-rgb),.2),rgba(0,0,0,.96) 60%),#000}
+#suspg.open,#warnpg.open{display:flex;align-items:center;justify-content:center;padding:20px}
+#modpg.open{display:block;padding:max(14px,env(safe-area-inset-top)) 14px 40px}
+body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #nav{display:none}
+#suspg .box,#warnpg .box{width:100%;max-width:400px;margin:auto;padding:26px 22px 22px;border-radius:24px;background:rgba(24,24,27,.8);border:1px solid rgba(255,255,255,.12);box-shadow:0 24px 70px rgba(0,0,0,.6);text-align:left}
+#suspg .brand,#warnpg .brand{font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+#suspg h1,#warnpg h1{font-size:24px;margin:0 0 8px;color:#fff}
+#suspg .sub,#warnpg .sub{color:#c4c4c9;font-size:14px;line-height:1.5;margin:0 0 12px}
+.susr{display:flex;flex-direction:column;gap:3px;padding:11px 13px;margin:0 0 12px;border-radius:14px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);font-size:14px;color:#fff}
+.susr b{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.susok{color:#46d369;font-size:14px;margin:6px 0 12px}
+#suspg .sust{width:100%;box-sizing:border-box;padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.35);color:#fff;font:inherit;font-size:14px;resize:none;margin-bottom:10px}
+#suspg button.pri,#warnpg button.pri{width:100%;padding:14px;border:0;border-radius:14px;background:var(--accent);color:var(--on-accent);font:inherit;font-weight:800;font-size:15px;margin-bottom:8px}
+#suspg button.sec{width:100%;padding:13px;border-radius:14px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);color:#fff;font:inherit;font-weight:700;font-size:14px;margin-top:8px}
+.mderr{color:#ff6b6b;font-size:13px;min-height:0;margin:4px 0}
+.mdtop{display:flex;align-items:center;justify-content:space-between;padding:6px 4px 12px}
+.mdtop b{font-size:22px;color:#fff}
+.mdx{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 16px;border-radius:999px}
+.mdtabs{display:flex;gap:8px;padding:0 0 10px}
+.mdq{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#fff;font:inherit;font-size:14px;margin:0 0 10px}
+.mdlist{display:flex;flex-direction:column;gap:8px}
+.mdnote{padding:22px 8px;text-align:center;color:#a1a1aa;font-size:14px}
+.mdrow{border-radius:16px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);overflow:hidden}
+.mdhead{display:flex;width:100%;align-items:center;justify-content:space-between;gap:10px;padding:13px 14px;border:0;background:none;color:#fff;font:inherit;text-align:left}
+.mdn{min-width:0;display:flex;flex-direction:column}
+.mdn b{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mdn span{font-size:12px;color:#a1a1aa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mdst{flex:none;max-width:48%;font-size:11px;font-weight:800;color:#a1a1aa;text-align:right}
+.mdst.bad{color:#ff6b6b}.mdst.warn{color:#fbbf24}
+.mdpanel{padding:0 14px 14px}
+.mdsel{width:100%;box-sizing:border-box;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:#18181b;color:#fff;font:inherit;font-size:14px;margin:0 0 8px}
+.mdhint{font-size:12px;color:#a1a1aa;margin:2px 0 6px}
+.mdbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.mdb{flex:1 1 40%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;font:inherit;font-weight:800;font-size:13px}
+.mdb.dng{color:#ff6b6b;border-color:rgba(255,107,107,.4)}.mdb.ok{color:#46d369;border-color:rgba(70,211,105,.4)}
+.mdappeal{display:flex;flex-direction:column;gap:3px;padding:10px 12px;margin:0 0 10px;border-radius:12px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);font-size:13px;color:#fff}
+.mdappeal b{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#fbbf24}
+.mdlog{display:flex;flex-direction:column;gap:2px;padding:11px 13px;border-radius:14px;background:rgba(255,255,255,.05);font-size:13px;color:#fff}
+.mdlog span{font-size:11.5px;color:#a1a1aa}.mdlog em{font-size:12px;color:#d4d4d8;font-style:normal}
 /* ---- v.58: Library tabs, downloads in Library, grouped Profile ---- */
 .libtabs{display:flex;gap:8px;overflow-x:auto;padding:6px 16px 4px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .libtabs::-webkit-scrollbar{display:none}
@@ -4671,12 +4802,18 @@ body:has(#dlpg.open) #nav{display:none}
             var e401 = new Error("auth"); e401.auth = 1; throw e401;
           });
         }
+        if (r.status === 403) {
+          return r.json().catch(function () { return {}; }).then(function (j) {
+            if (j && j.suspended) { var e403 = new Error("suspended"); e403.sus = 1; setTimeout(function () { try { sanctionCheck(true); } catch (x) {} }, 0); throw e403; }
+            throw new Error("bad");
+          });
+        }
         if (!r.ok) throw new Error("bad");
         return r.json();
       })
       .catch(function (e) {
         clearTimeout(to);
-        if (tries > 0 && !(e && e.auth)) return api(path, tries - 1, timeoutMs);
+        if (tries > 0 && !(e && (e.auth || e.sus))) return api(path, tries - 1, timeoutMs);
         throw e;
       });
   }
@@ -4808,9 +4945,182 @@ body:has(#dlpg.open) #nav{display:none}
       if (e || !j || !j.user) return;
       ACC = j.user; lsSet("boa_acc", JSON.stringify(ACC));
       dlGate();
+      sanctionUi();
       if (tab === "me") renderMe();
     });
   }, 300);
+  // ---- v2.0 moderation: suspension screen with appeal, one-time warning notice, staff tools ----
+  var SANC_AT = 0;
+  function sanctionCheck(force) {
+    if (!AT || !ACC) return;
+    if (!force && Date.now() - SANC_AT < 60000) return;
+    SANC_AT = Date.now();
+    acctApi("/api/acct/me", null, function (e, j) { if (e || !j || !j.user) return; ACC = j.user; lsSet("boa_acc", JSON.stringify(ACC)); sanctionUi(); });
+  }
+  try { document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") sanctionCheck(false); }); } catch (e) {}
+  function sanctionUi() {
+    var sn = ACC && ACC.sn;
+    if (ACC && ACC.role === "blocked") { showSuspended(); return; }
+    var old = $("suspg"); if (old && old.className === "open" && !(sn && (sn.status === "suspended" || sn.status === "blocked"))) { old.className = ""; old.textContent = ""; document.body.style.overflow = ""; }
+    if (sn && sn.warn) showWarn(sn.warn);
+  }
+  function fmtUntil(ms) { try { return new Date(+ms).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }); } catch (e) { return ""; } }
+  function showSuspended() {
+    var sn = (ACC && ACC.sn) || {}, el = $("suspg");
+    if (!el) { el = h("div"); el.id = "suspg"; document.body.appendChild(el); }
+    el.textContent = ""; el.className = "open"; document.body.style.overflow = "hidden";
+    try { var pl = $("player"); if (pl && pl.className === "open" && typeof window.__closePlayer === "function") window.__closePlayer(); } catch (e) {}
+    var box = h("div", "box");
+    box.appendChild(h("div", "brand", "Boa Cinema"));
+    var perm = sn.status === "blocked";
+    box.appendChild(h("h1", null, perm ? "Account blocked" : "Account suspended"));
+    box.appendChild(h("p", "sub", perm ? "This account can no longer be used to watch. If you think this is a mistake, you can send one appeal below." : "You can't watch or download right now." + (sn.until ? " Your access returns on " + fmtUntil(sn.until) + "." : "")));
+    if (sn.reason) { var rs = h("div", "susr"); rs.appendChild(h("b", null, "Reason")); rs.appendChild(h("span", null, sn.reason)); box.appendChild(rs); }
+    var msg = h("div", "mderr", ""); 
+    if (sn.appeal) {
+      box.appendChild(h("p", "susok", "Your appeal was sent. A moderator will review it. You will see the result here."));
+    } else {
+      var ta = document.createElement("textarea"); ta.className = "sust"; ta.maxLength = 500; ta.rows = 4; ta.placeholder = "Tell us what happened (a few sentences)";
+      box.appendChild(ta);
+      var ap = h("button", "pri", "Send appeal"); ap.type = "button";
+      ap.onclick = function () {
+        var t = ta.value.trim(); msg.textContent = "";
+        if (t.length < 5) { msg.textContent = "Please write a few words."; return; }
+        ap.disabled = true; ap.textContent = "Sending...";
+        acctApi("/api/acct/appeal", { text: t }, function (e) {
+          if (e) { ap.disabled = false; ap.textContent = "Send appeal"; msg.textContent = e.m; return; }
+          if (ACC) { ACC.sn = ACC.sn || {}; ACC.sn.appeal = true; } showSuspended();
+        });
+      };
+      box.appendChild(ap);
+    }
+    box.appendChild(msg);
+    var rf = h("button", "sec", "Check again"); rf.type = "button"; rf.onclick = function () { sanctionCheck(true); toast("Checking..."); };
+    box.appendChild(rf);
+    var so = h("button", "sec", "Sign out"); so.type = "button"; so.onclick = function () { acctDrop(false); };
+    box.appendChild(so);
+    el.appendChild(box);
+  }
+  function showWarn(text) {
+    if ($("warnpg")) return;
+    var el = h("div"); el.id = "warnpg"; el.className = "open";
+    var box = h("div", "box");
+    box.appendChild(h("div", "brand", "Boa Cinema"));
+    box.appendChild(h("h1", null, "A note from the team"));
+    box.appendChild(h("p", "sub", "A moderator sent you a warning about your account."));
+    var rs = h("div", "susr"); rs.appendChild(h("b", null, "Reason")); rs.appendChild(h("span", null, text)); box.appendChild(rs);
+    box.appendChild(h("p", "sub", "Please follow the community rules. More serious or repeated problems can lead to a mute, a suspension or a block."));
+    var ok = h("button", "pri", "I understand"); ok.type = "button";
+    ok.onclick = function () { acctApi("/api/acct/ack", null, function () {}); if (ACC && ACC.sn) delete ACC.sn.warn; el.remove(); };
+    box.appendChild(ok);
+    el.appendChild(box); document.body.appendChild(el);
+  }
+  var MOD_R = [["harassment", "Harassment or hate"], ["spam", "Spam or advertising"], ["illegal", "Illegal or harmful content"], ["abuse", "Abusing invites, reports or the service"], ["security", "Attacking or breaking the service"], ["other", "Other (add a note)"]];
+  function isStaff() { return !!ACC && (ACC.role === "admin" || ACC.role === "moderator"); }
+  function openMod() {
+    if (!isStaff()) return;
+    var el = $("modpg");
+    if (!el) { el = h("div"); el.id = "modpg"; document.body.appendChild(el); }
+    el.textContent = ""; el.className = "open"; document.body.style.overflow = "hidden";
+    var admin = ACC.role === "admin", mode = "users", q = "";
+    var top = h("div", "mdtop");
+    top.appendChild(h("b", null, "Moderation"));
+    var cl = h("button", "mdx", "Close"); cl.type = "button"; cl.onclick = function () { el.className = ""; el.textContent = ""; document.body.style.overflow = ""; };
+    top.appendChild(cl); el.appendChild(top);
+    var tabs = h("div", "mdtabs"); el.appendChild(tabs);
+    var search = document.createElement("input"); search.className = "mdq"; search.type = "search"; search.placeholder = "Search name or email"; search.setAttribute("autocapitalize", "none"); search.setAttribute("autocorrect", "off");
+    el.appendChild(search);
+    var list = h("div", "mdlist"); el.appendChild(list);
+    var tm = 0;
+    search.oninput = function () { clearTimeout(tm); tm = setTimeout(function () { q = search.value.trim(); load(); }, 350); };
+    function paintTabs() {
+      tabs.textContent = "";
+      [["users", "Users"], ["appeals", "Appeals"]].concat(admin ? [["log", "Activity"]] : []).forEach(function (t) {
+        var b = h("button", "pill" + (mode === t[0] ? " sel" : ""), t[1]); b.type = "button";
+        b.onclick = function () { mode = t[0]; search.style.display = mode === "log" ? "none" : ""; paintTabs(); load(); };
+        tabs.appendChild(b);
+      });
+    }
+    function statusTxt(u) {
+      var p = [];
+      if (u.status === "blocked") p.push("Blocked");
+      else if (u.status === "suspended") p.push("Suspended" + (u.until ? " until " + fmtUntil(u.until) : ""));
+      else if (u.status === "muted") p.push("Muted" + (u.until ? " until " + fmtUntil(u.until) : ""));
+      if (u.warns) p.push(u.warns + (u.warns === 1 ? " warning" : " warnings"));
+      if (u.appeal) p.push("Appeal waiting");
+      return p.join(" \u2022 ");
+    }
+    function load() {
+      list.textContent = ""; list.appendChild(h("div", "mdnote", "Loading..."));
+      if (mode === "log") {
+        acctApi("/api/acct/mod/log", null, function (e, j) {
+          list.textContent = "";
+          if (e) { list.appendChild(h("div", "mdnote", e.m)); return; }
+          if (!(j.log || []).length) list.appendChild(h("div", "mdnote", "Nothing yet. Every warning, mute, suspension, block and appeal is recorded here."));
+          (j.log || []).forEach(function (r) {
+            var row = h("div", "mdlog");
+            row.appendChild(h("b", null, r.action + " \u2192 " + r.target));
+            row.appendChild(h("span", null, new Date(r.at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) + " \u2022 " + r.actor + " (" + r.arole + ")" + (r.reason ? " \u2022 " + r.reason : "")));
+            if (r.note) row.appendChild(h("em", null, r.note));
+            list.appendChild(row);
+          });
+        });
+        return;
+      }
+      acctApi("/api/acct/mod/users", { q: q, appeals: mode === "appeals" }, function (e, j) {
+        list.textContent = "";
+        if (e) { list.appendChild(h("div", "mdnote", e.m)); return; }
+        if (!(j.users || []).length) list.appendChild(h("div", "mdnote", mode === "appeals" ? "No appeals waiting." : "No users found."));
+        (j.users || []).forEach(function (u) { list.appendChild(userRow(u)); });
+      });
+    }
+    function userRow(u) {
+      var row = h("div", "mdrow"), head = h("button", "mdhead"); head.type = "button";
+      var nm = h("div", "mdn"); nm.appendChild(h("b", null, u.name)); nm.appendChild(h("span", null, u.email));
+      head.appendChild(nm);
+      var st = statusTxt(u); if (u.role !== "user") st = u.role === "admin" ? "Admin" : "Moderator";
+      var pc = "mdst" + (u.status === "blocked" || u.status === "suspended" ? " bad" : u.status === "muted" || u.warns ? " warn" : "");
+      head.appendChild(h("span", pc, st || "Active"));
+      row.appendChild(head);
+      var panel = h("div", "mdpanel"); panel.style.display = "none"; row.appendChild(panel);
+      head.onclick = function () { if (u.role !== "user") { toast("Staff accounts can't be sanctioned here."); return; } panel.style.display = panel.style.display === "none" ? "block" : "none"; if (panel.style.display === "block" && !panel.firstChild) build(); };
+      function build() {
+        if (u.appeal) { var ap = h("div", "mdappeal"); ap.appendChild(h("b", null, "Their appeal")); ap.appendChild(h("span", null, u.appeal)); panel.appendChild(ap); }
+        var rs = document.createElement("select"); rs.className = "mdsel";
+        MOD_R.forEach(function (r) { var o = document.createElement("option"); o.value = r[0]; o.textContent = r[1]; rs.appendChild(o); });
+        panel.appendChild(rs);
+        var nt = document.createElement("input"); nt.className = "mdq"; nt.maxLength = 200; nt.placeholder = "Short note (required for Other)"; panel.appendChild(nt);
+        var ds = document.createElement("select"); ds.className = "mdsel";
+        [["0", "Mute: until lifted"], ["1", "1 day"], ["3", "3 days"], ["7", "7 days"], ["14", "14 days"], ["30", "30 days"]].forEach(function (d) { var o = document.createElement("option"); o.value = d[0]; o.textContent = d[1]; ds.appendChild(o); });
+        var dl = h("div", "mdhint", "Length (used by Mute and Suspend)"); panel.appendChild(dl); panel.appendChild(ds);
+        var msg = h("div", "mderr", ""); var bx = h("div", "mdbtns");
+        function act(action, label, cls, confirmIt) {
+          var b = h("button", "mdb" + (cls ? " " + cls : ""), label); b.type = "button"; var armed = 0, tmr = 0;
+          b.onclick = function () {
+            if (confirmIt && !armed) { armed = 1; b.textContent = "Tap again to confirm"; tmr = setTimeout(function () { armed = 0; b.textContent = label; }, 3000); return; }
+            clearTimeout(tmr); msg.textContent = ""; b.disabled = true;
+            acctApi("/api/acct/mod/act", { uid: u.id, action: action, reason: rs.value, note: nt.value.trim(), days: +ds.value || 0 }, function (e) {
+              b.disabled = false; armed = 0; b.textContent = label;
+              if (e) { msg.textContent = e.m; return; }
+              toast("Done: " + label); load();
+            });
+          };
+          bx.appendChild(b);
+        }
+        act("warn", "Warn", "");
+        act(u.status === "muted" ? "unmute" : "mute", u.status === "muted" ? "Unmute" : "Mute", "", false);
+        if (admin) {
+          act("suspend", "Suspend", "dng", true);
+          act("block", "Block", "dng", true);
+          if (u.status === "suspended" || u.status === "blocked") act("unblock", "Restore access", "ok", false);
+        }
+        panel.appendChild(bx); panel.appendChild(msg);
+        if (!admin) panel.appendChild(h("div", "mdhint", "Moderators can warn and mute. Admins handle suspensions and blocks."));
+      }
+      return row;
+    }
+    paintTabs(); load();
+  }
   try {
     document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") acctFlush(true); });
     window.addEventListener("pagehide", function () { acctFlush(true); });
@@ -5667,6 +5977,12 @@ body:has(#dlpg.open) #nav{display:none}
     return ADV;
   }
   function advSave() { try { sessionStorage.setItem("boa_adv", JSON.stringify(ADV)); } catch (e) {} }
+  // Is a pre-roll due for this video? (used before handing a stream to VLC: VLC cannot show ads, so the ad plays in the app first)
+  var ADCFGC = null;
+  function adsPreOn(cb) {
+    if (ADCFGC && Date.now() - ADCFGC.t < 60000) return cb(ADCFGC.on);
+    api("/api/ads/config", 0, 2500).then(function (c) { ADCFGC = { t: Date.now(), on: !!(c && c.on && c.pre) }; cb(ADCFGC.on); }).catch(function () { cb(false); });
+  }
   // Provider health: one tiny reachability / response-time check per stream (in memory only, 2.5 min), made by the Worker, never through Render.
   var HLT = {}, HLP = {}, HLN = 0;
   var RFB = false, RFE = null;      // Refresh All: busy flag + the callback that ends the loading state once ranking is done
@@ -6748,6 +7064,7 @@ body:has(#dlpg.open) #nav{display:none}
 
     if (root.parentNode !== document.body) document.body.appendChild(root);
     window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
+    window.__closePlayer = function () { try { closeP(); } catch (e) {} };
     var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null, failedU = {}, dead = false, hadFail = {}, upd = {}, chkAt = {};
     var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
     (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
@@ -6787,7 +7104,7 @@ body:has(#dlpg.open) #nav{display:none}
     if (canPip) tr.appendChild(bPip);
     var bVlc = h("button", "ptxt", "VLC");
     bVlc.setAttribute("aria-label", "Open in VLC");
-    bVlc.onclick = function () { v.pause(); if (RELAY_ON()) relaySign(url, curSt).then(function (ru) { if (ru) location.href = vlcLink(ru); }); else location.href = vlcLink(url); };
+    bVlc.onclick = function () { adThenVlc(false); };
     tr.appendChild(bVlc);
     var bOdy = h("button", "ptxt", "Odyssey");
     bOdy.setAttribute("aria-label", "Open in Odyssey");
@@ -7372,6 +7689,7 @@ body:has(#dlpg.open) #nav{display:none}
       box.appendChild(av);
       var tagEl = h("div", "adtag", "Ad");
       box.appendChild(tagEl);
+      if (vlcPending) box.appendChild(h("div", "adnote", "Short ad first, then your video opens in VLC"));
       var snd = h("button", "adsnd", "Tap to Unmute"); snd.type = "button";
       function paintSnd() { snd.textContent = av.muted ? "Tap to Unmute" : "Sound on"; snd.className = "adsnd" + (av.muted ? " pulse" : ""); }
       snd.onclick = function (ev) {
@@ -7403,7 +7721,7 @@ body:has(#dlpg.open) #nav{display:none}
       if (skipSecs) { sk = h("button", "adskip", "Skip in " + Math.max(skipSecs, viewNeed)); sk.style.display = "none"; box.appendChild(sk); }   // the countdown only shows once the ad is really playing
       if (ad.click) {
         var lb = h("button", "adlearn", "Learn more");
-        lb.onclick = function () { fire(ad.clickTrk); openLink(ad.click); av.pause(); };
+        lb.onclick = function () { fire(ad.clickTrk, av.currentTime || 0, ad.media); av.pause(); setTimeout(function () { openLink(ad.click); }, 200); };
         box.appendChild(lb);
       }
       root.appendChild(box);
@@ -7553,7 +7871,21 @@ body:has(#dlpg.open) #nav{display:none}
       if (/\.m3u8(\?|$)/i.test(url)) loadHls(function () { startSource(url, false); });
       else startSource(url, false);
     }
+    var vlcPending = false;
+    function vlcLaunch() {
+      try { v.pause(); } catch (e) {}
+      if (RELAY_ON()) relaySign(url, curSt).then(function (ru) { if (ru) location.href = vlcLink(ru); }); else location.href = vlcLink(url);
+    }
+    // VLC cannot show ads, so a due pre-roll plays here first, with a clear notice; closing the ad cancels the hand-off
+    function adThenVlc(fromStart) {
+      if (adActive || closed) return;
+      function go() { vlcPending = false; if (closed) return; vlcLaunch(); if (fromStart) setTimeout(function () { if (!closed) closeP(); }, 700); }
+      var a0 = adcfg, A = advC();
+      if (a0 && a0.on && a0.pre && !A.pre && A.n < 2) { vlcPending = true; toast("A short ad plays first, then VLC opens"); runAd("pre", go); }
+      else go();
+    }
     if (ctx && ctx.offline) { adcfg = { on: false }; beginMain(); }
+    else if (ctx && ctx.vlcFirst) { ctx.vlcFirst = false; getAdCfg(function (c) { adcfg = c; adThenVlc(true); }); }
     else getAdCfg(function (c) { adcfg = c; runAd("pre", beginMain); });
 
     // ----- state -> UI -----
@@ -9335,6 +9667,7 @@ body:has(#dlpg.open) #nav{display:none}
     });
     if (dlOn()) item(l3, "Downloads", dlCount() + " saved", function () { LIBVIEW = "dl"; showTab("lib"); });
     if (dlAdmin()) item(l3, "Download dashboard", "Admin", function () { openDL("dash"); });
+    if (isStaff()) item(l3, "Moderation", ACC.role === "admin" ? "Admin" : "Moderator", openMod);
     if (IS_OWNER) item(l3, "Owner panel", "Only you", openAdmin);
     item(l3, "Get the add-on", "Stremio style", function () { openLink(location.origin + "/addon"); });
     // 4. Data & Session (anchored to the bottom of the page)
@@ -9834,6 +10167,21 @@ $("smclose").onclick = function () {
           try { navigator.clipboard.writeText(u).then(function () { toast("Magnet link copied"); }, function () { toast("Couldn't copy the link"); }); } catch (e) { toast("Couldn't copy the link"); }
         }
         function openVlc(st0) {
+          var u = st0.url || "";
+          if (u && !/^magnet:/i.test(u) && CUR && !CUR.live && !CUR.offline) {
+            var A9 = advFor(CUR, u);
+            if (!A9.pre && A9.n < 2) {
+              adsPreOn(function (on) {
+                if (!on) { openVlc2(st0); return; }
+                CUR.vlcFirst = true;               // the player shows the pre-roll, then opens VLC (the stream itself is not loaded in the app)
+                openPlayer(u, st0);
+              });
+              return;
+            }
+          }
+          openVlc2(st0);
+        }
+        function openVlc2(st0) {
           var u = st0.url || "";
           if (RELAY_ON() && u && !/^magnet:/i.test(u)) { relaySign(u, st0).then(function (ru) { if (ru) goVlc(ru, st0); }); return; }
           goVlc(u, st0);
