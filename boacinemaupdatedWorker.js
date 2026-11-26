@@ -1180,7 +1180,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.57";
+const APP_VERSION = "2026-11-22.58";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -3607,31 +3607,6 @@ body.lock #nav{display:none}
 .me .big img{width:100%;height:100%;object-fit:cover}
 .me h2{margin:14px 0 2px;font-size:22px;font-weight:800}
 .me p{margin:0;color:var(--muted);font-size:14px}
-
-/* Profile sections - Netflix-grade grouped cards */
-.me-section{margin:22px 16px 0;background:var(--card);border-radius:22px;overflow:hidden}
-.me-section-title{margin:0;padding:16px 16px 8px;font-size:13px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-align:left}
-.me-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:0 12px 16px}
-@media (max-width: 480px){.me-grid{grid-template-columns:repeat(2,1fr)}}
-@media (max-width: 380px){.me-grid{grid-template-columns:1fr}}
-.me-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px 14px;text-align:center;cursor:pointer;transition:background .15s,transform .12s,box-shadow .15s}
-.me-card:active{transform:scale(.97);background:rgba(255,255,255,.08)}
-.me-card:hover{background:rgba(255,255,255,.07)}
-.me-card.danger{background:rgba(239,68,68,.06);border-color:rgba(239,68,68,.15)}
-.me-card.danger:hover{background:rgba(239,68,68,.1)}
-.me-card-icon{font-size:28px;margin-bottom:8px;display:flex;justify-content:center;align-items:center}
-.me-card-icon .big{width:56px;height:56px;font-size:24px}
-.me-card-label{font-size:13px;font-weight:700;color:#fff;margin-bottom:2px;letter-spacing:-.01em}
-.me-card-value{font-size:12px;color:var(--muted);font-weight:500}
-.me-section-bottom{margin-bottom:calc(var(--sab) + 20px)}
-
-.libtabs{display:flex;gap:8px;overflow-x:auto;padding:0 16px 12px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
-.libtabs::-webkit-scrollbar{display:none}
-.libtabs .pill{flex:0 0 auto;white-space:nowrap}
-
-.dbadge{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:rgba(70,211,105,.9);color:#000;font-size:14px;font-weight:800;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.4);z-index:3}
-.dbadge[title]{cursor:help}
-
 .list{margin:22px 16px 0;background:var(--card);border-radius:22px;overflow:hidden}
 .li{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;border:0;background:none;padding:18px 18px;font-size:16px;font-weight:600;border-bottom:1px solid var(--line);text-align:left}
 .li:last-child{border-bottom:0}
@@ -4444,6 +4419,33 @@ body:has(#dlpg.open) #nav{display:none}
 #dlpg .dlgo{font-size:13px;padding:10px 16px;margin:4px 6px 0 0}
 #dlpg input[type=text],#dlpg select{width:100%;box-sizing:border-box;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:12px;color:#fff;font:inherit;font-size:16px;padding:11px 12px;margin:4px 0 6px}
 #dlpg .dlempty{padding:22px 6px;text-align:center;color:#a1a1aa;font-size:14px}
+/* ---- v.58: Library tabs, downloads in Library, grouped Profile ---- */
+.libtabs{display:flex;gap:8px;overflow-x:auto;padding:6px 16px 4px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.libtabs::-webkit-scrollbar{display:none}
+.libtabs .pill{flex:none}
+#v-lib .libdl{margin:0 16px;padding:6px 15px;border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.03));border:1px solid rgba(255,255,255,.1)}
+#v-lib .libdlsum{padding:10px 0 4px;font-size:12px;font-weight:700;color:#a1a1aa;letter-spacing:.02em}
+#v-lib .dlrow{display:flex;gap:12px;padding:12px 0;border-top:1px solid rgba(255,255,255,.07)}
+#v-lib .dlrow:first-of-type{border-top:0}
+#v-lib .dlrow img,#v-lib .dlrow .dlph{width:54px;height:80px;border-radius:10px;object-fit:cover;background:#18181b;flex:none}
+#v-lib .dlrow .in{flex:1;min-width:0}
+#v-lib .dlrow b{display:block;font-size:14px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#v-lib .dlrow .mt{font-size:12px;color:#a1a1aa;margin:3px 0}
+#v-lib .dlbt{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+#v-lib .dlbt button{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;font:inherit;font-size:12px;font-weight:700;padding:8px 13px;border-radius:999px}
+#v-lib .dlbt button.pri{background:var(--accent);color:var(--on-accent);border-color:transparent}
+#v-lib .dlbt button.dng{color:#ff6b6b}
+#v-lib .dlbar{height:4px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:6px}
+#v-lib .dlbar i{display:block;height:100%;border-radius:99px;background:var(--accent);width:0;transition:width .3s}
+#v-lib .dlempty{padding:26px 6px;text-align:center;color:#a1a1aa;font-size:14px}
+#v-me.on{display:flex;flex-direction:column}
+.megrp{margin-top:6px}
+.meh{margin:24px 20px 10px;font-size:12px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.megrp .list{margin:0 16px}
+.megrp .themec{margin:0 16px}
+.megrp .acd{margin:0 16px}
+.mebot{margin-top:auto;padding-top:8px}
+#player .poffb{display:inline-block;margin-left:8px;padding:3px 9px;border-radius:999px;font-size:10.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;vertical-align:middle;background:rgba(70,211,105,.18);color:#46d369;border:1px solid rgba(70,211,105,.35)}
 @keyframes pfUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 /* ---- v.52 polish: calmer, more professional stream picker (glass kept) ---- */
 #streammodal{padding:calc(var(--sat) + 12px) 14px calc(var(--sab) + 24px)}
@@ -4955,17 +4957,21 @@ body:has(#dlpg.open) #nav{display:none}
     el.appendChild(box);
   }
   function closeAuth() { var el = $("authpg"); if (el) { el.className = ""; el.textContent = ""; } }
-  function acctCard() {
+  function acctCard(sess) {
     var c = h("div", "acd");
-    var t = h("h4", null, ACC ? (ACC.name || "Account") : "Sign in to watch");
-    if (ACC) t.appendChild(h("span", "pill", "Synced"));
-    if (ACC && (ACC.role === "admin" || ACC.role === "moderator")) { var rp = h("span", "pill", ACC.role === "admin" ? "Admin" : "Moderator"); rp.style.marginLeft = "6px"; t.appendChild(rp); }
-    c.appendChild(t);
-    if (ACC && ACC.role === "user" && typeof ACC.adm === "number") {
-      var dg = h("p", null, ACC.adm === 0 ? "Server note: no admin email is set on the server yet." : "Server note: the admin list doesn't include this email.");
-      dg.style.cssText = "font-size:12px;color:#fbbf24;margin:6px 0 0"; c.appendChild(dg);
+    if (!sess) {
+      var t = h("h4", null, ACC ? (ACC.name || "Account") : "Sign in to watch");
+      if (ACC) t.appendChild(h("span", "pill", "Synced"));
+      if (ACC && (ACC.role === "admin" || ACC.role === "moderator")) { var rp = h("span", "pill", ACC.role === "admin" ? "Admin" : "Moderator"); rp.style.marginLeft = "6px"; t.appendChild(rp); }
+      c.appendChild(t);
+      if (ACC && ACC.role === "user" && typeof ACC.adm === "number") {
+        var dg = h("p", null, ACC.adm === 0 ? "Server note: no admin email is set on the server yet." : "Server note: the admin list doesn't include this email.");
+        dg.style.cssText = "font-size:12px;color:#fbbf24;margin:6px 0 0"; c.appendChild(dg);
+      }
+      c.appendChild(h("p", null, ACC ? ACC.email : "Guests can browse. Create a free account to watch, build your Library and keep your history on every device."));
+      c.style.marginBottom = "10px";
+      return c;
     }
-    c.appendChild(h("p", null, ACC ? ACC.email : "Guests can browse. Create a free account to watch, build your Library and keep your history on every device."));
     var row = h("div", "row");
     function btn(txt, cls, fn) { var b = h("button", "acb" + (cls ? " " + cls : ""), txt); b.type = "button"; b.onclick = fn; row.appendChild(b); }
     if (ACC) {
@@ -5008,24 +5014,6 @@ body:has(#dlpg.open) #nav{display:none}
     return out;
   }
   function dlCount() { var n = 0; dlMine().forEach(function (x) { if (x.status === "done") n++; }); return n; }
-  function dlIsInLibrary(mt, id) {
-    var dls = dlMine();
-    for (var i = 0; i < dls.length; i++) {
-      if (dls[i].mt === mt && String(dls[i].tid) === String(id) && dls[i].status === "done") return true;
-    }
-    return false;
-  }
-  function dlFindByTitle(mt, id, title) {
-    var dls = dlMine();
-    for (var i = 0; i < dls.length; i++) {
-      if (dls[i].mt === mt && String(dls[i].tid) === String(id) && dls[i].status === "done") return dls[i];
-    }
-    // fallback by title
-    for (var i = 0; i < dls.length; i++) {
-      if (dls[i].status === "done" && dls[i].title.toLowerCase() === (title || "").toLowerCase()) return dls[i];
-    }
-    return null;
-  }
   function dlGate() {
     if (!dlOn()) return;
     dlEnsure().then(function () {
@@ -5521,7 +5509,7 @@ body:has(#dlpg.open) #nav{display:none}
     }
     if (it.status === "active") bt.appendChild(dlBtn("Pause", "", function () { dlPause(it.id); }));
     if (it.status === "paused" || it.status === "failed") bt.appendChild(dlBtn(it.status === "failed" ? "Retry" : "Resume", "pri", function () { dlResume(it.id); }));
-    var del = dlBtn(it.status === "done" || it.status === "failed" ? "Delete" : "Cancel", "dng", function () {});
+    var del = dlBtn(it.status === "done" || it.status === "failed" ? "Remove" : "Cancel", "dng", function () {});
     dlSure(del, "", function () { dlRemove(it.id); });
     bt.appendChild(del);
     inn.appendChild(bt);
@@ -5529,6 +5517,7 @@ body:has(#dlpg.open) #nav{display:none}
     return r;
   }
   function dlPaint() {
+    if (tab === "lib" && LIBVIEW === "dl") paintLibDL();
     if (!DL.open) return;
     var S = DL.sec;
     if (S.list && !DL.arm) {
@@ -5963,7 +5952,7 @@ body:has(#dlpg.open) #nav{display:none}
     cb.onchange = function () { prev(); status(); };
     status();
   }
-  var LIBF = "all", LIBSORT = "recent", LIBEDIT = false, LIBTAB = "list";
+  var LIBF = "all", LIBSORT = "recent", LIBEDIT = false, LIBVIEW = "all";
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
   function pById(id) { for (var i = 0; i < PROFILES.length; i++) if (PROFILES[i].id === id) return PROFILES[i]; return null; }
@@ -6780,6 +6769,19 @@ body:has(#dlpg.open) #nav{display:none}
       setTimeout(function () { if (!document.hidden) toast("Odyssey isn't installed on this device"); }, 1500);
     };
     tr.appendChild(bOdy);
+    if (ctx && ctx.offline && !ctx.live) {
+      bVlc.style.display = "none"; bOdy.style.display = "none";
+      ttl.appendChild(h("span", "poffb", "Downloaded \u2022 Offline"));
+      var bOnl = h("button", "ptxt", "Watch online");
+      bOnl.setAttribute("aria-label", "Switch to online servers");
+      bOnl.onclick = function () {
+        var t0 = curPos(), c0 = ctx;
+        if (navigator.onLine === false) { toast("You're offline. Connect to the internet to use online servers."); return; }
+        closeP();
+        openStreams(c0.mt, c0.id, c0.title, c0.s || 1, c0.e || 1, {}, t0 > 1 ? t0 : 0, t0 > 1);
+      };
+      tr.appendChild(bOnl);
+    }
     tr.appendChild(bAmb); tr.appendChild(bFs); tr.appendChild(bX);
     top.appendChild(tr);
     root.appendChild(top);
@@ -8716,17 +8718,13 @@ body:has(#dlpg.open) #nav{display:none}
     b.setAttribute("data-k", m.mt + "_" + m.id);
     if (opts.nolib) b.setAttribute("data-nl", "1");
     else if (libHas(m.mt, m.id)) p.appendChild(h("span", "inlib", "\u2713"));
-    if (opts.downloaded) {
-      var dlBadge = h("span", "dbadge");
-      dlBadge.textContent = "\u2713";
-      if (opts.dlSize) dlBadge.setAttribute("title", "Downloaded: " + opts.dlSize);
-      p.appendChild(dlBadge);
-    }
     var unrelC = isUnreleased(m);
     var plBadge = h("span", "pplay" + (unrelC ? " off" : ""));
     plBadge.innerHTML = ICON.play;
     plBadge.onclick = function (ev) {
       ev.stopPropagation();
+      var dcp = opts.nolib ? dlCopy(m.mt, m.id) : null;
+      if (dcp && dlPlay(dcp)) return;
       if (unrelC) { toast("Not released yet" + (m.d ? ": " + fmtDate(m.d) : "")); return; }
       openStreams(m.mt, m.id, m.t, 1, 1, { p: m.p, y: m.y, b: m.b });
     };
@@ -8734,7 +8732,7 @@ body:has(#dlpg.open) #nav{display:none}
     b.appendChild(p);
     b.appendChild(h("div", "ct", m.t));
     b.appendChild(h("div", "cy", opts.soon ? (m.d ? fmtDate(m.d) : "Coming soon") : (m.y || "")));
-    b.onclick = function () { openTitle(m.mt, m.id); };
+    b.onclick = function () { var dcp = opts.nolib ? dlCopy(m.mt, m.id) : null; if (dcp && dlPlay(dcp)) return; openTitle(m.mt, m.id); };
     return b;
   }
   function skeletonStrip(n) {
@@ -9150,6 +9148,25 @@ body:has(#dlpg.open) #nav{display:none}
     }
     return b;
   }
+  function paintLibDL() {
+    var c = $("libdl");
+    if (!c || DL.arm) return;
+    var ls = dlMine(), rank = { active: 0, queued: 1, paused: 2, failed: 3, done: 4 };
+    ls.sort(function (a, b) { return (rank[a.status] == null ? 5 : rank[a.status]) - (rank[b.status] == null ? 5 : rank[b.status]) || (b.created || 0) - (a.created || 0); });
+    var n = 0, tot = 0;
+    ls.forEach(function (x) { if (x.status === "done") { n++; tot += x.total || x.bytes || 0; } });
+    c.textContent = "";
+    if (ls.length) c.appendChild(h("div", "libdlsum", n + (n === 1 ? " title" : " titles") + " saved \u2022 " + fmtB(tot) + " on this device"));
+    if (!ls.length) c.appendChild(h("div", "dlempty", "Nothing saved yet. Open a title, pick a server and tap Save."));
+    ls.forEach(function (it) { c.appendChild(dlRow(it)); });
+  }
+  // a finished download of this title (a movie, or a series with exactly one saved episode) plays straight from the device
+  function dlCopy(mt, id) {
+    if (!dlOn()) return null;
+    var got = [];
+    dlMine().forEach(function (x) { if (x.status === "done" && x.mt === mt && String(x.tid) === String(id)) got.push(x); });
+    return got.length && (mt === "movie" || got.length === 1) ? got[0] : null;
+  }
   function renderLib() {
     var box = $("libgrid");
     box.textContent = "";
@@ -9171,99 +9188,76 @@ body:has(#dlpg.open) #nav{display:none}
     who.appendChild(h("span", null, "Watching as " + p.n));
     who.onclick = function () { openProfiles(true); };
     box.appendChild(who);
+    var dlOK = dlOn();
+    if (LIBVIEW === "dl" && !dlOK) LIBVIEW = "all";
+    var vtabs = h("div", "libtabs");
+    [["all", "All"], ["cont", "Continue Watching"], ["list", "My List"]].concat(dlOK ? [["dl", "Downloads" + (dlCount() ? " (" + dlCount() + ")" : "")]] : []).forEach(function (f) {
+      var vb = h("button", "pill" + (LIBVIEW === f[0] ? " sel" : ""), f[1]);
+      vb.onclick = function () { LIBVIEW = f[0]; renderLib(); };
+      vtabs.appendChild(vb);
+    });
+    box.appendChild(vtabs);
+    if (dlOK) dlEnsure().then(function () { if (tab === "lib" && !DL.libok) { DL.libok = 1; renderLib(); } });
+    var showCont = LIBVIEW === "all" || LIBVIEW === "cont", showList = LIBVIEW === "all" || LIBVIEW === "list";
+    if (LIBVIEW === "dl") {
+      var sd = libSection("Downloads");
+      var dc = h("div", "dlc libdl"); dc.id = "libdl";
+      sd.appendChild(dc); box.appendChild(sd);
+      paintLibDL();
+      return;
+    }
 
     var cont = WATCH.filter(function (w) { return !w.nx; }).sort(function (a, b) { return (b.a || 0) - (a.a || 0); });
     var next = WATCH.filter(function (w) { return w.nx; }).sort(function (a, b) { return (b.a || 0) - (a.a || 0); });
-
-    // Filter pills for Library sections
-    var libTabs = h("div", "libtabs");
-    var tabs = [
-      { id: "continue", label: "Continue Watching", count: cont.length },
-      { id: "next", label: "Watch Next", count: next.length },
-      { id: "list", label: "My List", count: LIB.length },
-      { id: "downloads", label: "Downloads", count: dlCount() }
-    ];
-    tabs.forEach(function (t) {
-      var active = LIBTAB === t.id;
-      var b = h("button", "pill" + (active ? " sel" : ""), t.label + (t.count ? " (" + t.count + ")" : ""));
-      b.onclick = function () { LIBTAB = t.id; renderLib(); };
-      libTabs.appendChild(b);
-    });
-    box.appendChild(libTabs);
-
-    if (LIBTAB === "continue" && cont.length) {
+    if (LIBVIEW === "cont" && !cont.length && !next.length) box.appendChild(h("div", "note center", "Nothing to continue yet. Start a title and it will appear here."));
+    if (showCont && cont.length) {
       var s1 = libSection("Continue Watching");
       var st1 = h("div", "strip");
       cont.forEach(function (o) { st1.appendChild(watchCard(o)); });
       s1.appendChild(st1);
       box.appendChild(s1);
     }
-    if (LIBTAB === "next" && next.length) {
+    if (showCont && next.length) {
       var s2 = libSection("Watch Next");
       var st2 = h("div", "strip");
       next.forEach(function (o) { st2.appendChild(watchCard(o)); });
       s2.appendChild(st2);
       box.appendChild(s2);
     }
-    if (LIBTAB === "list") {
-      var s3 = libSection("My List (" + LIB.length + ")");
-      var bar = h("div", "libbar");
-      [["all", "All"], ["movie", "Movies"], ["tv", "Series"]].forEach(function (f) {
-        var pb = h("button", "pill" + (LIBF === f[0] ? " sel" : ""), f[1]);
-        pb.onclick = function () { LIBF = f[0]; renderLib(); };
-        bar.appendChild(pb);
+    if (!showList) return;
+    var s3 = libSection("My List (" + LIB.length + ")");
+    var bar = h("div", "libbar");
+    [["all", "All"], ["movie", "Movies"], ["tv", "Series"]].forEach(function (f) {
+      var pb = h("button", "pill" + (LIBF === f[0] ? " sel" : ""), f[1]);
+      pb.onclick = function () { LIBF = f[0]; renderLib(); };
+      bar.appendChild(pb);
+    });
+    var sb = h("button", "pill", LIBSORT === "recent" ? "Recent" : "A–Z");
+    sb.onclick = function () { LIBSORT = LIBSORT === "recent" ? "az" : "recent"; renderLib(); };
+    bar.appendChild(sb);
+    var eb = h("button", "pill" + (LIBEDIT ? " sel" : ""), LIBEDIT ? "Done" : "Edit");
+    eb.onclick = function () { LIBEDIT = !LIBEDIT; renderLib(); };
+    bar.appendChild(eb);
+    s3.appendChild(bar);
+    var items = LIB.filter(function (o) { return LIBF === "all" || o.m === LIBF; });
+    items.sort(LIBSORT === "az" ? function (a, b) { return String(a.t).localeCompare(String(b.t)); } : function (a, b) { return (b.a || 0) - (a.a || 0); });
+    if (!items.length) {
+      s3.appendChild(h("div", "note center", LIB.length ? "Nothing here with this filter." : "Your list is empty. Open any title and tap + to save it here."));
+    } else {
+      var g = h("div", "grid");
+      items.forEach(function (o) {
+        var c = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true, nolib: true });
+        if (LIBEDIT) {
+          var x = h("button", "xbtn", "×");
+          x.setAttribute("aria-label", "Remove");
+          x.onclick = function (ev) { ev.stopPropagation(); libRemove(o.m, o.i); renderLib(); };
+          c.firstChild.appendChild(x);
+        }
+        g.appendChild(c);
       });
-      var sb = h("button", "pill", LIBSORT === "recent" ? "Recent" : "A–Z");
-      sb.onclick = function () { LIBSORT = LIBSORT === "recent" ? "az" : "recent"; renderLib(); };
-      bar.appendChild(sb);
-      var eb = h("button", "pill" + (LIBEDIT ? " sel" : ""), LIBEDIT ? "Done" : "Edit");
-      eb.onclick = function () { LIBEDIT = !LIBEDIT; renderLib(); };
-      bar.appendChild(eb);
-      s3.appendChild(bar);
-      var items = LIB.filter(function (o) { return LIBF === "all" || o.m === LIBF; });
-      items.sort(LIBSORT === "az" ? function (a, b) { return String(a.t).localeCompare(String(b.t)); } : function (a, b) { return (b.a || 0) - (a.a || 0); });
-      if (!items.length) {
-        s3.appendChild(h("div", "note center", LIB.length ? "Nothing here with this filter." : "Your list is empty. Open any title and tap + to save it here."));
-      } else {
-        var g = h("div", "grid");
-        items.forEach(function (o) {
-          var isDownloaded = dlIsInLibrary(o.m, o.i);
-          var c = makeCard({ id: o.i, mt: o.m, t: o.t, p: o.p, y: o.y }, { badge: true, nolib: true, downloaded: isDownloaded });
-          if (LIBEDIT) {
-            var x = h("button", "xbtn", "×");
-            x.setAttribute("aria-label", "Remove");
-            x.onclick = function (ev) { ev.stopPropagation(); libRemove(o.m, o.i); renderLib(); };
-            c.firstChild.appendChild(x);
-          }
-          if (isDownloaded) {
-            c.onclick = function () {
-              var it = dlFindByTitle(o.m, o.i, o.t);
-              if (it && it.status === "done") { dlPlay(it); return; }
-              openTitle(o.m, o.i);
-            };
-          }
-          g.appendChild(c);
-        });
-        s3.appendChild(g);
-      }
-      box.appendChild(s3);
+      s3.appendChild(g);
     }
-    if (LIBTAB === "downloads") {
-      var s4 = libSection("Downloads (" + dlCount() + ")");
-      var dls = dlMine().filter(function (x) { return x.status === "done"; });
-      if (!dls.length) {
-        s4.appendChild(h("div", "note center", "No downloads yet. Open a title, pick a server and tap Save."));
-      } else {
-        var g = h("div", "grid");
-        dls.forEach(function (it) {
-          var c = makeCard({ id: it.tid, mt: it.mt, t: it.title, p: it.pimg ? "" : (it.meta && it.meta.p) || "", y: "" }, { badge: true, nolib: true, downloaded: true, dlSize: fmtB(it.total || it.bytes) });
-          c.onclick = function () { dlPlay(it); };
-          g.appendChild(c);
-        });
-        s4.appendChild(g);
-      }
-      box.appendChild(s4);
-    }
+    box.appendChild(s3);
   }
   function renderMe() {
     var box = $("v-me");
@@ -9279,147 +9273,49 @@ body:has(#dlpg.open) #nav{display:none}
     }
     wrap.appendChild(big);
     wrap.appendChild(h("h2", null, name || "Boa Cinema"));
-    wrap.appendChild(h("p", null, ACC ? (ACC.role === "admin" ? "Admin" : ACC.role === "moderator" ? "Moderator" : "Member") + (u && u.username ? " \u00b7 @" + u.username : "") : (u && u.username ? "@" + u.username : "Guest")));
+    wrap.appendChild(h("p", null, ACC ? (ACC.role === "admin" ? "Admin" : ACC.role === "moderator" ? "Moderator" : "Member") + (u && u.username ? " · @" + u.username : "") : (u && u.username ? "@" + u.username : "Guest")));
     box.appendChild(wrap);
-
-    // Account card for signed-in users
-    if (ACC) {
-      box.appendChild(acctCard());
+    if (dlOn()) dlEnsure().then(function () { if (tab === "me" && !DL.meok) { DL.meok = 1; renderMe(); } });
+    function group(par, title) { var g = h("div", "megrp"); g.appendChild(h("div", "meh", title)); par.appendChild(g); return g; }
+    function mkList(g) { var l = h("div", "list"); g.appendChild(l); return l; }
+    function item(list, label, val, fn, cls) {
+      var b = h("button", "li" + (cls ? " " + cls : ""), label);
+      if (val) b.appendChild(h("span", null, val));
+      b.onclick = fn;
+      list.appendChild(b);
     }
-
-    // Install card for guests/PWA
+    // 1. Account & Viewing
+    var g1 = group(box, "Account & Viewing");
+    g1.appendChild(acctCard(false));
+    var l1 = mkList(g1);
+    if (canWatch()) item(l1, "Who's watching", curProfile().n, function () { openProfiles(true); });
+    item(l1, "Library", canWatch() ? LIB.length + (LIB.length === 1 ? " title" : " titles") : "Sign in", function () { showTab("lib"); });
+    if (myCC) item(l1, "Your region", flag(myCC) + " " + cname(myCC), function () {});
     var icd = installCard();
-    if (icd) box.appendChild(icd);
-
-    // ---- Section 1: Account & Viewing ----
-    var sec1 = h("div", "me-section");
-    sec1.appendChild(h("h3", "me-section-title", "Account & Viewing"));
-    var grid1 = h("div", "me-grid");
-
-    // Profile avatar card
-    var profCard = h("div", "me-card");
-    profCard.appendChild(h("div", "me-card-icon", big.cloneNode(true)));
-    profCard.appendChild(h("div", "me-card-label", "Profile"));
-    profCard.appendChild(h("div", "me-card-value", curProfile().n));
-    profCard.onclick = function () { openProfiles(true); };
-    grid1.appendChild(profCard);
-
-    // Who's watching card
-    var whoCard = h("div", "me-card");
-    whoCard.appendChild(h("div", "me-card-icon", "\ud83d\udc64"));
-    whoCard.appendChild(h("div", "me-card-label", "Who's Watching"));
-    whoCard.appendChild(h("div", "me-card-value", curProfile().n));
-    whoCard.onclick = function () { openProfiles(true); };
-    grid1.appendChild(whoCard);
-
-    // Library card
-    var libCard = h("div", "me-card");
-    libCard.appendChild(h("div", "me-card-icon", "\ud83d\udcda"));
-    libCard.appendChild(h("div", "me-card-label", "Library"));
-    libCard.appendChild(h("div", "me-card-value", LIB.length + (LIB.length === 1 ? " title" : " titles")));
-    libCard.onclick = function () { showTab("lib"); };
-    grid1.appendChild(libCard);
-
-    // Your region card
-    if (myCC) {
-      var regCard = h("div", "me-card");
-      regCard.appendChild(h("div", "me-card-icon", "\ud83c\udf0d"));
-      regCard.appendChild(h("div", "me-card-label", "Your Region"));
-      regCard.appendChild(h("div", "me-card-value", flag(myCC) + " " + cname(myCC)));
-      grid1.appendChild(regCard);
-    }
-
-    sec1.appendChild(grid1);
-    box.appendChild(sec1);
-
-    // ---- Section 2: Appearance ----
-    var sec2 = h("div", "me-section");
-    sec2.appendChild(h("h3", "me-section-title", "Appearance"));
-    sec2.appendChild(themeCard());
-    box.appendChild(sec2);
-
-    // ---- Section 3: Media & Bot / Add-ons ----
-    var sec3 = h("div", "me-section");
-    sec3.appendChild(h("h3", "me-section-title", "Media & Bot / Add-ons"));
-    var grid3 = h("div", "me-grid");
-
-    // Open the bot
-    var botCard = h("div", "me-card");
-    botCard.appendChild(h("div", "me-card-icon", "\ud83e\udd16"));
-    botCard.appendChild(h("div", "me-card-label", "Open the Bot"));
-    botCard.appendChild(h("div", "me-card-value", "@Boa_entertainment_bot"));
-    botCard.onclick = function () {
+    if (icd) { icd.style.margin = "10px 16px 0"; g1.appendChild(icd); }
+    // 2. Appearance
+    var g2 = group(box, "Appearance");
+    g2.appendChild(themeCard());
+    // 3. Media & Add-ons
+    var g3 = group(box, "Media & Add-ons");
+    var l3 = mkList(g3);
+    item(l3, "Open the bot", "@Boa_entertainment_bot", function () {
       var url = "https://t.me/Boa_entertainment_bot";
       if (tg && tg.openTelegramLink) { try { tg.openTelegramLink(url); return; } catch (e) {} }
       openLink(url);
-    };
-    grid3.appendChild(botCard);
-
-    // Downloads shortcut
-    if (dlOn()) {
-      var dlCard = h("div", "me-card");
-      dlCard.appendChild(h("div", "me-card-icon", "\u2b07\ufe0f"));
-      dlCard.appendChild(h("div", "me-card-label", "Downloads"));
-      dlCard.appendChild(h("div", "me-card-value", dlCount() + " saved"));
-      dlCard.onclick = function () { openDL("list"); };
-      grid3.appendChild(dlCard);
-    }
-
-    // Download dashboard (admin)
-    if (dlAdmin()) {
-      var dashCard = h("div", "me-card");
-      dashCard.appendChild(h("div", "me-card-icon", "\ud83d\udcca"));
-      dashCard.appendChild(h("div", "me-card-label", "Download Dashboard"));
-      dashCard.appendChild(h("div", "me-card-value", "Admin"));
-      dashCard.onclick = function () { openDL("dash"); };
-      grid3.appendChild(dashCard);
-    }
-
-    // Get the add-on
-    var addonCard = h("div", "me-card");
-    addonCard.appendChild(h("div", "me-card-icon", "\ud83e\udde9"));
-    addonCard.appendChild(h("div", "me-card-label", "Get the Add-on"));
-    addonCard.appendChild(h("div", "me-card-value", "Stremio style"));
-    addonCard.onclick = function () { openLink(location.origin + "/addon"); };
-    grid3.appendChild(addonCard);
-
-    // Owner panel
-    if (IS_OWNER) {
-      var ownerCard = h("div", "me-card");
-      ownerCard.appendChild(h("div", "me-card-icon", "\ud83d\udc51"));
-      ownerCard.appendChild(h("div", "me-card-label", "Owner Panel"));
-      ownerCard.appendChild(h("div", "me-card-value", "Only you"));
-      ownerCard.onclick = openAdmin;
-      grid3.appendChild(ownerCard);
-    }
-
-    sec3.appendChild(grid3);
-    box.appendChild(sec3);
-
-    // ---- Section 4: Data & Session (bottom-anchored) ----
-    var sec4 = h("div", "me-section me-section-bottom");
-    sec4.appendChild(h("h3", "me-section-title", "Data & Session"));
-    var grid4 = h("div", "me-grid");
-
-    // Clear watch history
-    if (canWatch() && WATCH.length) {
-      var histCard = h("div", "me-card danger");
-      histCard.appendChild(h("div", "me-card-icon", "\ud83d\uddd1\ufe0f"));
-      histCard.appendChild(h("div", "me-card-label", "Clear Watch History"));
-      histCard.appendChild(h("div", "me-card-value", WATCH.length + " items"));
-      histCard.onclick = function () {
-        watchClear(); renderMe(); toast("History cleared");
-      };
-      grid4.appendChild(histCard);
-    }
-
-    // Clear library
-    if (LIB.length) {
-      var libClearCard = h("div", "me-card danger");
-      libClearCard.appendChild(h("div", "me-card-icon", "\ud83d\uddd1\ufe0f"));
-      libClearCard.appendChild(h("div", "me-card-label", "Clear Library"));
-      libClearCard.appendChild(h("div", "me-card-value", LIB.length + " titles"));
-      libClearCard.onclick = function () {
+    });
+    if (dlOn()) item(l3, "Downloads", dlCount() + " saved", function () { LIBVIEW = "dl"; showTab("lib"); });
+    if (dlAdmin()) item(l3, "Download dashboard", "Admin", function () { openDL("dash"); });
+    if (IS_OWNER) item(l3, "Owner panel", "Only you", openAdmin);
+    item(l3, "Get the add-on", "Stremio style", function () { openLink(location.origin + "/addon"); });
+    // 4. Data & Session (anchored to the bottom of the page)
+    var bot = h("div", "mebot");
+    var g4 = group(bot, "Data & Session");
+    var hasData = (canWatch() && WATCH.length) || LIB.length;
+    if (hasData) {
+      var l4 = mkList(g4);
+      if (canWatch() && WATCH.length) item(l4, "Clear watch history", WATCH.length + "", function () { watchClear(); renderMe(); toast("History cleared"); }, "danger");
+      if (LIB.length) item(l4, "Clear library", LIB.length + "", function () {
         function wipe() {
           if (cloud) { LIB.forEach(function (o) { try { cloud.removeItem(libKey(o.m, o.i)); } catch (e) {} }); }
           watchClear();
@@ -9430,31 +9326,14 @@ body:has(#dlpg.open) #nav{display:none}
         }
         if (tg && tg.showConfirm) { try { tg.showConfirm("Remove every saved title?", function (ok) { if (ok) wipe(); }); return; } catch (e) {} }
         if (window.confirm("Remove every saved title?")) wipe();
-      };
-      grid4.appendChild(libClearCard);
+      }, "danger");
     }
-
-    // Sign out / Sign in
-    var authCard = h("div", "me-card" + (ACC ? " danger" : ""));
-    authCard.appendChild(h("div", "me-card-icon", ACC ? "\ud83d\udeaa" : "\ud83d\udd10"));
-    authCard.appendChild(h("div", "me-card-label", ACC ? "Sign Out" : "Sign In"));
-    authCard.appendChild(h("div", "me-card-value", ACC ? "" : "Create account to sync"));
-    authCard.onclick = function () {
-      if (ACC) {
-        acctDrop(false); toast("Signed out");
-      } else {
-        openAuth("login");
-      }
-    };
-    grid4.appendChild(authCard);
-
-    sec4.appendChild(grid4);
-    box.appendChild(sec4);
-
-    // Footer
+    var sc = acctCard(true); sc.style.marginTop = hasData ? "12px" : "0";
+    g4.appendChild(sc);
     var f = h("footer");
     f.appendChild(h("p", null, "Movie data and images by TMDB. Streaming availability by JustWatch. This product uses the TMDB API but is not endorsed or certified by TMDB. Boa Entertainment is a discovery platform and does not host or stream any media. Netflix is a trademark of Netflix, Inc. Boa Entertainment is not affiliated with Netflix."));
-    box.appendChild(f);
+    bot.appendChild(f);
+    box.appendChild(bot);
   }
   function paintNavAvatar() {
     var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
