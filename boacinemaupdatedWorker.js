@@ -6128,7 +6128,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     return p;
   }
   // score bonus: reachable + fast is best; unreachable (gone / offline / web page) is pushed to the back
-  // 0 = checked and reachable, 1 = not checked yet, 2 = needs special headers / embed (relay-limited), 3 = failed or unreachable
+  // 0 = checked and reachable (web-ready), 1 = not checked yet, 2 = needs special headers / embed (relay-limited), 3 = failed or dead
   function linkRank(e) {
     var sd = e.sd || {}, st = e.st || {}, u = String(st.url || "");
     if (sd.dead || sd.tor) return 3;
@@ -6149,6 +6149,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   var SUBSEL = "", SUBUSER = false, SUBEN = false, SUBHKEY = "";
   var TIER = lsGet("boa_tier", "any"), MAXG = lsGet("boa_maxgb", "auto");   // stream picker: resolution tier + hard file-size ceiling (GB)
   var CCSIZE = lsGet("boa_ccsize", "m"), CCPOS = lsGet("boa_ccpos", "b"), CCHID = false;   // caption size (s/m/l) and position (b = bottom, m = lower-mid)
+var AUDLANG = lsGet("boa_audlang", "");   // persisted global preferred audio language
   function isEn(x) { return !!x && (x.lang === "eng" || x.lang === "en" || /english/i.test(x.label || x.name || "")); }
   var LANGS = { eng: "English", spa: "Spanish", fre: "French", fra: "French", por: "Portuguese", ara: "Arabic", ger: "German", deu: "German", ita: "Italian", rus: "Russian", hin: "Hindi", tur: "Turkish", chi: "Chinese", zho: "Chinese", jpn: "Japanese", kor: "Korean", dut: "Dutch", pol: "Polish", ind: "Indonesian", swa: "Swahili", yor: "Yoruba" };
   var DM = { en: ["eng"], fr: ["fre", "fra"], es: ["spa"], pt: ["por"], ar: ["ara"], de: ["ger", "deu"], it: ["ita"], ru: ["rus"], hi: ["hin"], tr: ["tur"], zh: ["chi", "zho"], ja: ["jpn"], ko: ["kor"], nl: ["dut"], pl: ["pol"], id: ["ind"], sw: ["swa"] };
@@ -7450,6 +7451,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       var tp0 = curPos(); if (tp0 > 1 && !isLive) seekAfter = tp0;     // every link / server switch resumes from the same second
       if (curSrv > -1) { bad[curSrv] = 1; hadFail[curSrv] = 1; upd[curSrv] = 0; paintDots(); }
       console.warn("[Boa] playback failed on", url, why);
+      replenishServers();
       if (autoN++ < 24) {
         // 0) the next link inside the SAME server (its main link, then its more-links in order) before any other server is touched
         var ck = curSrv;
@@ -7498,6 +7500,59 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       }
       fail();
     }
+    // Background auto-replenishment: when a server/link fails, re-query upstream (hard refresh r=1) and
+    // merge fresh, playable links into the failing server's alts so SERVER 1 stays stocked seamlessly.
+    var REP = {};
+    function replenishServers() {
+      var L = (ctx && ctx.servers) || [], pending = 0;
+      function rFmtOf(x) {
+        var u = String(x.url || ""), t = String(x.title || "") + " " + String(x.name || "");
+        if (!u || /^magnet:/i.test(u)) return "torrent";
+        if (/\/embed\/|\.html?($|\?)/i.test(u)) return "embed";
+        if (/\.m3u8(\?|$)/i.test(u)) return "hls";
+        if (/\.mp4(\?|$)/i.test(u)) return "mp4";
+        if (/\.mkv(\?|$)/i.test(u)) return "mkv";
+        if (/\.avi(\?|$)/i.test(u)) return "avi";
+        if (/\.mpd(\?|$)/i.test(u)) return "dash";
+        if (/\bmkv\b/i.test(t)) return "mkv";
+        return "file";
+      }
+      function rSizeGB(x) {
+        var m = /(\d+(?:\.\d+)?)\s?(GB|GiB|MB|MiB)/i.exec(String(x.title || "") + " " + String(x.name || "") + " " + (typeof x.size === "string" ? x.size : ""));
+        if (m) return /G/i.test(m[2]) ? +m[1] : +m[1] / 1024;
+        var b = +x.size;
+        return b > 1048576 ? b / 1073741824 : 0;
+      }
+      L.forEach(function (sv, i) {
+        if (!bad[i] && !failedU[sv.st.url]) return;
+        if (REP[i]) return;   // already replenishing this server
+        REP[i] = true; pending++;
+        api("/api/streams?p=1&type=" + mt + "&id=" + encodeURIComponent(id) + "&s=" + (s || 1) + "&e=" + (e || 1) + "&r=1", 0, 15000)
+          .then(function (r) {
+            delete REP[i];
+            if (!r || !Array.isArray(r.streams)) return;
+            var fresh = [];
+            r.streams.forEach(function (x) {
+              if (!x || !x.url || /\/embed\/|\.html?($|\?)/i.test(x.url)) return;
+              if (failedU[x.url] || triedU[x.url]) return;
+              var key = ukey(x.url);
+              var have = false;
+              L.forEach(function (o) { if (o.urls.indexOf(x.url) > -1) have = true; (o.alts || []).forEach(function (a) { if (a.st.url === x.url) have = true; }); });
+              if (have) return;
+              fresh.push(x);
+            });
+            if (!fresh.length) return;
+            sv.alts = (sv.alts || []).slice();
+            fresh.forEach(function (x) {
+              var st0 = { title: x.title || "", url: x.url, provider: x.provider || "Plugin", quality: x.quality || "", lt: x.lt || "", headers: x.headers || {} };
+              sv.alts.push({ st: st0, heavy: /mkv|hevc|ac3|dts|2160p|\b4k\b/i.test(String(x.title||"")+" "+String(x.name||"")), tor: /^magnet:/i.test(x.url), f: rFmtOf(x), q: 0, gb: rSizeGB(x) });
+            });
+            sv.alts.sort(function (a, b) { return linkRank(a) - linkRank(b) || b.sd.sc - a.sd.sc; });
+            if (menuEl && /srvroom/.test(menuEl.className)) paintDots();
+            toast("Server " + sv.n + " restocked with fresh links");
+          }).catch(function () { delete REP[i]; });
+      });
+    }
     function startSource(src0, useRelay) {
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
       triedU[src0] = 1; dead = false;
@@ -7518,9 +7573,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           if (gen !== srcGen) return;
           var tpf = curPos(); if (tpf > 1 && !isLive) seekAfter = tpf;
           // the toggle is read live: a relay retry only happens while it is ON, and never when it is OFF
-          if (RELAY_ON() && !relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
-          // privacy relay OFF: a blocked HLS playlist (CORS / 403 / network) gets one retry through the stream proxy, with its own message
-          if (!RELAY_ON() && !relayed && !retried && ((isHls && netFail) || hdrNeed)) { retried = true; startSource(src0, true); return; }    // quiet: no "proxy" message, same position
+          if (RELAY_ON() && !relayed && !retried) { retried = true; relayed = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
           stepOrFail();
         };
         fatalFn = onFatal;
@@ -7549,7 +7602,12 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
               if (at.length > 1 && AUDPREF) {
                 var pi = -1;
                 at.forEach(function (t2, q) { if (pi < 0 && String(t2.lang || "") === AUDPREF.lang && (!AUDPREF.name || String(t2.name || "") === AUDPREF.name)) pi = q; });
-                if (pi > -1 && pi !== sh.audioTrack) sh.audioTrack = pi;      // the user's pick stays locked on every new link
+                if (pi > -1 && pi !== sh.audioTrack) sh.audioTrack = pi;
+                sh._aud = 1;
+              } else if (at.length > 1 && !AUDUSER && !sh._aud) {
+                var want = (AUDLANG || (ctx && ctx.ol ? langName(ctx.ol) : "")).toLowerCase(), pick = -1;
+                at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
+                if (pick > -1 && pick !== sh.audioTrack) sh.audioTrack = pick;
                 sh._aud = 1;
               } else if (at.length > 1 && !AUDUSER && !sh._aud && ctx && ctx.ol) {
                 sh._aud = 1;
@@ -7583,11 +7641,19 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           try {
             if (sk.text && sk.text.UITextDisplayer) { tx = root.querySelector(".shk-tx"); if (!tx) { tx = h("div", "shk-tx"); root.appendChild(tx); } tx.textContent = ""; }
           } catch (e) { tx = null; }
+          var isLive = !!(ctx && ctx.live);
           var cfg = {
-            streaming: { bufferingGoal: 40, rebufferingGoal: 1.5, jumpLargeGaps: true, retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 } },
+            streaming: {
+              bufferingGoal: isLive ? 30 : 40,
+              rebufferingGoal: isLive ? 6 : 1.5,
+              jumpLargeGaps: true,
+              liveSync: { targetLatency: 10, maxBehind: 30 },
+              retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 }
+            },
             manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
           };
-          if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
+          var prefLang = AUDLANG || (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol)) ? String(ctx.ol).toLowerCase() : "");
+          if (prefLang) cfg.preferredAudioLanguage = prefLang;
           var cueN = 0;
           if (tx) {
             var ttx = tx;
@@ -7674,9 +7740,9 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             try {
               var at = hls.audioTracks || [];
               if (at.length && hls.audioTrack < 0) hls.audioTrack = 0;
-              // several languages in the stream: start on the title's original language (Korean film -> Korean), never auto-switch after the viewer picks one
-              if (at.length > 1 && !AUDUSER && !AUDPREF && ctx && ctx.ol) {
-                var want = langName(ctx.ol).toLowerCase(), pick = -1;
+              // several languages in the stream: start on the global preference / original language, never auto-switch after the viewer picks one
+              if (at.length > 1 && !AUDUSER) {
+                var want = (AUDLANG || (ctx && ctx.ol ? langName(ctx.ol) : "")).toLowerCase(), pick = -1;
                 at.forEach(function (t2, q) { if (pick < 0 && (langName(t2.lang).toLowerCase() === want || String(t2.name || "").toLowerCase().indexOf(want) > -1)) pick = q; });
                 if (pick > -1 && pick !== hls.audioTrack) hls.audioTrack = pick;
               }
@@ -7712,19 +7778,10 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
         }
       }
-      if (RELAY_ON() || viaProxy) {
-        relayed = true;
-        relaySign(src0, curSt).then(function (ru) {
-          if (gen !== srcGen || closed) return;
-          if (!RELAY_ON() && !viaProxy) { relayed = false; go(src0); return; }     // switched OFF while signing: go direct
-          if (!ru) {
-            if (!RELAY_ON()) { relayed = false; go(src0); return; }               // proxy unavailable: still try the direct link
-            if (!relayFell) { relayFell = true; relayed = false; toast("Relay unavailable \u00b7 playing direct"); go(src0); return; }   // relay down: try the direct link; if that fails the normal server switching takes over
-            why = "The relay is unavailable right now."; stepOrFail(); return;
-          }
-          go(ru);
-        });
-      } else { relayed = false; go(src0); }
+      // Direct playback is always tried first (no "loading through proxy" state). The relay is only a fallback,
+      // attempted from onFatal when direct playback fails for CORS/network reasons and the relay is enabled.
+      relayed = false;
+      go(src0);
     }
     // ----- VAST ads (pre-roll, mid-roll) -----
     function hms(x) { x = Math.max(0, x || 0); var a = Math.floor(x / 3600), b = Math.floor(x % 3600 / 60), c = (x % 60).toFixed(3); return (a < 10 ? "0" : "") + a + ":" + (b < 10 ? "0" : "") + b + ":" + (c < 10 ? "0" : "") + c; }
@@ -8367,7 +8424,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           src = "HLS";
           hls.audioTracks.forEach(function (tr, i) {
             var ln = langName(tr.lang) || "", nm = tr.name && String(tr.name) !== String(tr.lang) ? String(tr.name) : "";
-            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; hls.audioTrack = i; }, lang: ln });
+            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; AUDLANG = String(tr.lang || ""); lsSet("boa_audlang", AUDLANG); hls.audioTrack = i; }, lang: ln });
           });
         } else if (dash && dash.getTracksFor) {
           var dt = dash.getTracksFor("audio") || [], dc = dash.getCurrentTrackFor ? dash.getCurrentTrackFor("audio") : null;
@@ -9937,7 +9994,7 @@ $("smclose").onclick = function () {
             if (r && Array.isArray(r.streams)) {
               r.streams.forEach(function (x) { if (x && x.url && !nseen[x.url]) { nseen[x.url] = 1; nacc.push(x); } });
               if (r.done || Date.now() - t0 > 50000) return stop(true);
-              return step(r.n || seen, false);
+              return step(r.n || seen, true);   // hard refresh: every poll forces a fresh upstream query (r=1)
             }
             if (++errs > 2) return stop(false);
             return new Promise(function (res) { setTimeout(res, 1200); }).then(function () { step(seen, false); });
