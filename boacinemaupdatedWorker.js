@@ -29,7 +29,10 @@ const BRAND = "Boa Entertainment";
 //           ADMIN_EMAILS / MOD_EMAILS Worker variables. Regular signed-in users see nothing.
 //   true  = every signed-in user also gets the download controls and their own Downloads page.
 // Flip to true only after the Admin Offline Download Dashboard confirms downloads and offline playback work on your devices.
-const DOWNLOADS_ENABLED_FOR_USERS = false;
+const DOWNLOADS_ENABLED_FOR_USERS = true;
+// Downloads save straight from the source host to the phone. The Worker never carries download bytes for regular users
+// (only admins / moderators may route one through it, for testing). Set true only if you accept the Worker traffic.
+const DOWNLOAD_RELAY_FOR_USERS = false;
 
 // Sign-in rule. true = guests can browse and read details only; playback, stream links, Library and watch history need a signed-in
 // account (or the Telegram owner). The Worker enforces this on /api/streams, /api/relay-sign, /api/torrent-bridge and /api/live links
@@ -1180,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.58";
+const APP_VERSION = "2026-11-22.60";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1888,8 +1891,9 @@ async function watchGate(request, url, env) {
   if (p !== "/api/streams" && p !== "/api/relay-sign" && p !== "/api/torrent-bridge") return null;
   const s = await sessionOf(request, env);
   if (!s.ok) return authJson({ error: "Sign in to watch.", auth: true }, 401);
-  if (p === "/api/relay-sign" && url.searchParams.get("dl") === "1" && !DOWNLOADS_ENABLED_FOR_USERS && s.role !== "admin" && s.role !== "moderator") {
-    return authJson({ error: "Downloads are not enabled yet." }, 403);
+  if (p === "/api/relay-sign" && url.searchParams.get("dl") === "1" && s.role !== "admin" && s.role !== "moderator") {
+    if (!DOWNLOADS_ENABLED_FOR_USERS) return authJson({ error: "Downloads are not enabled yet." }, 403);
+    if (!DOWNLOAD_RELAY_FOR_USERS) return authJson({ error: "direct only" }, 403);
   }
   return null;
 }
@@ -4419,6 +4423,7 @@ body:has(#dlpg.open) #nav{display:none}
 #dlpg .dlgo{font-size:13px;padding:10px 16px;margin:4px 6px 0 0}
 #dlpg input[type=text],#dlpg select{width:100%;box-sizing:border-box;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:12px;color:#fff;font:inherit;font-size:16px;padding:11px 12px;margin:4px 0 6px}
 #dlpg .dlempty{padding:22px 6px;text-align:center;color:#a1a1aa;font-size:14px}
+.vrfok{display:inline-block;margin:4px 0 0;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:800;letter-spacing:.03em;background:rgba(70,211,105,.16);color:#46d369;border:1px solid rgba(70,211,105,.3)}
 /* ---- v.58: Library tabs, downloads in Library, grouped Profile ---- */
 .libtabs{display:flex;gap:8px;overflow-x:auto;padding:6px 16px 4px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .libtabs::-webkit-scrollbar{display:none}
@@ -4964,10 +4969,6 @@ body:has(#dlpg.open) #nav{display:none}
       if (ACC) t.appendChild(h("span", "pill", "Synced"));
       if (ACC && (ACC.role === "admin" || ACC.role === "moderator")) { var rp = h("span", "pill", ACC.role === "admin" ? "Admin" : "Moderator"); rp.style.marginLeft = "6px"; t.appendChild(rp); }
       c.appendChild(t);
-      if (ACC && ACC.role === "user" && typeof ACC.adm === "number") {
-        var dg = h("p", null, ACC.adm === 0 ? "Server note: no admin email is set on the server yet." : "Server note: the admin list doesn't include this email.");
-        dg.style.cssText = "font-size:12px;color:#fbbf24;margin:6px 0 0"; c.appendChild(dg);
-      }
       c.appendChild(h("p", null, ACC ? ACC.email : "Guests can browse. Create a free account to watch, build your Library and keep your history on every device."));
       c.style.marginBottom = "10px";
       return c;
@@ -5117,8 +5118,9 @@ body:has(#dlpg.open) #nav{display:none}
       var p = kind === "hls" ? dlHlsSign(st && st.headers, url) : relaySign(url, st, true);
       return p.then(function (ru) { if (!ru) throw new Error("Relay unavailable"); return one(ru, "relay"); });
     }
-    return one(url, "direct").catch(function () { return viaRelay(); }).catch(function (e) {
-      return { ok: false, status: 0, via: "", note: "Blocked by the host (CORS / network) and the relay could not open it" + (e && e.message ? " (" + e.message + ")" : "") + "." };
+    // regular users save direct from the source only; the Worker relay is an admin / moderator test route
+    return one(url, "direct").catch(function (e0) { return dlAdmin() ? viaRelay() : Promise.reject(e0); }).catch(function (e) {
+      return { ok: false, status: 0, via: "", note: dlAdmin() ? "Blocked by the host (CORS / network) and the relay could not open it" + (e && e.message ? " (" + e.message + ")" : "") + "." : "This host does not allow saving in the browser. Use Open in VLC or Copy Link instead." };
     });
   }
   // ---- subtitle + poster saved with the video ----
@@ -5676,6 +5678,31 @@ body:has(#dlpg.open) #nav{display:none}
   }
   function rfFin() { var f = RFE; RFE = null; if (f) f(); }
   function hlFresh(u) { var r = HLT[u]; return r && Date.now() - r.t < 150000 ? r : null; }
+  // Proof that a link really starts in THIS browser (not just that the host answers): files load their metadata in a detached video, playlists are read directly.
+  // true = proven, false = proven broken (404 / 403 / decode error), null = can't tell (CORS, slow, needs headers): unknown links are never marked failed on a guess.
+  function browserProbe(st0, ms) {
+    return new Promise(function (res) {
+      var u = String(st0.url || ""), done = false, tm, v = null, ac = null;
+      function fin(x) { if (done) return; done = true; clearTimeout(tm); try { if (v) { v.onloadedmetadata = v.onerror = null; v.removeAttribute("src"); v.load(); } if (ac) ac.abort(); } catch (e) {} res(x); }
+      if (!/^https?:/i.test(u) || (st0.headers && Object.keys(st0.headers).length) || /\/embed\/|\.html?($|\?)|^magnet:/i.test(u)) return res(null);
+      tm = setTimeout(function () { fin(null); }, ms);
+      try {
+        if (/\.m3u8($|\?)/i.test(u)) {
+          ac = window.AbortController ? new AbortController() : null;
+          fetch(u, { cache: "no-store", signal: ac ? ac.signal : undefined }).then(function (r) {
+            if (r.status === 403 || r.status === 404 || r.status === 410) return fin(false);
+            if (!r.ok) return fin(null);
+            return r.text().then(function (t) { fin(/#EXTM3U/.test(String(t).slice(0, 400)) ? true : false); });
+          }).catch(function () { fin(null); });
+        } else if (/\.(mp4|m4v|mov|webm)($|\?)/i.test(u)) {
+          v = document.createElement("video"); v.muted = true; v.preload = "metadata"; v.setAttribute("playsinline", "");
+          v.onloadedmetadata = function () { fin(v && v.videoWidth > 0 || (v && v.duration > 0) ? true : null); };
+          v.onerror = function () { fin(false); };
+          v.src = u;
+        } else fin(null);
+      } catch (e) { fin(null); }
+    });
+  }
   function pingCheck(st0, ms) {
     var u = st0.url, r0 = hlFresh(u);
     if (r0) return Promise.resolve(r0);
@@ -5689,10 +5716,11 @@ body:has(#dlpg.open) #nav{display:none}
         res(r);
       }
       var hq = st0.headers ? "&h=" + encodeURIComponent(JSON.stringify(st0.headers)) : "";
+      var pvP = browserProbe(st0, Math.max(1200, ms - 150));
       api("/api/relay-sign?u=" + encodeURIComponent(u) + hq, 0, ms)
         .then(function (sg) { return api(String(sg.u).replace("/api/relay?", "/api/ping?"), 0, ms); })
-        .then(function (j) { fin(j && typeof j.ok === "boolean" ? { ok: j.ok, soft: !!j.soft, ms: +j.ms || ms } : { ok: true, soft: true, ms: ms }); })
-        .catch(function () { fin({ ok: true, soft: true, ms: ms }); });
+        .then(function (j) { return pvP.then(function (pv) { var r = j && typeof j.ok === "boolean" ? { ok: j.ok, soft: !!j.soft, ms: +j.ms || ms } : { ok: true, soft: true, ms: ms }; r.pv = pv; if (pv === false) r.ok = false; fin(r); }); })
+        .catch(function () { return pvP.then(function (pv) { fin({ ok: pv !== false, soft: true, ms: ms, pv: pv }); }); });
     });
     HLP[u] = p;
     return p;
@@ -5709,6 +5737,7 @@ body:has(#dlpg.open) #nav{display:none}
     var r = hlFresh(u);
     if (!r) return 0;
     if (!r.ok) return -1000;
+    if (r.pv === true) return 70 + Math.max(0, 30 - Math.min(30, Math.round((r.ms || 0) / 80)));   // proven to start in this browser: always ahead of unproven links
     if (r.soft || r.slow) return 0;
     return 40 - Math.min(35, Math.round((r.ms || 0) / 80));
   }
@@ -6984,8 +7013,8 @@ body:has(#dlpg.open) #nav{display:none}
       clearTimeout(stallT);
       stallT = setTimeout(function () {
         if (closed || adActive) return;
-        if (!(v.duration > 0) || v.readyState < 2) { why = why || "No data after " + (autoN ? "10" : "15") + " seconds (stuck at 00:00 / 00:00): the host is too slow or is blocking this link."; if (fatalFn) fatalFn(); }
-      }, autoN ? 10000 : 15000);
+        if (!(v.duration > 0) || v.readyState < 2) { why = why || "No data after " + (autoN ? "8" : "10") + " seconds (stuck at 00:00 / 00:00): the host is too slow or is blocking this link."; if (fatalFn) fatalFn(); }
+      }, autoN ? 8000 : 10000);
     }
     var fatalFn = null;
     // where to resume when the source changes: the real position, or the saved one for this video when the current clip is a short error video / not started
@@ -9873,6 +9902,8 @@ $("smclose").onclick = function () {
           var st = sv.main.st, sd = sv.main.sd;
           tx.appendChild(h("span", null, (sd.q ? sd.q + "p • " : "") + fmtName(sd) + (st.lt ? " • " + st.lt : "") + (sd.tor && sd.seed ? " • " + sd.seed + " seeders" : "") + " • " + (st.provider || "Plugin") + (sd.f === "embed" ? " • opens inline" : "")));
           tx.appendChild(lnkChips(st, { f: sd.f, gb: sd.gb, heavy: sd.heavy, tor: sd.tor, dead: !!sd.dead }));
+          var vrf = hlFresh(st.url);
+          if (vrf && vrf.pv === true && !sd.tor) { var vt = h("span", "vrfok", "\u2713 Verified to start"); tx.appendChild(vt); }
           var note = h("div", "note", "");
           tx.appendChild(note);
           top.appendChild(dot); top.appendChild(tx);
