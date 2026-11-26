@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-22.60";
+const APP_VERSION = "2026-11-22.61";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -5951,7 +5951,7 @@ body:has(#dlpg.open) #nav{display:none}
     cb.onchange = function () { lsSet("boa_relay", cb.checked ? "1" : "0"); toast(cb.checked ? "Privacy relay ON for new plays" : "Privacy relay OFF"); };
     var l = h("label");
     l.appendChild(cb);
-    var ptx = h("span", "prtx"); ptx.appendChild(h("b", null, "Privacy relay")); ptx.appendChild(h("small", null, "Hide your IP from stream hosts"));
+    var ptx = h("span", "prtx"); ptx.appendChild(h("b", null, "Privacy relay")); ptx.appendChild(h("small", null, "Hide your IP from stream hosts. May slow some streams."));
     l.appendChild(ptx);
     b.appendChild(l);
     var st = h("div", "ipst");
