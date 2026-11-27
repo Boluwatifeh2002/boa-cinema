@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-27.67";
+const APP_VERSION = "2026-11-27.68";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -4431,6 +4431,26 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 .lchip.lcp.r{color:#f87171;border-color:rgba(248,113,113,.45);background:rgba(239,68,68,.14)}
 .srvalt .splaybtn.dlb{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.18)}
 #player .srdl{margin-left:6px}
+#player .srmode{display:flex;gap:6px;margin:0 0 10px}
+#player .srmb{flex:1;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#fff;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:800}
+#player .srmb.on{background:#e50914;border-color:#e50914}
+#player .srcta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+#player .srcta .srdl{margin-left:0}
+#player .srdlp{background:#e50914!important;border-color:#e50914!important}
+#player .srblk{font-size:11px;font-weight:700;color:#fbbf24}
+#player .srhi{border-radius:12px;box-shadow:0 0 0 2px #22c55e;animation:srhip 1.4s ease-in-out 3}
+@keyframes srhip{50%{box-shadow:0 0 0 5px rgba(34,197,94,.3)}}
+#player .pspeed{padding:10px;z-index:11}
+#player .pspeed>b{display:block;padding:2px 6px 8px;font-size:12px;opacity:.75;font-weight:800}
+#player .pspeed button{text-align:center;margin-top:4px}
+#player .pspd.fast{color:#4ade80}
+#player .prx{position:absolute;right:calc(env(safe-area-inset-right,0px) + 12px);top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:10px;z-index:5;transition:opacity .2s}
+#player.hide .prx{opacity:0;pointer-events:none}
+#player.plocked .prx{display:none}
+#player .prxb{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:46px;padding:8px 6px;border-radius:16px;color:#fff;background:rgba(18,18,22,.55);border:1px solid rgba(255,255,255,.16);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+#player .prxb b{font-size:11px;font-weight:800;color:#d4d4d8}
+#player .prxb.on{background:rgba(229,9,20,.35);border-color:rgba(229,9,20,.8)}
+#player .prxb.on b{color:#fff}
 #streammodal.qwait #smlist>.tierbar,#streammodal.qwait #smlist>.srvhost{display:none}
 #streammodal .qmsg{padding:40px 10px;text-align:center;color:#c9c9cf;font-weight:700}
 #player .shk-tx{position:absolute;left:0;right:0;top:0;bottom:calc(var(--sab) + 140px);z-index:2;pointer-events:none;transition:bottom .2s;overflow:visible;opacity:1;visibility:visible;display:block}
@@ -5453,6 +5473,38 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     });
     return row;
   }
+  // compact Like / Love for the player: same one-pick-per-user state as the detail page (RXC), no extra requests beyond the count read
+  function reactMini(d) {
+    var key = d.mt + ":" + d.id, box = h("div", "prx");
+    var S = RXC[key] || (RXC[key] = { like: 0, love: 0, mine: 0, seq: 0 });
+    var bL = h("button", "prxb"), bV = h("button", "prxb");
+    bL.type = "button"; bV.type = "button"; bL.setAttribute("aria-label", "Like"); bV.setAttribute("aria-label", "Love");
+    function paint() {
+      bL.innerHTML = rxSvg(false, S.mine === 1) + "<b>" + rxNum(S.like) + "</b>"; bL.className = "prxb" + (S.mine === 1 ? " on" : ""); bL.setAttribute("aria-pressed", S.mine === 1 ? "true" : "false");
+      bV.innerHTML = rxSvg(true, S.mine === 2) + "<b>" + rxNum(S.love) + "</b>"; bV.className = "prxb" + (S.mine === 2 ? " on" : ""); bV.setAttribute("aria-pressed", S.mine === 2 ? "true" : "false");
+    }
+    function react(k) {
+      if (!ACC || !AT) { needAuth("Sign in to rate titles and see what others think."); return; }
+      var prev = { like: S.like, love: S.love, mine: S.mine }, nk = S.mine === k ? 0 : k;
+      if (S.mine === 1) S.like = Math.max(0, S.like - 1);
+      if (S.mine === 2) S.love = Math.max(0, S.love - 1);
+      if (nk === 1) S.like++;
+      if (nk === 2) S.love++;
+      S.mine = nk; var my = ++S.seq; paint();
+      acctApi("/api/acct/react/set", { mt: d.mt, id: d.id, kind: nk }, function (e, j) {
+        if (e) { if (my === S.seq) { S.like = prev.like; S.love = prev.love; S.mine = prev.mine; paint(); } toast(e.m); return; }
+        if (my === S.seq) { S.like = j.like; S.love = j.love; S.mine = j.mine; paint(); }
+      });
+    }
+    bL.onclick = function (ev) { ev.stopPropagation(); react(1); };
+    bV.onclick = function (ev) { ev.stopPropagation(); react(2); };
+    box.appendChild(bL); box.appendChild(bV); paint();
+    if (!S.seq && !S.like && !S.love && !S.mine) acctApi("/api/auth/react?mt=" + d.mt + "&id=" + encodeURIComponent(d.id), null, function (e, j) {
+      if (e || !j || S.seq) return;
+      S.like = j.like || 0; S.love = j.love || 0; S.mine = j.mine || 0; paint();
+    });
+    return box;
+  }
   // ---- What's new (updates feed + New dot), browser notifications (Web Push) and the admin "Send an update" screen ----
   var UPD = { list: [], at: 0, seen0: null };
   function updSeen() { return Number(lsGet("boa_upd", "0")) || 0; }
@@ -6247,6 +6299,18 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     return dlDelChunks(id).catch(function () {}).then(function () { return dlTx("items", "readwrite", function (s) { s.delete(id); }); }).catch(function () {}).then(function () { dlPaint(); });
   }
   // ---- eligibility ----
+  // hosts that refused a browser save are remembered for this session only (memory + sessionStorage, never the server)
+  var DLBLK = {}, DLHOOK = null;
+  try { DLBLK = JSON.parse(sessionStorage.getItem("boa_dlblk") || "{}") || {}; } catch (e) { DLBLK = {}; }
+  function dlKey(u) { var hs = ""; try { hs = new URL(String(u), location.href).host; } catch (e) { hs = String(u || "").slice(0, 80); } return hs === location.host ? String(u) : hs; }
+  function dlBlocked(u) { return !!DLBLK[dlKey(u)]; }
+  function dlMarkBlk(u) { DLBLK[dlKey(u)] = 1; try { sessionStorage.setItem("boa_dlblk", JSON.stringify(DLBLK)); } catch (e) {} }
+  // a stream the browser can save: a real file / playlist, not heavy (MKV, big remux), not torrent, not a host that already refused
+  function dlSaveable(st, heavy) {
+    var u = String((st && st.url) || "");
+    if (!u || (st && st.tor) || /\/offline\//.test(u) || !dlOn() || heavy) return false;
+    return dlEligible(st).ok && !dlBlocked(u);
+  }
   function dlEligible(st) {
     var u = String((st && st.url) || "");
     if (!u) return { ok: false, kind: "none", reason: "No link to save." };
@@ -6328,7 +6392,15 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (dup) { toast(dup.status === "done" ? "Already saved on this device." : "Already downloading."); return; }
       toast("Checking the link...");
       dlProbe(st.url, st, el.kind).then(function (pr) {
-        if (!pr.ok) { toast("Can't save this one: " + pr.note); return; }
+        if (!pr.ok) {
+          if (/does not allow saving|Blocked by the host/i.test(String(pr.note || ""))) {
+            dlMarkBlk(st.url);                                   // remember it: no more tapping the same dead end
+            var nx = DLHOOK ? DLHOOK(st.url) : "";
+            toast(nx ? "That host blocks saving. Try " + nx + " (highlighted)." : "That host blocks saving. Use Open in VLC, Odyssey or Copy Link.");
+            return;
+          }
+          toast("Can't save this one: " + pr.note); return;
+        }
         if (pr.live) { toast("That is a live stream, so it can't be saved."); return; }
         if (pr.enc) { toast("That stream is encrypted, so it can't be saved."); return; }
         var kind = el.kind;
@@ -8062,7 +8134,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     cc.setAttribute("aria-label", "Subtitles and closed captions");
     var ccBtn = h("button", "ptxt pccb", "CC: Off"); ccBtn.type = "button"; ccBtn.setAttribute("aria-label", "Subtitles and closed captions");
     cc.style.display = "none";
-    var bSpd = h("button", "ptxt pspd", "1x"), bAud = h("button", "ptxt", "Au"), bSrv = h("button", "ptxt", "Servers");
+    var bSpd = h("button", "ptxt pspd", "Speed"), bAud = h("button", "ptxt", "Au"), bSrv = h("button", "ptxt", "Servers");
     row.appendChild(bPlay); row.appendChild(bBack); row.appendChild(bFwd); row.appendChild(bMute); row.appendChild(vol); row.appendChild(tim); row.appendChild(sp); row.appendChild(bSrv); row.appendChild(ccBtn); row.appendChild(cc);
     var isLive = !!(ctx && ctx.live);
     if (isLive) { scrub.style.pointerEvents = "none"; scrub.style.opacity = ".35"; bBack.style.display = "none"; bFwd.style.display = "none"; tim.textContent = "LIVE"; tim.style.color = "#ef4444"; }
@@ -8080,6 +8152,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     if (ctx && (ctx.mt === "movie" || ctx.mt === "tv")) row2.appendChild(bSet);
     bot.appendChild(row2);
     root.appendChild(bot);
+    if (ctx && (ctx.mt === "movie" || ctx.mt === "tv") && ctx.id && !ctx.live && !ctx.offline) root.appendChild(reactMini({ mt: ctx.mt, id: ctx.id }));
     var fileIn = document.createElement("input");
     fileIn.type = "file"; fileIn.accept = ".srt,.vtt,text/vtt"; fileIn.style.display = "none";
     root.appendChild(fileIn);
@@ -9161,7 +9234,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
 
     // single tap on the picture toggles the controls (double-tap skipping is gone)
     root.addEventListener("click", function (ev) {
-      if (ev.target && ev.target.closest && ev.target.closest(".pbot,.ptop,.srvroom,.pmenu,.pnext,.pmsg")) return;
+      if (ev.target && ev.target.closest && ev.target.closest(".pbot,.ptop,.srvroom,.pmenu,.pnext,.pmsg,.prx")) return;
       if (menuEl && !menuEl.contains(ev.target)) { closeMenu(); return; }
       if (ev.target !== v && ev.target !== root && ev.target !== spin) return;
       if (Date.now() - gestEnd < 450) return;
@@ -9186,11 +9259,30 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     function closeMenu() { if (menuEl && menuEl.parentNode) menuEl.parentNode.removeChild(menuEl); menuEl = null; menuKey = ""; showCtl(); }
     // tap a control: its panel pops up; tap it again: the panel goes back in
     function tog(k, fn) { return function () { if (menuEl && menuKey === k) { closeMenu(); return; } fn(); if (menuEl) menuKey = k; }; }
-    var RATES = [0.5, 1, 1.25, 1.5, 2];
-    bSpd.onclick = function () {
-      var i = RATES.indexOf(rate); rate = RATES[(i + 1) % RATES.length];
-      v.playbackRate = rate; bSpd.textContent = rate + "x";
-    };
+    var RATES = [1, 1.5, 2, 2.5];
+    function paintSpd() { bSpd.textContent = rate === 1 ? "Speed" : rate + "x"; bSpd.className = "ptxt pspd" + (rate === 1 ? "" : " fast"); bSpd.setAttribute("aria-label", "Playback speed, now " + rate + "x"); }
+    function setRate(r) { rate = r; try { v.playbackRate = r; } catch (e) {} paintSpd(); }
+    // glass popover above the Speed pill: the rate changes at once, playback and position are untouched
+    function openSpeed() {
+      closeMenu();
+      var m = h("div", "pmenu pcc2 pspeed");
+      m.setAttribute("role", "dialog"); m.setAttribute("aria-label", "Playback speed");
+      m.appendChild(h("b", null, "Playback Speed"));
+      RATES.forEach(function (r) {
+        var b = h("button", r === rate ? "on" : "", r + "x"); b.type = "button";
+        b.setAttribute("aria-label", r + "x speed"); b.setAttribute("aria-pressed", r === rate ? "true" : "false");
+        b.onclick = function (ev) { ev.stopPropagation(); setRate(r); closeMenu(); };
+        m.appendChild(b);
+      });
+      root.appendChild(m); menuEl = m;
+      try {
+        var rr = root.getBoundingClientRect(), br = bSpd.getBoundingClientRect(), w = 150;
+        m.style.left = Math.max(8, Math.min(rr.width - w - 8, br.left - rr.left + br.width / 2 - w / 2)) + "px";
+        m.style.right = "auto"; m.style.width = w + "px"; m.style.bottom = Math.max(8, rr.bottom - br.top + 8) + "px";
+      } catch (e) {}
+    }
+    bSpd.onclick = tog("spd", openSpeed);
+    paintSpd();
     var FITS = [["Fit", "contain"], ["Fill", "cover"], ["Stretch", "fill"]];
     bFit.onclick = function () {
       fitI = (fitI + 1) % FITS.length;
@@ -9346,8 +9438,30 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         sv.dot.style.background = c; sv.dot.style.boxShadow = "0 0 10px " + c;
       });
     }
+    var srvSave = false, srvHi = null;       // Save mode lists browser-saveable streams first; srvHi = the stream to highlight after a blocked save
+    function vlcOpen(st) { try { v.pause(); } catch (e) {} if (RELAY_ON()) relaySign(st.url, st).then(function (ru) { if (ru) location.href = vlcLink(ru); }); else location.href = vlcLink(st.url); }
+    function odyOpen(st) {
+      try { v.pause(); } catch (e) {}
+      location.href = odysseyLink(st.url, (ctx && ctx.title) || st.title || "", st);
+      setTimeout(function () { if (!document.hidden) toast("Odyssey isn't installed on this device"); }, 1500);
+    }
+    // one action line per stream: saveable = Download first; heavy / blocked / MKV hosts = Open in VLC, Odyssey, Copy Link
+    function srvActs(st, o, hi) {
+      var box = h("div", "srcta" + (hi ? " srhi" : "")), can = dlSaveable(st, o.heavy), off = /\/offline\//.test(String(st.url || ""));
+      function btn(txt, cls, fn, aria) { var b = h("button", "srcp " + cls, txt); b.type = "button"; b.setAttribute("aria-label", aria); b.onclick = function (ev) { ev.stopPropagation(); fn(); }; box.appendChild(b); }
+      if (can) btn("Download", "srdl srdlp", function () { var e1 = dlEligible(st); if (!e1.ok) { toast(e1.reason); return; } dlAdd(st, { q: o.q, f: o.f }, ctx); }, "Download");
+      else if (!o.tor && !off) {
+        btn("Open in VLC", "srvlc", function () { vlcOpen(st); }, "Open in VLC");
+        btn("Odyssey", "srody", function () { odyOpen(st); }, "Open in Odyssey");
+      }
+      if (!off) btn("Copy Link", "srcl", function () { copyLink(st.url); }, "Copy link");
+      if (!can && dlOn() && !o.tor && dlBlocked(st.url)) box.appendChild(h("span", "srblk", "Host blocks saving"));
+      return box;
+    }
+    function svHeavy(sv) { return sv.heavy != null ? sv.heavy : sv.tier === "r"; }
     function openServers() {
       closeMenu();
+      var hiNow = srvHi; srvHi = null;
       var L = ((ctx && ctx.servers) || []).slice(0, 7);
       var m = h("div", "srvroom");
       m.setAttribute("role", "dialog"); m.setAttribute("aria-label", "Server room");
@@ -9358,10 +9472,26 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (ctx && ctx.refresh) { var rfb = h("button", "rfbtn", "Refresh All"); rfb.setAttribute("aria-label", "Refresh all servers"); rfb.onclick = function () { ctx.refresh(); }; ha.appendChild(rfb); }
       ha.appendChild(cx); hd.appendChild(ha); m.appendChild(hd);
       paintRf();
+      if (dlOn() && L.length) {
+        var md = h("div", "srmode"), mW = h("button", "srmb" + (srvSave ? "" : " on"), "Watch"), mS = h("button", "srmb" + (srvSave ? " on" : ""), "Save");
+        mW.type = "button"; mS.type = "button"; mW.setAttribute("aria-label", "Watch mode: servers in playback order"); mS.setAttribute("aria-label", "Save mode: browser-saveable streams first");
+        mW.onclick = function () { srvSave = false; openServers(); }; mS.onclick = function () { srvSave = true; openServers(); };
+        md.appendChild(mW); md.appendChild(mS); m.appendChild(md);
+      }
       if (!L.length) m.appendChild(h("div", "srnote", "Only this stream is available for this title."));
       var chk = 0;
       var ord = L.map(function (x, k) { return k; });
-      ord.sort(function (a, b) { return ((bad[a] || failedU[L[a].st.url]) ? 1 : 0) - ((bad[b] || failedU[L[b].st.url]) ? 1 : 0) || a - b; });
+      function saveRank(k) { var sv = L[k]; if (dlSaveable(sv.st, svHeavy(sv))) return 0; return (sv.alts || []).some(function (a) { return dlSaveable(a.st || {}, a.heavy); }) ? 1 : 2; }
+      ord.sort(function (a, b) { return (srvSave ? saveRank(a) - saveRank(b) : 0) || ((bad[a] || failedU[L[a].st.url]) ? 1 : 0) - ((bad[b] || failedU[L[b].st.url]) ? 1 : 0) || a - b; });
+      // a blocked save: mark it, switch the room to Save mode and light up the next stream the browser can save
+      DLHOOK = function () {
+        if (closed || menuEl !== m) return "";
+        var pick = null;
+        ord.forEach(function (k) { if (!pick && dlSaveable(L[k].st, svHeavy(L[k]))) pick = { i: k, k: -1 }; });
+        if (!pick) ord.forEach(function (k) { (L[k].alts || []).forEach(function (a, j) { if (!pick && dlSaveable(a.st || {}, a.heavy)) pick = { i: k, k: j }; }); });
+        srvSave = true; srvHi = pick; openServers();
+        return pick ? "SERVER " + L[pick.i].n + (pick.k >= 0 ? " link " + (pick.k + 2) : "") : "";
+      };
       ord.forEach(function (i) {
         var sv = L[i];
         var row = h("div", "srrow");
@@ -9383,6 +9513,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         setSub();
         mid.appendChild(sub);
         mid.appendChild(lnkChips(sv.st, { f: sv.f, heavy: sv.heavy != null ? sv.heavy : sv.tier === "r", tor: sv.tor, dead: !!sv.dead, failed: !!failedU[sv.st.url] }));
+        mid.appendChild(srvActs(sv.st, { f: sv.f, q: sv.q, heavy: svHeavy(sv), tor: sv.tor }, !!hiNow && hiNow.i === i && hiNow.k < 0));
         row.appendChild(mid);
         // one badge per row: LIVE (playing) > UPDATED (recovered, safe to switch back) > FAILED
         function isOn() { return !dead && sv.urls.indexOf(url) > -1; }
@@ -9403,14 +9534,6 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           row.setAttribute("aria-label", "Server " + sv.n + ", " + LIGHT[sv.tier] + (on ? ", currently playing" : up ? ", updated and healthy, tap to switch back" : fl ? ", failed, tap to retry" : lu ? ", last used" : ""));
         }
         paint();
-        var cp = h("button", "srcp", "Copy"); cp.setAttribute("aria-label", "Copy link for server " + sv.n);
-        cp.onclick = function (ev) { ev.stopPropagation(); copyLink(sv.st.url); };
-        row.appendChild(cp);
-        if (dlOn() && !sv.tor && !/\/offline\//.test(String(sv.st.url || ""))) {
-          var dl1 = h("button", "srcp srdl", "Download"); dl1.type = "button"; dl1.setAttribute("aria-label", "Download server " + sv.n);
-          dl1.onclick = function (ev) { ev.stopPropagation(); var e1 = dlEligible(sv.st); if (!e1.ok) { toast(e1.reason); return; } dlAdd(sv.st, { q: sv.q, f: sv.f }, ctx); };
-          row.appendChild(dl1);
-        }
         row.onclick = function () {
           if (sv.tor) { try { if (navigator.clipboard) navigator.clipboard.writeText(sv.st.url); } catch (e) {} toast("Opening your torrent app\u2026 (link also copied)"); try { location.href = sv.st.url; } catch (e) {} return; }
           closeMenu(); if (!isOn()) switchTo(i, false);
@@ -9420,7 +9543,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         // every server keeps its own playable links: tap one to play it on this server
         if (sv.alts && sv.alts.length) {
           var mb = h("button", "srcp srmore", "More links (" + sv.alts.length + ")"); mb.type = "button"; mb.style.cssText = "margin:-4px 0 8px 40px;width:auto";
-          var ml = h("div", "srlinks"); ml.style.cssText = "display:none;margin:0 0 10px 40px";
+          var ml = h("div", "srlinks"); ml.style.cssText = "display:" + (hiNow && hiNow.i === i && hiNow.k >= 0 ? "block" : "none") + ";margin:0 0 10px 40px";
           sv.alts.map(function (a0, k0) { return { a: a0, k: k0 }; }).sort(function (x, y) { return (failedU[x.a.st.url] ? 1 : 0) - (failedU[y.a.st.url] ? 1 : 0) || x.k - y.k; }).forEach(function (w0) {
             var al = w0.a, k = w0.k;
             var q = al.st || {}, lb = h("button", "srcp", (al.q ? al.q + "p \u2022 " : "") + (al.tor ? "TORRENT" : String(al.f || "").toUpperCase()) + (q.lt ? " \u2022 " + q.lt : "") + " \u2022 " + (q.provider || "Link " + (k + 1)));
@@ -9433,11 +9556,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             };
             var wr = h("div", "srwrap"); wr.style.cssText = "margin:4px 0 10px";
             wr.appendChild(lb); wr.appendChild(lnkChips(q, { f: al.f, gb: al.gb, heavy: al.heavy, tor: al.tor, failed: !!failedU[q.url] }));
-            if (dlOn() && !al.tor) {
-              var dl2 = h("button", "srcp srdl", "Download"); dl2.type = "button"; dl2.style.cssText = "margin:6px 0 0";
-              dl2.onclick = function (ev) { ev.stopPropagation(); var e2 = dlEligible(q); if (!e2.ok) { toast(e2.reason); return; } dlAdd(q, { q: al.q, f: al.f }, ctx); };
-              wr.appendChild(dl2);
-            }
+            wr.appendChild(srvActs(q, { f: al.f, q: al.q, heavy: al.heavy, tor: al.tor }, !!hiNow && hiNow.i === i && hiNow.k === k));
             ml.appendChild(wr);
           });
           mb.onclick = function (ev) { ev.stopPropagation(); ml.style.display = ml.style.display === "none" ? "block" : "none"; };
@@ -9457,8 +9576,9 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           });
         }
       });
-      m.appendChild(h("div", "srnote", "Stream stutters or won't load? Tap another server. Your place in the video is kept."));
+      m.appendChild(h("div", "srnote", srvSave && dlOn() ? "Save mode: streams your browser can save are listed first. Heavy / blocked hosts use Open in VLC or Odyssey." : "Stream stutters or won't load? Tap another server. Your place in the video is kept."));
       root.appendChild(m); menuEl = m;
+      if (hiNow) setTimeout(function () { var e = m.querySelector(".srhi"); if (e && e.scrollIntoView) { try { e.scrollIntoView({ block: "center" }); } catch (x) {} } }, 60);
     }
     bSrv.onclick = tog("srv", openServers);
     function paintAud() {
