@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-26.64";
+const APP_VERSION = "2026-11-27.65";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1760,6 +1760,8 @@ async function authSetup(env) {
     env.DB.prepare("CREATE TABLE IF NOT EXISTS wall_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, parent INTEGER NOT NULL DEFAULT 0, uid TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open', replies INTEGER NOT NULL DEFAULT 0)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS wall_idx ON wall_posts (parent, id)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS wall_rep (post INTEGER NOT NULL, uid TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (post, uid))"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS parties (code TEXT PRIMARY KEY, host TEXT NOT NULL, media TEXT NOT NULL, pos REAL NOT NULL DEFAULT 0, playing INTEGER NOT NULL DEFAULT 0, t INTEGER NOT NULL, created INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS party_members (code TEXT NOT NULL, uid TEXT NOT NULL, name TEXT NOT NULL, joined INTEGER NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY (code, uid))"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS modlog (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, arole TEXT NOT NULL, uid TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL, reason TEXT, note TEXT)"),
   ]);
   authReady = true;
@@ -1815,6 +1817,7 @@ async function authHandle(request, url, env) {
       let role = roleFor(env, u.email);
       const sn = role === "user" ? sanctionNow(u) : "active";
       const out = { name: u.name, email: u.email, role: sn === "suspended" || sn === "blocked" ? "blocked" : role, adm: cnt(env.ADMIN_EMAILS || env.ADMIN_EMAIL) };
+      if (role === "admin" && sn === "active" && listHas(env.ADDON_EMAILS, u.email)) out.ao = 1;
       if (sn !== "active" || (u.warn_at && (!u.ack_at || u.ack_at < u.warn_at))) {
         out.sn = { status: sn, until: u.until || 0, reason: u.reason ? (MOD_REASONS[u.reason] || u.reason) : "", appeal: !!u.appeal };
         if (u.warn_at && (!u.ack_at || u.ack_at < u.warn_at)) out.sn.warn = String(u.warn_note || "");
@@ -1837,6 +1840,120 @@ async function authHandle(request, url, env) {
         env.DB.prepare("INSERT INTO modlog (at,actor,arole,uid,target,action,reason,note) VALUES (?,?,?,?,?,?,?,?)").bind(now, me.email, "user", uid, me.email, "appeal", "", text.slice(0, 200)),
       ]);
       return authJson({ ok: true });
+    }
+    if (path.indexOf("/api/acct/party/") === 0 && request.method === "POST") {
+      // Watch party (v2.0): an invite code, up to 8 people, the host drives play/pause/seek. D1 only; no video bytes. Presence = seen in the last 45 s.
+      const pm = await env.DB.prepare("SELECT u.name AS name, u.email AS email, s.status AS status, s.until AS until FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE u.id = ?").bind(uid).first();
+      if (!pm) return authJson({ error: "Account not found." }, 401);
+      const psn = roleFor(env, pm.email) !== "user" ? "active" : sanctionNow(pm);
+      if (psn === "suspended" || psn === "blocked") return authJson({ error: "Your account is suspended.", suspended: true }, 403);
+      const now = Date.now(), ALIVE = 45000, MAXP = 8, DAY = 86400000;
+      const cleanCode = (c) => String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+      const mediaOf = (m) => {
+        m = m && typeof m === "object" ? m : {};
+        const mt = m.mt === "tv" ? "tv" : "movie", id = String(m.id || "").replace(/\D/g, "").slice(0, 9);
+        if (!id) return null;
+        return { mt: mt, id: id, title: String(m.title || "").replace(/[\u0000-\u001f<>]/g, " ").trim().slice(0, 120) || "Watch party", s: Math.max(1, Math.min(99, Number(m.s) || 1)), e: Math.max(1, Math.min(999, Number(m.e) || 1)) };
+      };
+      const roster = async (code) => {
+        const rows = (await env.DB.prepare("SELECT uid, name, joined, seen FROM party_members WHERE code = ? ORDER BY joined ASC").bind(code).all()).results || [];
+        return rows;
+      };
+      const view = async (p, you) => {
+        const rows = await roster(p.code);
+        let live = rows.filter((r) => now - r.seen < ALIVE);
+        if (!live.some((r) => r.uid === you)) live = live.concat(rows.filter((r) => r.uid === you));
+        const exp = p.playing ? p.pos + (now - p.t) / 1000 : p.pos;
+        return {
+          code: p.code, ended: p.ended === 1, media: JSON.parse(p.media), host: p.host === you,
+          count: live.length, max: MAXP,
+          members: live.map((r) => ({ name: r.name, host: r.uid === p.host, you: r.uid === you })),
+          state: { pos: Math.max(0, Math.round(exp * 10) / 10), playing: p.playing === 1 },
+        };
+      };
+      const getParty = async (code) => {
+        const p = await env.DB.prepare("SELECT code, host, media, pos, playing, t, created, ended FROM parties WHERE code = ?").bind(code).first();
+        if (!p || now - p.created > DAY) return null;
+        return p;
+      };
+      if (path === "/api/acct/party/create") {
+        const media = mediaOf(body.media);
+        if (!media) return authJson({ error: "Open a movie or episode first, then start the party." }, 400);
+        // one hosted party at a time; old ones are closed and anything older than a day is swept away
+        const mine = (await env.DB.prepare("SELECT code FROM parties WHERE host = ? AND ended = 0").bind(uid).all()).results || [];
+        const sweep = [env.DB.prepare("DELETE FROM party_members WHERE code IN (SELECT code FROM parties WHERE created < ?)").bind(now - DAY), env.DB.prepare("DELETE FROM parties WHERE created < ?").bind(now - DAY)];
+        for (const o of mine) sweep.push(env.DB.prepare("UPDATE parties SET ended = 1 WHERE code = ?").bind(o.code));
+        await env.DB.batch(sweep);
+        const AL = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+        let code = "";
+        for (let tries = 0; tries < 6 && !code; tries++) {
+          const rnd = crypto.getRandomValues(new Uint8Array(6));
+          let c = "";
+          for (let i = 0; i < 6; i++) c += AL[rnd[i] % AL.length];
+          if (!(await env.DB.prepare("SELECT code FROM parties WHERE code = ?").bind(c).first())) code = c;
+        }
+        if (!code) return authJson({ error: "Couldn't make a code. Try again." }, 500);
+        const pos = Math.max(0, Number(body.pos) || 0);
+        await env.DB.batch([
+          env.DB.prepare("INSERT INTO parties (code, host, media, pos, playing, t, created, ended) VALUES (?, ?, ?, ?, ?, ?, ?, 0)").bind(code, uid, JSON.stringify(media), pos, body.playing ? 1 : 0, now, now),
+          env.DB.prepare("INSERT OR REPLACE INTO party_members (code, uid, name, joined, seen) VALUES (?, ?, ?, ?, ?)").bind(code, uid, pm.name, now, now),
+        ]);
+        return authJson(await view(await getParty(code), uid));
+      }
+      if (path === "/api/acct/party/join") {
+        const code = cleanCode(body.code);
+        if (code.length !== 6) return authJson({ error: "Enter the 6-character invite code." }, 400);
+        const p = await getParty(code);
+        if (!p || p.ended === 1) return authJson({ error: "That party isn't running. Check the code with your host." }, 404);
+        const rows = await roster(code);
+        const mine = rows.find((r) => r.uid === uid);
+        if (!mine && rows.filter((r) => now - r.seen < ALIVE).length >= MAXP) return authJson({ error: "This party is full (" + MAXP + " people)." }, 409);
+        await env.DB.prepare("INSERT INTO party_members (code, uid, name, joined, seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT(code, uid) DO UPDATE SET seen = excluded.seen, name = excluded.name").bind(code, uid, pm.name, now, now).run();
+        return authJson(await view(p, uid));
+      }
+      const code = cleanCode(body.code);
+      const p = code.length === 6 ? await getParty(code) : null;
+      if (!p) return authJson({ ended: true });
+      const rows = await roster(code);
+      const me = rows.find((r) => r.uid === uid);
+      if (path === "/api/acct/party/leave") {
+        const st = [env.DB.prepare("DELETE FROM party_members WHERE code = ? AND uid = ?").bind(code, uid)];
+        if (p.host === uid) {
+          const nx = rows.filter((r) => r.uid !== uid && now - r.seen < ALIVE)[0];
+          st.push(nx ? env.DB.prepare("UPDATE parties SET host = ? WHERE code = ?").bind(nx.uid, code) : env.DB.prepare("UPDATE parties SET ended = 1 WHERE code = ?").bind(code));
+        }
+        await env.DB.batch(st);
+        return authJson({ ok: true });
+      }
+      if (path === "/api/acct/party/sync") {
+        if (!me) return authJson({ ended: true, removed: true });
+        if (p.ended === 1) return authJson({ ended: true });
+        const writes = [];
+        let cur = p;
+        // presence heartbeat: written at most every 20 s per person
+        if (now - me.seen > 20000) writes.push(env.DB.prepare("UPDATE party_members SET seen = ? WHERE code = ? AND uid = ?").bind(now, code, uid));
+        // host handover when the host has gone quiet: the longest-standing live guest takes over
+        const hostRow = rows.find((r) => r.uid === p.host);
+        if (p.host !== uid && (!hostRow || now - hostRow.seen > ALIVE + 15000)) {
+          const first = rows.filter((r) => r.uid !== p.host && (r.uid === uid || now - r.seen < ALIVE))[0];
+          if (first && first.uid === uid) { writes.push(env.DB.prepare("UPDATE parties SET host = ? WHERE code = ?").bind(uid, code)); cur = { ...p, host: uid }; }
+        }
+        if (cur.host === uid) {
+          const pos = Number(body.pos), playing = body.playing ? 1 : 0;
+          const media = mediaOf(body.media);
+          const exp = cur.playing ? cur.pos + (now - cur.t) / 1000 : cur.pos;
+          const mj = media ? JSON.stringify(media) : cur.media;
+          if (Number.isFinite(pos) && pos >= 0 && (playing !== cur.playing || Math.abs(pos - exp) > 2.5 || now - cur.t > 30000 || mj !== cur.media)) {
+            writes.push(env.DB.prepare("UPDATE parties SET pos = ?, playing = ?, t = ?, media = ? WHERE code = ?").bind(pos, playing, now, mj, code));
+            cur = { ...cur, pos: pos, playing: playing, t: now, media: mj };
+          }
+        }
+        if (writes.length) await env.DB.batch(writes);
+        const out = await view(cur, uid);
+        if (!rows.some((r) => r.uid === uid)) out.ended = true;
+        return authJson(out);
+      }
+      return authJson({ error: "Not found" }, 404);
     }
     if (path.indexOf("/api/acct/wall/") === 0) {
       // Community wall (v2.0): text only, one level of replies, own tables, never touches streaming. Hidden = removed from view by reports or staff.
@@ -2021,6 +2138,18 @@ function roleFor(env, email) {
   email = String(email || "").toLowerCase();
   return rl(env.ADMIN_EMAILS || env.ADMIN_EMAIL).indexOf(email) > -1 ? "admin" : rl(env.MOD_EMAILS).indexOf(email) > -1 ? "moderator" : "user";
 }
+function listHas(v, email) {
+  email = String(email || "").toLowerCase();
+  return !!email && String(v || "").toLowerCase().split(/[\s,;]+/).filter(Boolean).indexOf(email) > -1;
+}
+// Add-on manager: an account ADMIN whose email is ALSO in ADDON_EMAILS may manage Add-ons and Plugins (nothing else). Moderators never can.
+async function addonDelegate(request, env) {
+  const sx = await sessionOf(request, env);
+  if (!sx || !sx.ok || sx.role !== "admin") return false;
+  if (env.AUTH_UPSTREAM === "1") return request.headers.get("x-boa-addons") === "1";
+  return listHas(env.ADDON_EMAILS, sx.email);
+}
+const ADDON_PATHS = new Set(["/api/admin/state", "/api/admin/addons", "/api/admin/addon-inspect", "/api/admin/addon-preview", "/api/admin/plugins", "/api/admin/test-provider", "/api/admin/providers", "/api/admin/homemode"]);
 // Who is calling? A signed-in account (checked against D1, cached for a minute) or the Telegram owner. Everyone else is a guest.
 const sessCache = new Map();
 async function sessionOf(request, env) {
@@ -4602,6 +4731,33 @@ body:has(#dlpg.open) #nav{display:none}
 #dlpg .dlempty{padding:22px 6px;text-align:center;color:#a1a1aa;font-size:14px}
 .vrfok{display:inline-block;margin:4px 0 0;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:800;letter-spacing:.03em;background:rgba(70,211,105,.16);color:#46d369;border:1px solid rgba(70,211,105,.3)}
 #player .adnote{position:absolute;left:50%;transform:translateX(-50%);top:calc(var(--sat) + 46px);z-index:7;max-width:86%;text-align:center;padding:8px 14px;border-radius:999px;background:rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.25);color:#fff;font-size:12.5px;font-weight:700;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+#player .ppty{display:inline-flex;align-items:center;gap:6px}
+#player .ppty.on{background:rgba(var(--accent-rgb),.9);color:var(--on-accent,#fff)}
+@media (max-width:600px){#player .ptop .ppty{position:absolute;left:calc(env(safe-area-inset-left,0px) + 14px);top:calc(100% - 18px);padding:6px 11px;font-size:11.5px}}
+.pdot{width:8px;height:8px;border-radius:50%;background:#46d369;display:inline-block;flex:none;box-shadow:0 0 0 0 rgba(70,211,105,.6);animation:ptypulse 2s infinite}
+@keyframes ptypulse{70%{box-shadow:0 0 0 7px rgba(70,211,105,0)}100%{box-shadow:0 0 0 0 rgba(70,211,105,0)}}
+.ptysh{position:fixed;inset:0;z-index:1000000;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;justify-content:center;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.ptybox{width:100%;max-width:460px;max-height:92dvh;overflow:auto;background:#141418;border:1px solid rgba(255,255,255,.12);border-radius:22px 22px 0 0;padding:16px 16px calc(18px + env(safe-area-inset-bottom));color:#e4e4e7;touch-action:pan-y}
+@media (min-height:0) and (min-width:560px){.ptysh{align-items:center}.ptybox{border-radius:22px}}
+.ptyhd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.ptyhd b{font-size:18px;color:#fff}
+.ptyx{border:0;background:rgba(255,255,255,.1);color:#fff;width:34px;height:34px;border-radius:50%;font-size:20px;line-height:1}
+.ptycnt{display:flex;align-items:center;gap:8px;font-weight:800;color:#fff;font-size:15px}
+.ptyttl{color:#a1a1aa;font-size:13px;margin:2px 0 10px}
+.ptycode{text-align:center;padding:12px;border-radius:16px;background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.35);margin:8px 0}
+.ptycode small{display:block;color:#a1a1aa;font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px}
+.ptycode b{font:800 32px/1.2 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.2em;color:#fff;user-select:all;-webkit-user-select:all}
+.ptyrow{display:flex;gap:8px;margin:8px 0}
+.ptyb{flex:1;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:#fff;border-radius:12px;padding:12px;font:inherit;font-weight:800;font-size:14px}
+.ptyb.pri{background:rgb(var(--accent-rgb));border-color:transparent;color:var(--on-accent,#fff)}
+.ptyb.dng{color:#ff6b6b}
+.ptyb.wide{display:block;width:100%;margin:8px 0}
+.ptylist{margin:6px 0}
+.ptym{display:flex;align-items:center;justify-content:space-between;padding:9px 4px;border-bottom:1px solid rgba(255,255,255,.07);font-size:14px}
+.ptym em{font-style:normal;font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:999px;background:rgba(var(--accent-rgb),.25);color:#fff}
+.ptynote{font-size:12.5px;color:#a1a1aa;margin:8px 0}
+.ptyor{text-align:center;color:#71717a;font-size:12px;margin:6px 0}
+.ptyin{display:block;width:100%;text-align:center;font:800 24px/1.2 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.25em;text-transform:uppercase;padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.4);color:#fff;margin:6px 0}
 #suspg,#warnpg,#modpg{position:fixed;inset:0;z-index:95;display:none;overflow:auto;background:radial-gradient(120% 80% at 50% 0%,rgba(var(--accent-rgb),.2),rgba(0,0,0,.96) 60%),#000}
 #suspg.open,#warnpg.open{display:flex;align-items:center;justify-content:center;padding:20px}
 #modpg.open{display:block;padding:max(14px,env(safe-area-inset-top)) 14px 40px}
@@ -5035,6 +5191,238 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (tab === "me") renderMe();
     });
   }, 300);
+  // ---- v2.0 watch party: invite code, "N watching", host-driven sync (no video goes through the server) ----
+  var PTY = null, PTYT = 0, PTYCTL = null, PTYSH = null;
+  function partyKey(m) { return m ? m.mt + ":" + m.id + ":" + (m.mt === "tv" ? m.s + "x" + m.e : "") : ""; }
+  function partyWord(n) { return n >= 2 ? n + " watching" : "Waiting for guests"; }
+  function partyClean(c) { return String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6); }
+  function partyChipPaint() {
+    var b = PTYCTL && PTYCTL.btn;
+    if (!b) return;
+    b.textContent = "";
+    if (PTY) {
+      b.className = "ptxt ppty on";
+      b.appendChild(h("i", "pdot"));
+      b.appendChild(document.createTextNode(partyWord(PTY.count)));
+      b.setAttribute("aria-label", "Watch party: " + partyWord(PTY.count));
+    } else {
+      b.className = "ptxt ppty";
+      b.appendChild(document.createTextNode("Party"));
+      b.setAttribute("aria-label", "Watch together");
+    }
+  }
+  function partyAttach(tr, v, ctx, adFn) {
+    PTYCTL = { v: v, ad: adFn, ctx: ctx, btn: null, evT: 0 };
+    if (PTY) { PTY.gone = 0; PTY.pend = 0; PTY.last = null; }
+    if (!(ctx && ctx.live) && canWatch() && ACC) {
+      var b = h("button", "ptxt ppty", "Party"); b.type = "button";
+      b.onclick = function (ev) { ev.stopPropagation(); partySheet(); };
+      tr.insertBefore(b, tr.firstChild);
+      PTYCTL.btn = b;
+      partyChipPaint();
+    }
+    var me = PTYCTL;
+    var ping = function () { if (PTY && PTY.host && PTYCTL === me) { clearTimeout(me.evT); me.evT = setTimeout(partyTick, 350); } };
+    v.addEventListener("pause", ping); v.addEventListener("play", ping); v.addEventListener("seeked", ping);
+  }
+  function partyDetach() {
+    if (PTYCTL) clearTimeout(PTYCTL.evT);
+    PTYCTL = null;
+    if (PTY) PTY.gone = Date.now();
+  }
+  function partyPending() { if (PTY) { PTY.gone = 0; PTY.pend = Date.now() + 90000; } }
+  function partyPos() {
+    var c = PTYCTL;
+    if (!c || (c.ad && c.ad())) return null;
+    var v = c.v;
+    if (!v || !isFinite(v.currentTime) || v.readyState < 1) return null;
+    return { pos: Math.max(0, v.currentTime), playing: !v.paused && !v.ended };
+  }
+  function partyMediaOf(c) { var x = c && c.ctx; return x && !x.live && x.id ? { mt: x.mt, id: x.id, title: x.title, s: x.s, e: x.e } : null; }
+  function partyStartState(j) {
+    if (PTY) { var old = PTY.code; acctApi("/api/acct/party/leave", { code: old }, function () {}, true); }
+    clearInterval(PTYT);
+    var nm = {};
+    (j.members || []).forEach(function (m) { if (!m.you) nm[m.name] = 1; });
+    PTY = { code: j.code, host: !!j.host, count: j.count, members: j.members || [], media: j.media, names: nm, gone: 0, pend: 0, last: null, busy: false, busyAt: 0, fail: 0, sw: 0 };
+    PTYT = setInterval(partyLoop, 6000);
+    partyChipPaint();
+    if (tab === "me") renderMe();
+  }
+  function partyStop() {
+    clearInterval(PTYT); PTYT = 0; PTY = null;
+    partyChipPaint();
+    partySheetClose();
+    if (tab === "me") renderMe();
+  }
+  function partyEnd(msg) { partyStop(); if (msg) toast(msg); }
+  function partyLeave(msg) {
+    if (!PTY) return;
+    var code = PTY.code;
+    acctApi("/api/acct/party/leave", { code: code }, function () {}, true);
+    partyStop();
+    toast(msg || "You left the party");
+  }
+  function partyLoop() {
+    if (!PTY) return;
+    if (!PTYCTL) {
+      var now = Date.now();
+      if (!PTY.gone) PTY.gone = now;
+      var lim = PTY.pend && PTY.pend > PTY.gone ? PTY.pend : PTY.gone + 25000;
+      if (now > lim) { partyLeave("You left the party"); return; }
+    }
+    partyTick();
+  }
+  function partyTick() {
+    var P = PTY;
+    if (!P) return;
+    if (P.busy && Date.now() - P.busyAt < 15000) return;
+    var c = PTYCTL, code = P.code, body = { code: code };
+    if (P.host && c) {
+      var p = partyPos();
+      if (p) { body.pos = p.pos; body.playing = p.playing; }
+      var md = partyMediaOf(c);
+      if (md) body.media = md;
+    }
+    P.busy = true; P.busyAt = Date.now();
+    acctApi("/api/acct/party/sync", body, function (e, j) {
+      if (!PTY || PTY.code !== code) return;
+      PTY.busy = false;
+      if (e) { PTY.fail++; if (e.s === 403 || PTY.fail > 8) partyEnd("You left the party"); return; }
+      PTY.fail = 0;
+      if (j.ended) { partyEnd(j.removed ? "You are no longer in this party" : "The party has ended"); return; }
+      partyApply(j);
+    });
+  }
+  function partyApply(j) {
+    var P = PTY, wasHost = P.host;
+    P.count = j.count; P.members = j.members || []; P.host = !!j.host; P.media = j.media;
+    var nn = {}, joined = [], left = [];
+    P.members.forEach(function (m) { if (!m.you) { nn[m.name] = 1; if (!P.names[m.name]) joined.push(m.name); } });
+    Object.keys(P.names).forEach(function (k) { if (!nn[k]) left.push(k); });
+    P.names = nn;
+    if (!wasHost && P.host) toast("You are now the host");
+    else if (joined.length) toast(joined[0] + (joined.length > 1 ? " and " + (joined.length - 1) + " more" : "") + " joined the party");
+    else if (left.length) toast(left[0] + (left.length > 1 ? " and " + (left.length - 1) + " more" : "") + " left the party");
+    partyChipPaint();
+    partySheetPaint();
+    var c = PTYCTL;
+    if (P.host || !c || (c.ad && c.ad())) return;
+    var st = j.state || {};
+    if (j.media && partyKey(j.media) !== partyKey(c.ctx)) {
+      if (Date.now() - P.sw < 60000) return;
+      P.sw = Date.now();
+      toast("The host moved to " + j.media.title);
+      try { if (window.__closePlayer) window.__closePlayer(); } catch (e) {}
+      P.pend = Date.now() + 90000;
+      openStreams(j.media.mt, j.media.id, j.media.title, j.media.s, j.media.e, {}, st.pos > 5 ? st.pos : 0, true);
+      return;
+    }
+    var v = c.v;
+    if (!v || v.readyState < 1) return;
+    var chg = !P.last || P.last.playing !== st.playing;
+    if (chg) {
+      if (st.playing && v.paused) { var pr = v.play(); if (pr && pr.catch) pr.catch(function () { toast("Tap play to join in"); }); }
+      else if (!st.playing && !v.paused) v.pause();
+    }
+    var d = Math.abs(v.currentTime - st.pos);
+    if ((st.playing && !v.paused && d > 5) || (!st.playing && d > 1.5) || (chg && d > 3)) { try { v.currentTime = Math.max(0, st.pos + (st.playing ? 0.4 : 0)); } catch (e) {} }
+    P.last = { playing: st.playing, pos: st.pos };
+  }
+  function partyCreate() {
+    var c = PTYCTL, md = partyMediaOf(c);
+    if (!md) { toast("Open a movie or episode first, then start the party"); return; }
+    var p = partyPos() || { pos: 0, playing: false };
+    acctApi("/api/acct/party/create", { media: md, pos: p.pos, playing: p.playing }, function (e, j) {
+      if (e) { toast(e.m); return; }
+      partyStartState(j);
+      partySheet();
+    });
+  }
+  function partyJoin(code) {
+    code = partyClean(code);
+    if (code.length !== 6) { toast("Enter the 6-character invite code"); return; }
+    if (!ACC || !AT) { lsSet("boa_pty", code); openAuth("login", "Sign in to join the watch party. Your invite code will be used right after."); return; }
+    if (PTY && PTY.code === code) { toast("You are already in this party"); partySheetClose(); return; }
+    acctApi("/api/acct/party/join", { code: code }, function (e, j) {
+      if (e) { toast(e.m); return; }
+      partyStartState(j);
+      partySheetClose();
+      var hn = ""; (j.members || []).forEach(function (m) { if (m.host) hn = m.name; });
+      toast(hn ? "Joined " + hn + "'s party" : "Joined the party");
+      try { if (PTYCTL && window.__closePlayer) window.__closePlayer(); } catch (e2) {}
+      PTY.pend = Date.now() + 90000;
+      var m = j.media, st = j.state || {};
+      openStreams(m.mt, m.id, m.title, m.s, m.e, {}, st.pos > 5 ? st.pos : 0, true);
+    });
+  }
+  function partyShare() {
+    if (!PTY) return;
+    var link = location.origin + location.pathname + "?party=" + PTY.code;
+    var txt = "Watch " + (PTY.media && PTY.media.title ? PTY.media.title : "with me") + " together on Boa Cinema. Invite code: " + PTY.code + " " + link;
+    if (navigator.share) { try { navigator.share({ title: "Boa Cinema watch party", text: txt }).catch(function () {}); return; } catch (e) {} }
+    try { navigator.clipboard.writeText(txt).then(function () { toast("Invite copied"); }, function () { toast("Couldn't copy. Code: " + PTY.code); }); } catch (e2) { toast("Code: " + PTY.code); }
+  }
+  function partySheetClose() { if (PTYSH && PTYSH.ov.parentNode) PTYSH.ov.parentNode.removeChild(PTYSH.ov); PTYSH = null; }
+  function partySheet() {
+    partySheetClose();
+    var ov = h("div", "ptysh"), box = h("div", "ptybox");
+    ov.setAttribute("role", "dialog"); ov.setAttribute("aria-label", "Watch party");
+    ov.onclick = function (ev) { if (ev.target === ov) partySheetClose(); };
+    ov.appendChild(box);
+    PTYSH = { ov: ov, box: box };
+    document.body.appendChild(ov);
+    partySheetPaint();
+  }
+  function partySheetPaint() {
+    if (!PTYSH) return;
+    var box = PTYSH.box;
+    box.textContent = "";
+    var hd = h("div", "ptyhd"), x = h("button", "ptyx", "×");
+    x.type = "button"; x.setAttribute("aria-label", "Close"); x.onclick = partySheetClose;
+    hd.appendChild(h("b", null, "Watch party")); hd.appendChild(x);
+    box.appendChild(hd);
+    function btn(t, cls, fn) { var b = h("button", cls || "ptyb", t); b.type = "button"; b.onclick = fn; return b; }
+    if (PTY) {
+      var cnt = h("div", "ptycnt"); cnt.appendChild(h("i", "pdot")); cnt.appendChild(document.createTextNode(partyWord(PTY.count) + (PTY.max ? "" : "")));
+      box.appendChild(cnt);
+      if (PTY.media && PTY.media.title) box.appendChild(h("div", "ptyttl", PTY.media.title));
+      var cw = h("div", "ptycode");
+      cw.appendChild(h("small", null, "Invite code"));
+      cw.appendChild(h("b", null, PTY.code));
+      box.appendChild(cw);
+      var r1 = h("div", "ptyrow");
+      r1.appendChild(btn("Copy code", "ptyb", function () { try { navigator.clipboard.writeText(PTY.code).then(function () { toast("Code copied"); }, function () { toast("Code: " + PTY.code); }); } catch (e) { toast("Code: " + PTY.code); } }));
+      r1.appendChild(btn("Share invite", "ptyb pri", partyShare));
+      box.appendChild(r1);
+      var ul = h("div", "ptylist");
+      (PTY.members || []).forEach(function (m) {
+        var li = h("div", "ptym");
+        li.appendChild(h("span", null, m.name + (m.you ? " (you)" : "")));
+        if (m.host) li.appendChild(h("em", null, "Host"));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+      box.appendChild(h("div", "ptynote", PTY.host ? "You control play, pause and seek for everyone. Each person streams on their own server." : "The host controls playback. Each person streams on their own server."));
+      var r2 = h("div", "ptyrow");
+      if (!PTY.host) r2.appendChild(btn("Resync", "ptyb", function () { if (PTY) PTY.last = null; partyTick(); toast("Syncing with the host"); partySheetClose(); }));
+      r2.appendChild(btn("Leave party", "ptyb dng", function () { partyLeave("You left the party"); }));
+      box.appendChild(r2);
+      return;
+    }
+    if (PTYCTL && partyMediaOf(PTYCTL)) {
+      box.appendChild(h("div", "ptynote", "Watch together. Start a party, share the invite code, and everyone you invite watches this title in sync with you (up to 8 people)."));
+      box.appendChild(btn("Start a party for this title", "ptyb pri wide", partyCreate));
+      box.appendChild(h("div", "ptyor", "or join one"));
+    } else box.appendChild(h("div", "ptynote", "Enter the 6-character invite code your friend shared. You will watch the same title, in sync with the host."));
+    var inp = document.createElement("input");
+    inp.className = "ptyin"; inp.maxLength = 6; inp.placeholder = "ABC123"; inp.autocapitalize = "characters"; inp.autocomplete = "off"; inp.spellcheck = false;
+    inp.setAttribute("aria-label", "Invite code");
+    inp.oninput = function () { inp.value = partyClean(inp.value); };
+    inp.onkeydown = function (ev) { if (ev.key === "Enter") partyJoin(inp.value); };
+    box.appendChild(inp);
+    box.appendChild(btn("Join party", "ptyb wide", function () { partyJoin(inp.value); }));
+  }
   // ---- v2.0 moderation: suspension screen with appeal, one-time warning notice, staff tools ----
   var SANC_AT = 0;
   function sanctionCheck(force) {
@@ -7215,6 +7603,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       tr.appendChild(bOnl);
     }
     tr.appendChild(bAmb); tr.appendChild(bFs); tr.appendChild(bX);
+    try { partyAttach(tr, v, ctx, function () { return adActive; }); } catch (e) {}
     top.appendChild(tr);
     root.appendChild(top);
 
@@ -8868,6 +9257,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (ccMo) { try { ccMo.disconnect(); } catch (e) {} ccMo = null; }
       if (SUBBLOB) { try { URL.revokeObjectURL(SUBBLOB); } catch (e) {} SUBBLOB = ""; }
       setStreaming(false); window.__vPlaying = null;
+      try { partyDetach(); } catch (e) {}
       unlockO(); closeMenu();
       try { if (mqL) { if (mqL.removeEventListener) mqL.removeEventListener("change", mqL._f); else if (mqL.removeListener) mqL.removeListener(mqL._f); } } catch (e) {}
       if (dash) { try { dash.reset(); } catch (e) {} dash = null; }
@@ -9753,9 +10143,11 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     });
     if (dlOn()) item(l3, "Downloads", dlCount() + " saved", function () { LIBVIEW = "dl"; showTab("lib"); });
     if (dlAdmin()) item(l3, "Download dashboard", "Admin", function () { openDL("dash"); });
+    if (ACC && ACC.role !== "blocked") item(l3, "Watch party", PTY ? partyWord(PTY.count) : "Join with a code", function () { partySheet(); });
     if (ACC && ACC.role !== "blocked") item(l3, "Community wall", "Share & reply", function () { location.href = "/wall"; });
     if (isStaff()) item(l3, "Moderation", ACC.role === "admin" ? "Admin" : "Moderator", openMod);
     if (IS_OWNER) item(l3, "Owner panel", "Only you", openAdmin);
+    else if (ACC && ACC.ao) item(l3, "Add-ons & Plugins", "Admin", openAdmin);
     item(l3, "Get the add-on", "Stremio style", function () { openLink(location.origin + "/addon"); });
     // 4. Data & Session (anchored to the bottom of the page)
     var bot = h("div", "mebot");
@@ -9884,6 +10276,7 @@ $("smclose").onclick = function () {
   function openStreams(mt, id, title, s, e, meta, resumeAt, auto) {
     if (!canWatch()) { needAuth(); return; }
     paintPriv();
+    try { partyPending(); } catch (e) {}
     loadSubs(mt, id, s, e);
     CUR = { mt: mt, id: id, title: title, base: String(title || "").replace(/ \(S\d+E\d+\)$/, ""), s: s || 1, e: e || 1, meta: meta || {}, resumeAt: resumeAt || 0, auto: !!auto || mt === "movie" };
     var slowT = setTimeout(function () {
@@ -11055,6 +11448,7 @@ $("smclose").onclick = function () {
   var ADM = { picks: [], custom: false, notice: "", active: null, kv: true, addons: [] };
   function adm(path, body) {
     var headers = { "x-tg-init": (tg && tg.initData) || "" };
+    if (AT && !IS_OWNER) headers.authorization = "Bearer " + AT;
     var opt = { headers: headers };
     if (body) { opt.method = "POST"; headers["content-type"] = "application/json"; opt.body = JSON.stringify(body); }
     return fetch(path, opt).then(function (r) {
@@ -11084,7 +11478,7 @@ $("smclose").onclick = function () {
     }).catch(function () {});
   }
   function openAdmin() {
-    ADM_TAB = "ov";
+    ADM_TAB = IS_OWNER ? "ov" : "ad";
     // the intro "Boa" wordmark / header brand never float over the owner panel
     document.documentElement.classList.add("adm-on");
     try { document.documentElement.className = document.documentElement.className.replace(/\s*splashlock/g, ""); if (window.__boaUnlock) window.__boaUnlock(); } catch (e) {}
@@ -11116,7 +11510,7 @@ $("smclose").onclick = function () {
         renderAdmin(false);
       }).catch(function (e) {
         box.textContent = "";
-        box.appendChild(h("div", "note center", "Couldn't open the owner panel: " + e.message));
+        box.appendChild(h("div", "note center", "Couldn't open the panel: " + e.message));
         var x = h("button", "abtn", "Close");
         x.onclick = closeAdmin;
         box.appendChild(x);
@@ -11129,10 +11523,10 @@ $("smclose").onclick = function () {
     back.setAttribute("aria-label", "Close");
     back.onclick = closeAdmin;
     head.appendChild(back);
-    head.appendChild(h("h1", null, "Owner panel"));
+    head.appendChild(h("h1", null, IS_OWNER ? "Owner panel" : "Add-ons & Plugins"));
     box.appendChild(head);
     var tabBar = h("div", "atabs");
-    [["ov", "Overview"], ["ad", "Add-ons"], ["pl", "Plugins"], ["ads", "Ads"], ["nt", "Notices"], ["live", "Live TV"], ["int", "Integrations"]].forEach(function (t) {
+    (IS_OWNER ? [["ov", "Overview"], ["ad", "Add-ons"], ["pl", "Plugins"], ["ads", "Ads"], ["nt", "Notices"], ["live", "Live TV"], ["int", "Integrations"]] : [["ad", "Add-ons"], ["pl", "Plugins"]]).forEach(function (t) {
       var b = h("button", "atab" + (ADM_TAB === t[0] ? " on" : ""), t[1]);
       b.onclick = function () { ADM_TAB = t[0]; showAdmTab(); };
       b.setAttribute("data-tb", t[0]);
@@ -11148,7 +11542,8 @@ $("smclose").onclick = function () {
       var wrap = h("div", "asec"), head = h("div", "asechead");
       var bk = h("button", "abtn alt asback", "← Overview");
       bk.setAttribute("aria-label", "Back to Overview");
-      bk.onclick = function () { ADM_TAB = "ov"; showAdmTab(); };
+      bk.onclick = function () { if (!IS_OWNER) { closeAdmin(); return; } ADM_TAB = "ov"; showAdmTab(); };
+      if (!IS_OWNER) bk.textContent = "← Close";
       var ttl = h("h2", null, title); ttl.setAttribute("tabindex", "-1");
       head.appendChild(bk); head.appendChild(ttl);
       var ban = h("div", "sbanner"); ban.setAttribute("role", "status"); ban.setAttribute("aria-live", "polite"); ban.style.display = "none";
@@ -12529,6 +12924,14 @@ $("smclose").onclick = function () {
   setInterval(loadNotice, 60000);
   document.addEventListener("visibilitychange", function () { if (!document.hidden) loadNotice(); });
   checkOwner();
+  setTimeout(function () {
+    var pc = partyClean(qp.get("party") || "");
+    if (pc && qp.get("party")) { try { history.replaceState(null, "", location.pathname); } catch (e) {} }
+    if (!pc && ACC && AT) { pc = partyClean(lsGet("boa_pty", "")); }
+    if (!pc) return;
+    if (ACC && AT) { lsSet("boa_pty", ""); partyJoin(pc); }
+    else { lsSet("boa_pty", pc); needAuth("Sign in to join the watch party. Your invite code will be used right after."); }
+  }, 1500);
   paintNavAvatar();
   paintSeg();
   loadHome();
@@ -13263,12 +13666,19 @@ async function adminRoute(request, url, env) {
     });
   const path = url.pathname;
   const who = await ownerCheck(request, env);
-  if (path === "/api/admin/me") return json({ owner: !!who.ok });
-  if (!who.ok) return json({ error: "owner only" }, who.status);
+  let dele = false;
+  if (!who.ok) { try { dele = await addonDelegate(request, env); } catch (e) {} }
+  if (path === "/api/admin/me") return json({ owner: !!who.ok, addons: !who.ok && dele });
+  if (!who.ok && !dele) return json({ error: "owner only" }, who.status);
+  if (!who.ok && !ADDON_PATHS.has(path)) return json({ error: "Owner only. You can manage Add-ons and Plugins." }, 403);
   const isPost = request.method === "POST";
 
   try {
     if ((path === "/api/admin/metrics" || path === "/api/admin/analytics") && !isPost) return json(await analyticsStats(env));
+    if (path === "/api/admin/state" && !isPost && !who.ok) {
+      // add-on manager: only what the Add-ons and Plugins screens need
+      return json({ picks: [], custom: false, notice: "", noticePri: false, active: null, kv: true, stats: { active: 0, today: 0, week: 0, lastVisit: 0, now: 0, streaming: 0, src: { b: 0, p: 0, w: 0 }, hours: [0, 0], days: [0, 0, 0, 0, 0, 0, 0], first: 0 }, ads: { on: false, tag: "", midTag: "", pre: true, mid: true, lock: 15, skip: 15, view: 5, movie: [30, 45], tv: [30, 45] }, integ: integView(integMerge({})), notices: [], live: [], homeMode: "builtin", mediaServer: null, kvDown: Date.now() < kvBad, addons: await getAddons(env), plugins: await getPluginRepos(env) });
+    }
     if (path === "/api/admin/state" && !isPost) {
       let notice = "";
       let homeMode = "builtin";

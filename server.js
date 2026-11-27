@@ -313,18 +313,19 @@ const GATED_PATHS = new Set(['/api/streams', '/api/relay-sign', '/api/torrent-br
 const roleMemo = new Map();
 async function roleFromToken(auth) {
   const m = /^Bearer\s+(\S+)/i.exec(String(auth || ''));
-  if (!m) return '';
+  if (!m) return { r: '', ao: false };
   const tok = m[1];
   const hit = roleMemo.get(tok);
-  if (hit && hit.t > Date.now()) return hit.r;
-  let r = '';
+  if (hit && hit.t > Date.now()) return hit;
+  let r = '', ao = false;
   try {
     const x = await fetch(WORKER_BASE + '/api/acct/me', { headers: { authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(7000) });
-    if (x.ok) { const j = await x.json(); r = (j && j.user && j.user.role) || 'user'; }
-  } catch { return hit ? hit.r : ''; }   // Worker unreachable: do not cache the miss
+    if (x.ok) { const j = await x.json(); r = (j && j.user && j.user.role) || 'user'; ao = !!(j && j.user && j.user.ao); }
+  } catch { return hit || { r: '', ao: false }; }   // Worker unreachable: do not cache the miss
   if (roleMemo.size > 500) roleMemo.clear();
-  roleMemo.set(tok, { r, t: Date.now() + (r ? 60000 : 15000) });
-  return r;
+  const out = { r, ao, t: Date.now() + (r ? 60000 : 15000) };
+  roleMemo.set(tok, out);
+  return out;
 }
 
 const server = createServer(async (req, res) => {
@@ -346,6 +347,7 @@ const server = createServer(async (req, res) => {
 
     // Attach local dev header so the admin panel unlocks in desktop browsers
     const headers = new Headers(req.headers);
+    headers.delete('x-boa-addons');
     headers.delete('x-boa-role');   // only this server may set it (after checking the login with the Worker); never trust a client copy
 // Admin bypass only on your own PC. Never on Render or any public host.
 const onRender = !!process.env.RENDER || process.env.NODE_ENV === 'production';
@@ -438,9 +440,10 @@ if (!onRender) {
       return;
     }
     // Stream lookups, relay signing and torrent links need a signed-in account: check the Bearer token with the Worker and pass the role on.
-    if (GATED_PATHS.has(reqUrl.pathname)) {
-      const role = await roleFromToken(req.headers['authorization']);
-      if (role) request.headers.set('x-boa-role', role);
+    if (GATED_PATHS.has(reqUrl.pathname) || reqUrl.pathname.startsWith('/api/admin/')) {
+      const who = await roleFromToken(req.headers['authorization']);
+      if (who.r) request.headers.set('x-boa-role', who.r);
+      if (who.ao) request.headers.set('x-boa-addons', '1');
     }
     const response = await worker.fetch(request, env, ctx);
     const ctype = response.headers.get('content-type') || '';
