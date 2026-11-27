@@ -1183,10 +1183,18 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-27.65";
+const APP_VERSION = "2026-11-27.66";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
+self.addEventListener("push",function(e){
+  e.waitUntil(fetch("/api/auth/updates",{cache:"no-store"}).then(function(r){return r.json();}).then(function(j){var u=(j&&j.list&&j.list[0])||{};return {t:u.t||"New on Boa Cinema",b:u.b||"Tap to see what is new.",u:u.mt&&u.i?"/?id="+u.i+"&type="+u.mt:"/"};}).catch(function(){return {t:"New on Boa Cinema",b:"Tap to see what is new.",u:"/"};}).then(function(m){return self.registration.showNotification(m.t,{body:m.b,icon:"/icon-192.png",badge:"/icon-192.png",tag:"boa-upd",data:{u:m.u}});}));
+});
+self.addEventListener("notificationclick",function(e){
+  e.notification.close();
+  var u=(e.notification.data&&e.notification.data.u)||"/";
+  e.waitUntil(self.clients.matchAll({type:"window",includeUncontrolled:true}).then(function(cs){for(var i=0;i<cs.length;i++){if(cs[i].focus){try{if(cs[i].navigate)cs[i].navigate(u);}catch(x){}return cs[i].focus();}}return self.clients.openWindow(u);}));
+});
 self.addEventListener("activate",function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==V&&k!=="boa-lib";}).map(function(k){return caches.delete(k);}));}).then(function(){return self.clients.claim();}));});
 function odb(){return new Promise(function(res,rej){var q=indexedDB.open("boa_dl");q.onupgradeneeded=function(ev){try{ev.target.transaction.abort();}catch(x){}};q.onsuccess=function(){res(q.result);};q.onerror=function(){rej(q.error);};});}
 function oget(d,store,key){return new Promise(function(res,rej){try{var q=d.transaction(store,"readonly").objectStore(store).get(key);q.onsuccess=function(){res(q.result);};q.onerror=function(){rej(q.error);};}catch(x){rej(x);}});}
@@ -1704,6 +1712,33 @@ async function fetchVast(tag, request, depth, acc) {
 // name + email + password. No email sending, no KV writes. Syncs a small key/value store (profiles, My List, Continue Watching).
 let authReady = false;
 const authEnc = new TextEncoder();
+// ---- Web Push (VAPID). Pushes carry no payload: the service worker asks /api/auth/updates what to show, so nothing needs encrypting. ----
+const vapidMemo = new Map();
+async function vapidAuth(env, endpoint) {
+  const aud = new URL(endpoint).origin;
+  const hit = vapidMemo.get(aud);
+  if (hit && hit.exp > Date.now() + 600000) return hit.v;
+  const pubB = new Uint8Array(b64uDec(env.VAPID_PUBLIC_KEY));
+  const jwk = { kty: "EC", crv: "P-256", d: String(env.VAPID_PRIVATE_KEY), x: b64uEnc(pubB.slice(1, 33)), y: b64uEnc(pubB.slice(33, 65)), ext: true };
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const enc = (o) => b64uEnc(new TextEncoder().encode(JSON.stringify(o)));
+  const exp = Math.floor(Date.now() / 1000) + 12 * 3600;
+  const head = enc({ typ: "JWT", alg: "ES256" }), claims = enc({ aud, exp, sub: env.VAPID_SUBJECT || "mailto:admin@boacinema.app" });
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(head + "." + claims));
+  const v = "vapid t=" + head + "." + claims + "." + b64uEnc(sig) + ", k=" + env.VAPID_PUBLIC_KEY;
+  capSet(vapidMemo, aud, { v, exp: exp * 1000 }, 20);
+  return v;
+}
+// returns "ok" | "gone" | "fail"
+async function webPushSend(env, sub) {
+  try {
+    if (!/^https:\/\//i.test(sub.endpoint) || !relayAllowed(sub.endpoint)) return "gone";
+    const r = await fetch(sub.endpoint, { method: "POST", headers: { Authorization: await vapidAuth(env, sub.endpoint), TTL: "86400", Urgency: "normal" }, signal: AbortSignal.timeout(8000) });
+    if (r.status >= 200 && r.status < 300) return "ok";
+    if (r.status === 404 || r.status === 410) return "gone";
+    return "fail";
+  } catch (e) { return "fail"; }
+}
 function authJson(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
@@ -1760,6 +1795,11 @@ async function authSetup(env) {
     env.DB.prepare("CREATE TABLE IF NOT EXISTS wall_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, parent INTEGER NOT NULL DEFAULT 0, uid TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open', replies INTEGER NOT NULL DEFAULT 0)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS wall_idx ON wall_posts (parent, id)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS wall_rep (post INTEGER NOT NULL, uid TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (post, uid))"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, uid TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS updates (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, mt TEXT NOT NULL DEFAULT '', tid TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS tg_chats (chat_id TEXT PRIMARY KEY, opt INTEGER NOT NULL DEFAULT 1, at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS reactions (mt TEXT NOT NULL, id TEXT NOT NULL, uid TEXT NOT NULL, kind INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (mt, id, uid))"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS reactions_t ON reactions (mt, id)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS parties (code TEXT PRIMARY KEY, host TEXT NOT NULL, media TEXT NOT NULL, pos REAL NOT NULL DEFAULT 0, playing INTEGER NOT NULL DEFAULT 0, t INTEGER NOT NULL, created INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS party_members (code TEXT NOT NULL, uid TEXT NOT NULL, name TEXT NOT NULL, joined INTEGER NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY (code, uid))"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS modlog (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, arole TEXT NOT NULL, uid TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL, reason TEXT, note TEXT)"),
@@ -1807,6 +1847,26 @@ async function authHandle(request, url, env) {
       if (!row || !authSame(got, row.hash)) return authJson({ error: "Wrong email or password." }, 401);
       return authJson({ token: await authToken(env, row.id), user: { name: row.name, email: row.email, role: roleFor(env, row.email) } });
     }
+    if (path === "/api/auth/push/key" && request.method === "GET") {
+      return authJson({ key: env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY ? String(env.VAPID_PUBLIC_KEY) : "" });
+    }
+    if (path === "/api/auth/updates" && request.method === "GET") {
+      const rows = (await env.DB.prepare("SELECT id, title, body, mt, tid, at FROM updates ORDER BY id DESC LIMIT 6").all()).results || [];
+      return new Response(JSON.stringify({ list: rows.map((r) => ({ id: r.id, t: r.title, b: r.body, mt: r.mt, i: r.tid, at: r.at })) }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=60" } });
+    }
+    // Like / Love counts are public to read (a signed-in viewer also gets their own pick)
+    const rxId = (v) => String(v || "").replace(/\D/g, "").slice(0, 9);
+    if (path === "/api/auth/react" && request.method === "GET") {
+      const mt = url.searchParams.get("mt") === "tv" ? "tv" : "movie", id = rxId(url.searchParams.get("id"));
+      if (!id) return authJson({ error: "Bad title" }, 400);
+      const rows = (await env.DB.prepare("SELECT kind, COUNT(*) AS n FROM reactions WHERE mt = ? AND id = ? GROUP BY kind").bind(mt, id).all()).results || [];
+      let like = 0, love = 0, mine = 0;
+      for (const r of rows) { if (r.kind === 1) like = r.n; else if (r.kind === 2) love = r.n; }
+      let me = null;
+      try { me = request.headers.get("authorization") ? await authUid(env, request) : null; } catch (e) { me = null; }
+      if (me) { const m = await env.DB.prepare("SELECT kind FROM reactions WHERE mt = ? AND id = ? AND uid = ?").bind(mt, id, me).first(); mine = m ? m.kind : 0; }
+      return authJson({ like, love, mine });
+    }
     if (path.indexOf("/api/acct/") !== 0) return authJson({ error: "Not found" }, 404);
     const uid = await authUid(env, request);
     if (!uid) return authJson({ error: "Session expired. Please sign in again." }, 401);
@@ -1840,6 +1900,77 @@ async function authHandle(request, url, env) {
         env.DB.prepare("INSERT INTO modlog (at,actor,arole,uid,target,action,reason,note) VALUES (?,?,?,?,?,?,?,?)").bind(now, me.email, "user", uid, me.email, "appeal", "", text.slice(0, 200)),
       ]);
       return authJson({ ok: true });
+    }
+    if (path === "/api/acct/push/sub" && request.method === "POST") {
+      const sb = body.sub && typeof body.sub === "object" ? body.sub : {};
+      const ep = String(sb.endpoint || "");
+      if (!/^https:\/\/[^\s]{8,480}$/.test(ep) || !relayAllowed(ep)) return authJson({ error: "That device can't receive notifications." }, 400);
+      if (body.on === false) { await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ? AND uid = ?").bind(ep, uid).run(); return authJson({ ok: true, on: false }); }
+      const k = sb.keys && typeof sb.keys === "object" ? sb.keys : {};
+      const p256 = String(k.p256dh || "").slice(0, 200), au = String(k.auth || "").slice(0, 100);
+      if (!p256 || !au) return authJson({ error: "That device can't receive notifications." }, 400);
+      const have = await env.DB.prepare("SELECT COUNT(*) AS n FROM push_subs WHERE uid = ?").bind(uid).first();
+      if (have && have.n >= 8) await env.DB.prepare("DELETE FROM push_subs WHERE endpoint IN (SELECT endpoint FROM push_subs WHERE uid = ? ORDER BY at ASC LIMIT 1)").bind(uid).run();
+      await env.DB.prepare("INSERT INTO push_subs (endpoint, uid, p256dh, auth, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET uid = excluded.uid, p256dh = excluded.p256dh, auth = excluded.auth, at = excluded.at").bind(ep, uid, p256, au, Date.now()).run();
+      return authJson({ ok: true, on: true });
+    }
+    if (path === "/api/acct/update/send" && request.method === "POST") {
+      // Admin only. Sent in small batches so it stays inside the Worker's per-request limits; the app keeps calling until done.
+      const am = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(uid).first();
+      if (!am || roleFor(env, am.email) !== "admin") return authJson({ error: "Admins only." }, 403);
+      const BATCH = 40;
+      if (body.action === "create") {
+        const title = String(body.title || "").replace(/[\u0000-\u001f<>]/g, " ").trim().slice(0, 80), msg = String(body.body || "").replace(/[\u0000-\u001f<>]/g, " ").trim().slice(0, 240);
+        if (title.length < 3 || msg.length < 3) return authJson({ error: "Add a short title and message." }, 400);
+        const mt = body.mt === "tv" ? "tv" : body.mt === "movie" ? "movie" : "", tid = mt ? String(body.id || "").replace(/\D/g, "").slice(0, 9) : "";
+        const ins = await env.DB.prepare("INSERT INTO updates (title, body, mt, tid, at) VALUES (?, ?, ?, ?, ?)").bind(title, msg, tid ? mt : "", tid, Date.now()).run();
+        const row = await env.DB.prepare("SELECT id FROM updates ORDER BY id DESC LIMIT 1").first();
+        const pn = await env.DB.prepare("SELECT COUNT(*) AS n FROM push_subs").first(), tn = await env.DB.prepare("SELECT COUNT(*) AS n FROM tg_chats WHERE opt = 1").first();
+        return authJson({ ok: true, id: row ? row.id : 0, push: pn ? pn.n : 0, tg: tn ? tn.n : 0, pushReady: !!(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY), tgReady: !!env.BOT_TOKEN });
+      }
+      const upd = await env.DB.prepare("SELECT id, title, body, mt, tid FROM updates WHERE id = ?").bind(Number(body.update) || 0).first();
+      if (!upd) return authJson({ error: "Update not found." }, 404);
+      const after = Math.max(0, Number(body.after) || 0);
+      if (body.stage === "push") {
+        if (!(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY)) return authJson({ error: "Web push keys are not set on the server yet." }, 400);
+        const rows = (await env.DB.prepare("SELECT rowid AS rid, endpoint FROM push_subs WHERE rowid > ? ORDER BY rowid LIMIT ?").bind(after, BATCH).all()).results || [];
+        const out = { ok: true, sent: 0, gone: 0, fail: 0 };
+        const fns = rows.map((r) => async () => { const x = await webPushSend(env, r); if (x === "ok") out.sent++; else if (x === "gone") { out.gone++; await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?").bind(r.endpoint).run(); } else out.fail++; });
+        await runPool(fns, 10);
+        out.next = rows.length ? rows[rows.length - 1].rid : after; out.done = rows.length < BATCH;
+        return authJson(out);
+      }
+      if (body.stage === "tg") {
+        if (!env.BOT_TOKEN) return authJson({ error: "The Telegram bot is not connected here." }, 400);
+        const rows = (await env.DB.prepare("SELECT rowid AS rid, chat_id FROM tg_chats WHERE opt = 1 AND rowid > ? ORDER BY rowid LIMIT ?").bind(after, 25).all()).results || [];
+        const out = { ok: true, sent: 0, gone: 0, fail: 0 };
+        const text = "\uD83D\uDD14 <b>" + esc(upd.title) + "</b>\n" + esc(upd.body) + "\n\n<i>Send /updates off to stop these alerts.</i>";
+        const link = APP_URL ? (upd.mt && upd.tid ? APP_URL + "?id=" + upd.tid + "&type=" + upd.mt : APP_URL) : "";
+        const fns = rows.map((r) => async () => {
+          const res = await say(env, r.chat_id, text, link ? { inline_keyboard: [[{ text: "\uD83C\uDF7F Open Boa Cinema", web_app: { url: link } }]] } : undefined);
+          if (res && res.ok) out.sent++;
+          else if (res && /blocked|deactivated|chat not found|kicked/i.test(res.description || "")) { out.gone++; await env.DB.prepare("UPDATE tg_chats SET opt = 0 WHERE chat_id = ?").bind(r.chat_id).run(); }
+          else out.fail++;
+        });
+        await runPool(fns, 5);
+        out.next = rows.length ? rows[rows.length - 1].rid : after; out.done = rows.length < 25;
+        return authJson(out);
+      }
+      return authJson({ error: "Unknown step." }, 400);
+    }
+    if (path === "/api/acct/react/set" && request.method === "POST") {
+      const mt = body.mt === "tv" ? "tv" : "movie", id = rxId(body.id), kind = Number(body.kind) === 1 ? 1 : Number(body.kind) === 2 ? 2 : 0;
+      if (!id) return authJson({ error: "Bad title" }, 400);
+      const rm = await env.DB.prepare("SELECT u.email AS email, s.status AS status, s.until AS until FROM users u LEFT JOIN sanctions s ON s.uid = u.id WHERE u.id = ?").bind(uid).first();
+      if (!rm) return authJson({ error: "Account not found." }, 401);
+      const rsn = roleFor(env, rm.email) !== "user" ? "active" : sanctionNow(rm);
+      if (rsn === "suspended" || rsn === "blocked") return authJson({ error: "Your account is suspended.", suspended: true }, 403);
+      if (kind) await env.DB.prepare("INSERT INTO reactions (mt, id, uid, kind, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(mt, id, uid) DO UPDATE SET kind = excluded.kind, at = excluded.at").bind(mt, id, uid, kind, Date.now()).run();
+      else await env.DB.prepare("DELETE FROM reactions WHERE mt = ? AND id = ? AND uid = ?").bind(mt, id, uid).run();
+      const rows = (await env.DB.prepare("SELECT kind, COUNT(*) AS n FROM reactions WHERE mt = ? AND id = ? GROUP BY kind").bind(mt, id).all()).results || [];
+      let like = 0, love = 0;
+      for (const r of rows) { if (r.kind === 1) like = r.n; else if (r.kind === 2) love = r.n; }
+      return authJson({ like, love, mine: kind });
     }
     if (path.indexOf("/api/acct/party/") === 0 && request.method === "POST") {
       // Watch party (v2.0): an invite code, up to 8 people, the host drives play/pause/seek. D1 only; no video bytes. Presence = seen in the last 45 s.
@@ -2369,7 +2500,8 @@ const helpText = () =>
   "/faith · faith and Christian picks\n" +
   "/kdrama · /nollywood · /bollywood · /hollywood · /anime\n" +
   "/soon · coming soon, by region\n" +
-  "/random · surprise me\n\n" +
+  "/random · surprise me\n" +
+  "/updates · turn release alerts on or off (optional)\n\n" +
   "<b>Find in chat</b>\n" +
   "/song &lt;track&gt; · song links on Spotify, Apple Music, YouTube Music & Audiomack\n" +
   "/book &lt;title&gt; · free books (Project Gutenberg, Google Books, Internet Archive, Open Library)\n\n" +
@@ -2425,6 +2557,25 @@ async function handleCallback(cq, env) {
   return welcome(env, chatId);
 }
 
+// Optional release alerts in Telegram: /updates on  |  /updates off. Only the chat id and on/off are kept (D1). Private chats only.
+async function tgUpdatesCmd(env, msg, arg) {
+  const chatId = msg.chat.id;
+  if (msg.chat.type !== "private") return say(env, chatId, "Open a private chat with me to manage release alerts.");
+  if (!env.DB) return say(env, chatId, "Release alerts aren't switched on yet.");
+  try {
+    await authSetup(env);
+    const a = String(arg || "").toLowerCase().trim();
+    const row = await env.DB.prepare("SELECT opt FROM tg_chats WHERE chat_id = ?").bind(String(chatId)).first();
+    if (a === "off" || a === "stop") {
+      if (row) await env.DB.prepare("UPDATE tg_chats SET opt = 0, at = ? WHERE chat_id = ?").bind(Date.now(), String(chatId)).run();
+      return say(env, chatId, "\uD83D\uDD15 Release alerts are <b>off</b>. Send /updates on any time to turn them back on.");
+    }
+    if (!a && row && row.opt === 1) return say(env, chatId, "\uD83D\uDD14 Release alerts are <b>on</b> for this chat.\nSend /updates off to stop them.");
+    await env.DB.prepare("INSERT INTO tg_chats (chat_id, opt, at) VALUES (?, 1, ?) ON CONFLICT(chat_id) DO UPDATE SET opt = 1, at = excluded.at").bind(String(chatId), Date.now()).run();
+    return say(env, chatId, "\uD83D\uDD14 Release alerts are <b>on</b>. You'll get a message here when new titles or features land.\nSend /updates off to stop them.");
+  } catch (e) { return say(env, chatId, "Couldn't change release alerts right now. Try again in a moment."); }
+}
+
 async function handleMessage(msg, env) {
   if (!msg.text) return;
   await trackUser(env, msg.from && msg.from.id);
@@ -2458,6 +2609,7 @@ async function handleMessage(msg, env) {
     if (cmd === "/admin" && msg.from && ownerIds(env).includes(String(msg.from.id)) && msg.chat.type === "private") {
       return openCinema(env, chatId, "🔐 <b>Owner panel</b>\nTap below, then open Profile and choose <b>Owner panel</b>.", { go: "admin" });
     }
+    if (cmd === "/updates" || cmd === "/notify") return tgUpdatesCmd(env, msg, arg);
     if (cmd === "/help") return say(env, chatId, helpText());
     if (cmd === "/stats") {
       const n = await activeUsers(env, true);
@@ -4033,6 +4185,36 @@ textarea.ainp{min-height:72px;resize:vertical}
 .btn.disabled{background:#2a2a2e;color:#8a8a90}
 .pplay.off{background:rgba(70,70,76,.92);color:#9a9aa0}
 .ep.off{opacity:.45}
+.ep.wd img{opacity:.5}
+.ep.cur{border-color:rgb(var(--accent-rgb))}
+.etag{position:absolute;top:10px;right:10px;z-index:2;font-size:10.5px;font-weight:900;letter-spacing:.08em;padding:3px 9px;border-radius:999px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.22);color:#fff}
+.etag.nx{background:rgb(var(--accent-rgb));border-color:transparent;color:var(--on-accent,#fff)}
+.etag.ok{color:#46d369;border-color:rgba(70,211,105,.45)}
+.eprog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.22);z-index:2}
+.eprog u{display:block;height:100%;background:rgb(var(--accent-rgb));text-decoration:none}
+.strip.epgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible;gap:12px}
+.strip.epgrid .ep{flex:none;max-width:none;width:auto;height:170px}
+@media (min-width:760px){.strip.epgrid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.pill.epview{margin-left:auto}
+#npop .npu{flex:none;max-height:none}
+#npop .npnew{font-style:normal;font-size:9.5px;font-weight:900;letter-spacing:.08em;background:rgb(var(--accent-rgb));color:#fff;border-radius:999px;padding:2px 7px;margin-left:auto}
+#npop .npd{margin:3px 0 0 16px;font-size:11px;color:#71717a}
+.updin{display:block;width:100%;box-sizing:border-box;padding:11px 12px;margin:6px 0;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.4);color:#fff;font:inherit;font-size:14px}
+.updin::placeholder{color:#71717a}
+.ptyrow .updin{margin:6px 0}
+.updck{display:block;font-size:13.5px;color:#d4d4d8;margin:8px 2px}
+.rxrow{display:flex;gap:8px;flex-wrap:wrap;margin:-4px 0 16px}
+.rxb{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:9px 14px;font-size:13.5px;font-weight:700;color:#e4e4e7;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);transition:transform .12s,background .15s,border-color .15s}
+.rxb:active{transform:scale(.94)}
+.rxb b{font-weight:800;font-size:12.5px;color:#a1a1aa;min-width:6px}
+.rxb.on{background:rgba(var(--accent-rgb),.22);border-color:rgba(var(--accent-rgb),.7);color:#fff}
+.rxb.on b{color:#fff}
+.rxb svg{flex:none;display:block}
+.rxb svg:not([width]){width:18px;height:18px}
+.rxb span{white-space:nowrap}
+.strip.epgrid .et{font-size:16px;margin:6px 0 3px}
+.strip.epgrid .ef{flex-wrap:wrap;gap:4px 10px;font-size:12.5px}
+.strip.epgrid .eo{font-size:12.5px}
 .prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.25)}
 .prog i{display:block;height:100%;background:var(--accent)}
 .xbtn{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;border:0;background:rgba(0,0,0,.8);color:#fff;font-size:18px;line-height:26px;padding:0;z-index:3}
@@ -4221,6 +4403,14 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player.ccs-l .pcap span{font-size:23px}
 #player .prow{flex-wrap:wrap;row-gap:4px}
 #player .pspd{min-width:44px;padding:8px 10px}
+#player .plockb{display:inline-flex;align-items:center;justify-content:center;padding:8px 11px}
+#player .plockb svg{width:16px;height:16px;display:block}
+#player .plockov{position:absolute;inset:0;z-index:60;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:transparent;touch-action:none;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+#player .plockbtn{width:76px;height:76px;border-radius:50%;border:1px solid rgba(255,255,255,.32);background:rgba(255,255,255,.14);-webkit-backdrop-filter:blur(18px) saturate(1.5);backdrop-filter:blur(18px) saturate(1.5);box-shadow:0 10px 34px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.38);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transform:scale(.88);transition:opacity .22s,transform .22s;padding:0}
+#player .plockbtn svg{width:32px;height:32px}
+#player .plockov.peek .plockbtn{opacity:1;pointer-events:auto;transform:scale(1)}
+#player .plockhint{padding:7px 15px;border-radius:999px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);color:#fff;font-size:12.5px;font-weight:700;opacity:0;transition:opacity .22s;pointer-events:none}
+#player .plockov.peek .plockhint{opacity:1}
 #player .pset{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.2)}
 #player .pcc2{background:rgba(18,18,22,.72)!important;-webkit-backdrop-filter:blur(22px) saturate(1.4);backdrop-filter:blur(22px) saturate(1.4);border:1px solid rgba(255,255,255,.14)!important;border-radius:18px!important}
 #player .pcc2 .cctab{margin-top:8px;padding:10px;border-radius:14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}
@@ -4351,6 +4541,21 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .pepchips::-webkit-scrollbar{display:none}
 #player .pepc{flex:0 0 auto;background:#18181b;border:1px solid #26262b;border-radius:999px;color:#d4d4d8;font-size:12px;font-weight:700;padding:6px 12px}
 #player .pepc.on{background:#e50914;border-color:#e50914;color:#fff}
+#player .pecard{display:flex;align-items:stretch;gap:12px;width:100%;text-align:left;background:#18181b;border:1px solid #26262b;border-radius:14px;padding:8px;margin-bottom:8px;color:#fff;font-size:14px}
+#player .pecard.on{border-color:rgb(var(--accent-rgb));background:rgba(var(--accent-rgb),.12)}
+#player .pecard.nx{border-color:rgba(var(--accent-rgb),.55)}
+#player .pecard.off{opacity:.5}
+#player .peth{position:relative;flex:0 0 124px;height:70px;border-radius:10px;overflow:hidden;background:#27272a}
+#player .peth img{width:100%;height:100%;object-fit:cover;display:block}
+#player .peb{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.7);border-radius:7px;padding:2px 7px;font-size:10.5px;font-weight:800;letter-spacing:.02em}
+#player .peprog{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.25)}
+#player .peprog u{display:block;height:100%;background:rgb(var(--accent-rgb));text-decoration:none}
+#player .pept{display:flex;align-items:center;gap:8px;min-width:0;width:100%}
+#player .pept b{font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+#player .pept .srlive{flex:none;white-space:nowrap;font-size:9.5px;padding:2px 8px}
+#player .pepup{flex:none;font-size:9.5px;font-weight:900;letter-spacing:.1em;color:#fff;background:rgba(var(--accent-rgb),.85);border-radius:999px;padding:2px 8px}
+#player .peps{font-size:12px;line-height:1.35;color:#b4b4bc;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#player .pepmt{font-size:11px;color:#8b8b94;font-weight:600}
 #player .pepr{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#18181b;border:1px solid #26262b;border-radius:12px;padding:10px;margin-bottom:6px;color:#fff;font-size:14px}
 #player .pepr.on{border-color:#e50914;background:#1f1214}
 #player .pepr.off{opacity:.5}
@@ -4374,7 +4579,7 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .phud.on{display:flex}
 #player .phud svg{width:22px;height:22px;flex:none}
 #player .prow2{display:flex;align-items:center;gap:8px;padding:8px 4px 0;overflow-x:auto;scrollbar-width:none}
-@media (max-width:760px){#player .ptxt,#player .pcc{padding:7px 11px;font-size:11.5px}#player .prow2{gap:6px;padding-top:6px}#player .pccb{max-width:96px}#player .prow2 .ptxt{flex:none}#player .prow .pspace{min-width:4px}}
+@media (max-width:760px){#player .ptxt,#player .pcc{padding:7px 11px;font-size:11.5px}#player .prow2{gap:6px;padding-top:6px}#player .pccb{max-width:96px}#player .prow2 .ptxt{flex:none;padding-left:9px;padding-right:9px}#player .prow .pspace{min-width:4px}}
 #player .prow2::-webkit-scrollbar{display:none}
 #player .ptxt{flex:none;background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:10px;padding:8px 12px;font-size:12px;font-weight:800;touch-action:manipulation}
 #player .pmenu{position:absolute;left:12px;right:12px;bottom:calc(var(--sab) + 130px);max-height:50%;overflow:auto;background:rgba(20,20,20,.97);border:1px solid #333;border-radius:14px;padding:8px;z-index:9;touch-action:pan-y}
@@ -5191,6 +5396,191 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (tab === "me") renderMe();
     });
   }, 300);
+  // ---- Like / Love (one pick per person, live counts) + Share ----
+  var RXC = {};
+  var THUMB = "M7 10.5V20H4.2A1.2 1.2 0 0 1 3 18.8v-7.1a1.2 1.2 0 0 1 1.2-1.2H7zm0 0 3.6-7.2A2.2 2.2 0 0 1 12.8 5.5V9h5.5a2 2 0 0 1 2 2.4l-1.2 6.9A2 2 0 0 1 17.1 20H7";
+  var SHARE_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M16 6l-4-4-4 4M12 2v13"/></svg>';
+  function rxSvg(love, on) {
+    var p = '<path d="' + THUMB + '" fill="' + (on ? "currentColor" : "none") + '" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>';
+    return love ? '<svg viewBox="0 0 30 24" width="25" height="20">' + p + '<g transform="translate(8 0)">' + p + "</g></svg>" : '<svg viewBox="0 0 24 24" width="20" height="20">' + p + "</svg>";
+  }
+  function rxNum(n) { n = n || 0; return n >= 1000000 ? (n / 1000000).toFixed(1).replace(".0", "") + "M" : n >= 1000 ? (n / 1000).toFixed(1).replace(".0", "") + "K" : String(n); }
+  function titleLink(d) { return location.origin + "/?id=" + encodeURIComponent(d.id) + "&type=" + (d.mt === "tv" ? "tv" : "movie"); }
+  function shareTitle(d) {
+    var link = titleLink(d), txt = "Watch " + d.t + (d.y ? " (" + d.y + ")" : "") + " on Boa Cinema";
+    if (navigator.share) { try { navigator.share({ title: d.t, text: txt, url: link }).catch(function () {}); return; } catch (e) {} }
+    try { navigator.clipboard.writeText(link).then(function () { toast("Link copied"); }, function () { toast(link); }); } catch (e2) { toast(link); }
+  }
+  function reactRow(d) {
+    var key = d.mt + ":" + d.id, row = h("div", "rxrow");
+    var S = RXC[key] || (RXC[key] = { like: 0, love: 0, mine: 0, seq: 0 });
+    function mk(cls, aria) { var b = h("button", "rxb " + cls); b.type = "button"; b.setAttribute("aria-label", aria); return b; }
+    var bL = mk("rxl", "Like"), bV = mk("rxv", "Love"), bM = mk("rxm", "My List"), bS = mk("rxs", "Share this title");
+    function paint() {
+      bL.innerHTML = rxSvg(false, S.mine === 1) + "<span>Like</span><b>" + rxNum(S.like) + "</b>";
+      bL.className = "rxb rxl" + (S.mine === 1 ? " on" : ""); bL.setAttribute("aria-pressed", S.mine === 1 ? "true" : "false");
+      bV.innerHTML = rxSvg(true, S.mine === 2) + "<span>Love</span><b>" + rxNum(S.love) + "</b>";
+      bV.className = "rxb rxv" + (S.mine === 2 ? " on" : ""); bV.setAttribute("aria-pressed", S.mine === 2 ? "true" : "false");
+      var inL = libHas(d.mt, d.id);
+      bM.innerHTML = (inL ? ICON.check : ICON.plus) + "<span>My List</span>"; bM.className = "rxb rxm" + (inL ? " on" : "");
+      bS.innerHTML = SHARE_SVG + "<span>Share</span>";
+    }
+    function react(k) {
+      if (!ACC || !AT) { needAuth("Sign in to rate titles and see what others think."); return; }
+      var prev = { like: S.like, love: S.love, mine: S.mine }, nk = S.mine === k ? 0 : k;
+      if (S.mine === 1) S.like = Math.max(0, S.like - 1);
+      if (S.mine === 2) S.love = Math.max(0, S.love - 1);
+      if (nk === 1) S.like++;
+      if (nk === 2) S.love++;
+      S.mine = nk; var my = ++S.seq; paint();
+      acctApi("/api/acct/react/set", { mt: d.mt, id: d.id, kind: nk }, function (e, j) {
+        if (e) { if (my === S.seq) { S.like = prev.like; S.love = prev.love; S.mine = prev.mine; paint(); } toast(e.m); return; }
+        if (my === S.seq) { S.like = j.like; S.love = j.love; S.mine = j.mine; paint(); }
+      });
+    }
+    bL.onclick = function () { react(1); };
+    bV.onclick = function () { react(2); };
+    bM.onclick = function () { libToggle(d); paintLibBtn(d); paint(); };
+    bS.onclick = function () { shareTitle(d); };
+    [bL, bV, bM, bS].forEach(function (b) { row.appendChild(b); });
+    paint();
+    acctApi("/api/auth/react?mt=" + d.mt + "&id=" + encodeURIComponent(d.id), null, function (e, j) {
+      if (e || !j || S.seq) return;
+      S.like = j.like || 0; S.love = j.love || 0; S.mine = j.mine || 0; paint();
+    });
+    return row;
+  }
+  // ---- What's new (updates feed + New dot), browser notifications (Web Push) and the admin "Send an update" screen ----
+  var UPD = { list: [], at: 0, seen0: null };
+  function updSeen() { return Number(lsGet("boa_upd", "0")) || 0; }
+  function updFresh() { return !!(UPD.list.length && UPD.list[0].id > updSeen()); }
+  function loadUpdates(cb) {
+    acctApi("/api/auth/updates", null, function (e, j) {
+      if (!e && j && j.list) { UPD.list = j.list; UPD.at = Date.now(); paintBell(); }
+      if (cb) cb();
+    });
+  }
+  function drawUpdates(pop) {
+    var L = UPD.list.slice(0, 3);
+    if (!L.length) return;
+    pop.appendChild(h("div", "nph", "What's new"));
+    var box = h("div", "npl npu"), seen = UPD.seen0 != null ? UPD.seen0 : updSeen();
+    L.forEach(function (u) {
+      var it = h("button", "npi"); it.type = "button";
+      var tt = h("div", "npt");
+      tt.appendChild(h("i", "p1")); tt.appendChild(h("span", null, u.t));
+      if (u.id > seen) tt.appendChild(h("em", "npnew", "NEW"));
+      it.appendChild(tt);
+      it.appendChild(h("div", "npb", u.b));
+      if (u.at) it.appendChild(h("div", "npd", fmtDate(new Date(u.at).toISOString().slice(0, 10))));
+      it.onclick = function () { closePop(); if (u.mt && u.i) openTitle(u.mt, u.i); };
+      box.appendChild(it);
+    });
+    pop.appendChild(box);
+  }
+  function pushOK() { return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window; }
+  function pushState(cb) {
+    var done = false, fin = function (v) { if (!done) { done = true; cb(v); } };
+    setTimeout(function () { fin(false); }, 2500);
+    try {
+      navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) { fin(!!sub && Notification.permission === "granted"); }).catch(function () { fin(false); });
+    } catch (e) { fin(false); }
+  }
+  function b64u2buf(str) {
+    var pad = "=".repeat((4 - str.length % 4) % 4), b = atob((str + pad).replace(/-/g, "+").replace(/_/g, "/")), a = new Uint8Array(b.length);
+    for (var i = 0; i < b.length; i++) a[i] = b.charCodeAt(i);
+    return a;
+  }
+  function pushHint() { toast("Notifications need a newer browser. On iPhone, add Boa Cinema to your Home Screen first."); }
+  function pushEnable(done) {
+    if (!pushOK()) { pushHint(); return; }
+    if (!ACC || !AT) { needAuth("Sign in to turn on notifications."); return; }
+    acctApi("/api/auth/push/key", null, function (e, j) {
+      if (e || !j || !j.key) { toast("Notifications are not switched on yet."); return; }
+      Notification.requestPermission().then(function (p) {
+        if (p !== "granted") { toast("Notifications are blocked. Allow them in your browser settings."); return; }
+        navigator.serviceWorker.ready.then(function (reg) {
+          return reg.pushManager.getSubscription().then(function (ex) { return ex || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u2buf(j.key) }); });
+        }).then(function (sub) {
+          acctApi("/api/acct/push/sub", { sub: sub.toJSON() }, function (e2) { if (e2) { toast(e2.m); return; } toast("Notifications are on"); if (done) done(true); });
+        }).catch(function () { toast("Couldn't turn on notifications on this device."); });
+      }).catch(function () { toast("Couldn't turn on notifications on this device."); });
+    });
+  }
+  function pushDisable(done) {
+    try {
+      navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) {
+        if (!sub) { if (done) done(false); return; }
+        var ep = sub.endpoint;
+        sub.unsubscribe().then(function () {
+          if (AT) acctApi("/api/acct/push/sub", { sub: { endpoint: ep }, on: false }, function () {});
+          toast("Notifications are off"); if (done) done(false);
+        });
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  function pushToggle(done) {
+    if (!pushOK()) { pushHint(); return; }
+    pushState(function (on) { if (on) pushDisable(done); else pushEnable(done); });
+  }
+  function drawPushRow(pop) {
+    if (!pushOK()) return;
+    var ft = h("div", "npf"), b = h("button", null, "Turn on notifications");
+    b.type = "button"; ft.appendChild(b); pop.appendChild(ft);
+    pushState(function (on) { b.textContent = on ? "Notifications on • Turn off" : "Turn on notifications"; });
+    b.onclick = function () { pushToggle(function () { if (popOpen()) drawPop(); }); };
+  }
+  function openSendUpdate() {
+    if (!ACC || ACC.role !== "admin") return;
+    partySheetClose();
+    var ov = h("div", "ptysh"), box = h("div", "ptybox");
+    ov.onclick = function (ev) { if (ev.target === ov) { ov.parentNode && ov.parentNode.removeChild(ov); } };
+    ov.appendChild(box);
+    PTYSH = { ov: ov, box: box };
+    document.body.appendChild(ov);
+    var hd = h("div", "ptyhd"), x = h("button", "ptyx", "×"); x.type = "button"; x.onclick = partySheetClose;
+    hd.appendChild(h("b", null, "Send an update")); hd.appendChild(x); box.appendChild(hd);
+    box.appendChild(h("div", "ptynote", "Shows in the bell as What's new, and goes out as a notification. Keep it short."));
+    var t = document.createElement("input"); t.className = "updin"; t.maxLength = 80; t.placeholder = "Title, e.g. New: Dune Part Two"; t.setAttribute("aria-label", "Title");
+    var m = document.createElement("textarea"); m.className = "updin"; m.maxLength = 240; m.rows = 3; m.placeholder = "Message"; m.setAttribute("aria-label", "Message");
+    var lr = h("div", "ptyrow");
+    var ty = document.createElement("select"); ty.className = "updin"; ty.setAttribute("aria-label", "Link type");
+    [["", "No title link"], ["movie", "Movie"], ["tv", "Series"]].forEach(function (o) { var op = document.createElement("option"); op.value = o[0]; op.textContent = o[1]; ty.appendChild(op); });
+    var ti = document.createElement("input"); ti.className = "updin"; ti.placeholder = "TMDB id"; ti.inputMode = "numeric"; ti.maxLength = 9; ti.setAttribute("aria-label", "TMDB id");
+    lr.appendChild(ty); lr.appendChild(ti);
+    function chk(label, on) { var l = h("label", "updck"), c = document.createElement("input"); c.type = "checkbox"; c.checked = on; l.appendChild(c); l.appendChild(document.createTextNode(" " + label)); box.appendChild(l); return c; }
+    box.appendChild(t); box.appendChild(m); box.appendChild(lr);
+    var cP = chk("Browser notifications", true), cT = chk("Telegram bot (people who sent /updates)", true);
+    var st = h("div", "ptynote", ""), go = h("button", "ptyb pri wide", "Send update"); go.type = "button";
+    box.appendChild(go); box.appendChild(st);
+    var busy = false;
+    function stage(name, id, after, sum, cb) {
+      acctApi("/api/acct/update/send", { update: id, stage: name, after: after }, function (e, j) {
+        if (e) { sum.err = e.m; cb(); return; }
+        sum.sent += j.sent; sum.gone += j.gone; sum.fail += j.fail;
+        st.textContent = (name === "push" ? "Notifications: " : "Telegram: ") + sum.sent + " sent...";
+        if (j.done) cb(); else stage(name, id, j.next, sum, cb);
+      });
+    }
+    go.onclick = function () {
+      if (busy) return;
+      if (!cP.checked && !cT.checked) { toast("Pick at least one way to send"); return; }
+      busy = true; go.disabled = true; st.textContent = "Saving...";
+      acctApi("/api/acct/update/send", { action: "create", title: t.value, body: m.value, mt: ty.value, id: ti.value }, function (e, j) {
+        if (e) { busy = false; go.disabled = false; st.textContent = e.m; return; }
+        var pS = { sent: 0, gone: 0, fail: 0 }, tS = { sent: 0, gone: 0, fail: 0 };
+        function finish() {
+          busy = false; go.disabled = false; loadUpdates();
+          var parts = [];
+          if (cP.checked) parts.push(pS.err ? "notifications: " + pS.err : "notifications " + pS.sent + " sent" + (pS.gone ? ", " + pS.gone + " old devices removed" : "") + (pS.fail ? ", " + pS.fail + " failed" : ""));
+          if (cT.checked) parts.push(tS.err ? "Telegram: " + tS.err : "Telegram " + tS.sent + " sent");
+          st.textContent = "Done. In the bell for everyone; " + parts.join("; ") + ".";
+        }
+        function doTg() { if (cT.checked) stage("tg", j.id, 0, tS, finish); else finish(); }
+        if (cP.checked) stage("push", j.id, 0, pS, doTg); else doTg();
+      });
+    };
+  }
   // ---- v2.0 watch party: invite code, "N watching", host-driven sync (no video goes through the server) ----
   var PTY = null, PTYT = 0, PTYCTL = null, PTYSH = null;
   function partyKey(m) { return m ? m.mt + ":" + m.id + ":" + (m.mt === "tv" ? m.s + "x" + m.e : "") : ""; }
@@ -7170,7 +7560,9 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     pip: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1" fill="#fff"/></svg>',
     amb: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>',
     fs: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
-    x: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>'
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2.4"/><path d="M8 11V8a4 4 0 0 1 7.6-1.7"/></svg>',
+    unlock: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2.4"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/><circle cx="12" cy="16" r="1.2" fill="#fff"/></svg>'
   };
   function loadHls(cb) {
     if (window.Hls) { cb(); return; }
@@ -7637,7 +8029,9 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     bSet.setAttribute("aria-label", "Quality and size settings");
     bEps.setAttribute("aria-label", "Episodes and up next");
     bSpd.setAttribute("aria-label", "Playback speed"); bFit.setAttribute("aria-label", "Picture fit: fit, fill or stretch"); bAud.setAttribute("aria-label", "Audio track"); bSrv.setAttribute("aria-label", "Servers");
+    var bLock = h("button", "ptxt plockb"); bLock.type = "button"; bLock.innerHTML = PI.lock; bLock.setAttribute("aria-label", "Lock the screen");
     row2.appendChild(bFit); row2.appendChild(bSpd); row2.appendChild(bAud);
+    if (!(ctx && ctx.live)) row2.appendChild(bLock);
     if (ctx && ctx.mt === "tv") row2.appendChild(bEps);
     row2.appendChild(sp2);
     if (ctx && (ctx.mt === "movie" || ctx.mt === "tv")) row2.appendChild(bSet);
@@ -9083,12 +9477,25 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         eps.forEach(function (x) {
           var cur = n === (ctx.s || 1) && x.n === (ctx.e || 1);
           var fut = x.d && x.d.slice(0, 10) > today;
-          if (n === (ctx.s || 1) && x.n === (ctx.e || 1) + 1 && !fut) nx = { s: n, e: x.n, t: x.t };
-          var r = h("button", "pepr" + (cur ? " on" : "") + (fut ? " off" : ""));
-          r.appendChild(h("span", "pepn", "E" + x.n));
+          var isNx = n === (ctx.s || 1) && x.n === (ctx.e || 1) + 1 && !fut;
+          if (isNx) nx = { s: n, e: x.n, t: x.t };
+          var r = h("button", "pecard" + (cur ? " on" : "") + (isNx ? " nx" : "") + (fut ? " off" : ""));
+          var th = h("div", "peth");
+          if (x.s) { var im = h("img"); im.loading = "lazy"; im.alt = ""; im.src = IMG + "w300" + x.s; th.appendChild(im); }
+          th.appendChild(h("span", "peb", "S" + n + " E" + x.n));
+          if (cur && v.duration > 0) { var pg = h("i", "peprog"), pgi = h("u"); pgi.style.width = Math.min(100, Math.round(v.currentTime / v.duration * 100)) + "%"; pg.appendChild(pgi); th.appendChild(pg); }
+          r.appendChild(th);
           var mid = h("div", "pepm");
-          mid.appendChild(h("b", null, x.t || "Episode " + x.n));
-          if (cur) mid.appendChild(h("span", "srlive", "NOW PLAYING")); else if (fut) mid.appendChild(h("span", "pepd", "Airs " + String(x.d).slice(0, 10)));
+          var tr1 = h("div", "pept");
+          tr1.appendChild(h("b", null, x.t || "Episode " + x.n));
+          if (cur) tr1.appendChild(h("span", "srlive", "NOW PLAYING")); else if (isNx) tr1.appendChild(h("span", "pepup", "UP NEXT")); else if (fut) tr1.appendChild(h("span", "pepd", "Airs " + String(x.d).slice(0, 10)));
+          mid.appendChild(tr1);
+          if (x.o) mid.appendChild(h("div", "peps", x.o));
+          var mt1 = [];
+          if (x.rt) mt1.push(x.rt + "m");
+          if (x.r && x.r !== "0.0") mt1.push("\u2605 " + x.r);
+          if (x.d && !fut) mt1.push(fmtDate(x.d));
+          if (mt1.length) mid.appendChild(h("div", "pepmt", mt1.join("  \u2022  ")));
           r.appendChild(mid);
           r.onclick = function () { if (fut) { toast("Not aired yet"); return; } if (cur) { closeMenu(); return; } playEp(n, x.n); };
           listEl.appendChild(r);
@@ -9139,15 +9546,53 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         startSource(url, false);
       });
     }
+    // Quality or Size changed: start a NEW stream that fits, from the same moment. With a size cap, the biggest file that still fits
+    // the cap wins (1 GB -> 2 GB really moves up), then the better-scored server. With "Any", the best-scored stream wins.
     function applySettings() {
-      var L = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !failedU[c.st.url] && tierP(c.q) === +SETQ && (SETG === "any" || !c.gb || c.gb <= +SETG); });
+      var cap = SETG === "any" ? 0 : +SETG;
+      var L = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !failedU[c.st.url] && tierP(c.q) === +SETQ && (!cap || !c.gb || c.gb <= cap); });
       var cur = curCand();
-      if (cur && L.indexOf(cur) > -1) { toast("Already playing this quality"); return; }
-      L.sort(function (a, b) { return (a.heavy ? 1 : 0) - (b.heavy ? 1 : 0) || b.sc - a.sc; });
-      if (!L.length) { toast("This title has no " + tierLb(+SETQ) + " stream" + (SETG !== "any" ? " under " + SETG + " GB" : "")); return; }
+      if (!L.length) { toast("This title has no " + tierLb(+SETQ) + " stream" + (cap ? " under " + SETG + " GB" : "")); return; }
+      L.sort(function (a, b) {
+        if (cap) { var ga = Math.round((a.gb || 0) * 10), gb2 = Math.round((b.gb || 0) * 10); if (ga !== gb2) return gb2 - ga; }
+        return (a.heavy ? 1 : 0) - (b.heavy ? 1 : 0) || b.sc - a.sc;
+      });
       lsSet("boa_pq", String(SETQ));
+      if (cur && cur === L[0]) { toast("Already the best match: " + (cur.q ? cur.q + "p" : "stream") + (cur.gb ? " \u2022 " + (cur.gb >= 1 ? cur.gb.toFixed(1) + " GB" : Math.round(cur.gb * 1024) + " MB") : "")); return; }
       playPick(L[0]);
     }
+    // ----- screen lock: a glass layer swallows every tap and gesture until the unlock button is used -----
+    var lockOv = null, lockPk = null, lockWatch = setInterval(function () { if (lockOv && adActive) lockOff(); }, 1000);
+    function lockPeek(ms, txt) {
+      if (!lockOv) return;
+      lockOv.classList.add("peek");
+      lockOv.lastChild.textContent = txt || "Tap the lock to unlock";
+      clearTimeout(lockPk);
+      lockPk = setTimeout(function () { if (lockOv) lockOv.classList.remove("peek"); }, ms || 3000);
+    }
+    function lockOn() {
+      if (lockOv || closed) return;
+      if (adActive) { toast("Lock is available once the ad ends"); return; }
+      closeMenu(); clearTimeout(hideT); root.classList.add("hide");
+      var ov = h("div", "plockov"), ub = h("button", "plockbtn"), hint = h("div", "plockhint", "");
+      ub.type = "button"; ub.innerHTML = PI.unlock; ub.setAttribute("aria-label", "Unlock the screen");
+      ov.appendChild(ub); ov.appendChild(hint);
+      ["touchstart", "touchmove", "touchend", "touchcancel", "pointerdown", "pointerup", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"].forEach(function (t) {
+        ov.addEventListener(t, function (ev) { ev.stopPropagation(); if (ev.target === ov && ev.cancelable && (t === "touchmove" || t === "wheel" || t === "contextmenu")) ev.preventDefault(); }, { passive: false });
+      });
+      ov.addEventListener("click", function (ev) { ev.stopPropagation(); if (ev.target === ov || ev.target === hint) lockPeek(3000); });
+      ub.addEventListener("click", function (ev) { ev.stopPropagation(); lockOff(); });
+      root.appendChild(ov); lockOv = ov;
+      lockPeek(2200, "Screen locked");
+    }
+    function lockOff() {
+      clearTimeout(lockPk);
+      if (lockOv && lockOv.parentNode) lockOv.parentNode.removeChild(lockOv);
+      lockOv = null;
+      showCtl();
+      toast("Screen unlocked");
+    }
+    bLock.onclick = function () { lockOn(); };
     function openSettings() {
       closeMenu();
       var all = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor; });
@@ -9222,6 +9667,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
 
     // ----- close (saves progress first) -----
     function onKey(ev) {
+      if (lockOv) return;
       if (ev.key === " " || ev.key === "k") { ev.preventDefault(); toggle(); }
       else if (ev.key === "ArrowLeft") seekBy(-10);
       else if (ev.key === "ArrowRight") seekBy(10);
@@ -9246,7 +9692,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       closed = true;
       if (ctx) { ctx.keep = null; ctx.rebind = null; ctx.reopen = null; }
       save(true);
-      clearInterval(saveT); clearInterval(ambT); clearTimeout(hideT);
+      clearInterval(saveT); clearInterval(ambT); clearTimeout(hideT); clearInterval(lockWatch); clearTimeout(lockPk);
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("visibilitychange", onHide);
       document.removeEventListener("visibilitychange", onShow);
@@ -10143,6 +10589,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     });
     if (dlOn()) item(l3, "Downloads", dlCount() + " saved", function () { LIBVIEW = "dl"; showTab("lib"); });
     if (dlAdmin()) item(l3, "Download dashboard", "Admin", function () { openDL("dash"); });
+    if (pushOK() || !(ACC && ACC.role === "blocked")) item(l3, "Notifications", "Release alerts on this device", function () { pushToggle(); });
+    if (ACC && ACC.role === "admin") item(l3, "Send an update", "Alert your users", openSendUpdate);
     if (ACC && ACC.role !== "blocked") item(l3, "Watch party", PTY ? partyWord(PTY.count) : "Join with a code", function () { partySheet(); });
     if (ACC && ACC.role !== "blocked") item(l3, "Community wall", "Share & reply", function () { location.href = "/wall"; });
     if (isStaff()) item(l3, "Moderation", ACC.role === "admin" ? "Admin" : "Moderator", openMod);
@@ -10919,6 +11367,7 @@ $("smclose").onclick = function () {
       acts.appendChild(sy);
     }
     info.appendChild(acts);
+    info.appendChild(reactRow(d));
 
     if (d.tag) info.appendChild(h("div", "tag", d.tag));
     var ov = h("p", "ov", d.o || "No synopsis available.");
@@ -11059,6 +11508,18 @@ $("smclose").onclick = function () {
         c.appendChild(inf);
         c.style.cursor = "pointer";
         var epWatch = watchGet("tv", d.id);
+        if (epWatch && epWatch.s) {
+          var wS = epWatch.s || 1, wE = epWatch.e || 1;
+          if (n < wS || (n === wS && e.n < wE)) { c.className += " wd"; c.appendChild(h("span", "etag ok", "\u2713 Watched")); }
+          else if (n === wS && e.n === wE) {
+            if (epWatch.nx) c.appendChild(h("span", "etag nx", "UP NEXT"));
+            else {
+              c.appendChild(h("span", "etag nx", "CONTINUE"));
+              if (epWatch.dur > 0) { var pg = h("i", "eprog"), pgi = h("u"); pgi.style.width = Math.min(100, Math.round(epWatch.pos / epWatch.dur * 100)) + "%"; pg.appendChild(pgi); c.appendChild(pg); }
+            }
+            c.className += " cur";
+          }
+        }
         if (e.d && e.d.slice(0, 10) > new Date().toISOString().slice(0, 10)) {
           c.className = "ep off";
           c.onclick = function () { toast("Airs " + fmtDate(e.d)); };
@@ -11068,6 +11529,11 @@ $("smclose").onclick = function () {
         strip.appendChild(c);
       });
     }
+    var gridOn = lsGet("boa_epgrid", "") === "1";
+    var gv = h("button", "pill epview", gridOn ? "List" : "Grid");
+    gv.setAttribute("aria-label", "Switch between a scrolling row and a grid of episodes");
+    gv.onclick = function () { gridOn = !gridOn; lsSet("boa_epgrid", gridOn ? "1" : ""); gv.textContent = gridOn ? "List" : "Grid"; strip.className = "strip" + (gridOn ? " epgrid" : ""); };
+    if (gridOn) strip.className = "strip epgrid";
     seasons.forEach(function (s, i) {
       var b = h("button", "pill" + (i === 0 ? " sel" : ""), "Season " + s.n);
       b.onclick = function () {
@@ -11077,6 +11543,7 @@ $("smclose").onclick = function () {
       };
       chips.appendChild(b);
     });
+    chips.appendChild(gv);
     load(seasons[0].n);
     return sec;
   }
@@ -11377,11 +11844,12 @@ $("smclose").onclick = function () {
   function paintBell() {
     var b = $("bell");
     if (!b) return;
-    var fresh = BELL.list.length && BELL.v && nvGet() !== BELL.v && nsGet() !== BELL.v;
+    var fresh = (BELL.list.length && BELL.v && nvGet() !== BELL.v && nsGet() !== BELL.v) || updFresh();
     b.className = fresh ? "new" : "";
     b.setAttribute("aria-label", fresh ? "Notices, new" : "Notices");
   }
   function loadBell(cb) {
+    loadUpdates();
     api("/api/notices", 0).then(function (r) {
       BELL.list = r && r.n ? r.n : []; BELL.v = r && r.v ? r.v : ""; BELL.at = Date.now();
       paintBell();
@@ -11391,6 +11859,7 @@ $("smclose").onclick = function () {
   function drawPop() {
     var pop = $("npop"), L = BELL.list;
     pop.textContent = "";
+    drawUpdates(pop);
     var hd = h("div", "nph", "Notices");
     hd.appendChild(h("span", null, L.length ? L.length + (L.length === 1 ? " notice" : " notices") : ""));
     pop.appendChild(hd);
@@ -11414,6 +11883,7 @@ $("smclose").onclick = function () {
       rb.onclick = function () { closePop(); showNotices(L, BELL.v); };
       ft.appendChild(rb); pop.appendChild(ft);
     }
+    drawPushRow(pop);
   }
   function placePop() {
     var b = $("bell"), pop = $("npop"), r = b.getBoundingClientRect();
@@ -11426,12 +11896,15 @@ $("smclose").onclick = function () {
     $("bell").setAttribute("aria-expanded", "false");
     document.removeEventListener("pointerdown", popOut, true);
     document.removeEventListener("keydown", popKey, true);
+    UPD.seen0 = null; paintBell();
   }
   function popOut(e) { var t = e.target; if (t && (t.closest ? (t.closest("#npop") || t.closest("#bell")) : false)) return; closePop(); }
   function popKey(e) { if (e.key === "Escape") { closePop(); try { $("bell").focus(); } catch (x) {} } }
   function openPop() {
+    UPD.seen0 = updSeen();
     drawPop(); placePop();
     $("npop").classList.add("on");
+    if (UPD.list.length) { lsSet("boa_upd", String(UPD.list[0].id)); }
     $("bell").setAttribute("aria-expanded", "true");
     document.addEventListener("pointerdown", popOut, true);
     document.addEventListener("keydown", popKey, true);
@@ -12935,7 +13408,13 @@ $("smclose").onclick = function () {
   paintNavAvatar();
   paintSeg();
   loadHome();
-  if (!pendingQ && !pendingCat) restoreFromHash();
+  var dlTid = (qp.get("id") || "").replace(/\D/g, "").slice(0, 9), dlTty = qp.get("type");
+  var dlLink = !!dlTid && (dlTty === "movie" || dlTty === "tv");
+  if (dlLink) {
+    try { history.replaceState(null, "", location.pathname); } catch (e) {}
+    setTimeout(function () { openTitle(dlTty, dlTid); }, 350);
+  }
+  if (!pendingQ && !pendingCat && !dlLink) restoreFromHash();
   window.__boaOpenGate = function () { GATE_ON = true; window.__boaGateOpen = true; openProfiles(false); };
   if (window.__boaGate === false) startNotices();
   api("/api/me", 0).then(function (r) {
@@ -13033,6 +13512,28 @@ function siteAsset(pathname) {
 }
 
 const APP_BY_BASE = new Map();
+// A shared title link (?id=550&type=movie) shows the poster and title in WhatsApp / Telegram / Facebook previews.
+// Only link-preview crawlers get this (one TMDB lookup, cached by the same helper); real visitors get the normal app instantly.
+async function sharePage(request, env, url) {
+  const res = appPage(env, url);
+  try {
+    const id = (url.searchParams.get("id") || "").replace(/\D/g, "").slice(0, 9), ty = url.searchParams.get("type");
+    if (!id || (ty !== "movie" && ty !== "tv")) return res;
+    if (!/whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|slackbot|discordbot|linkedinbot|skypeuripreview|googlebot|bingbot|embedly/i.test(request.headers.get("user-agent") || "")) return res;
+    const d = await getTitleApi(env, ty, id);
+    if (!d || !d.t) return res;
+    const esc = (x) => String(x || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const title = esc(d.t + (d.y ? " (" + d.y + ")" : "") + " on Boa Cinema");
+    const desc = esc(String(d.o || "Watch trailers, see where to watch and find more on Boa Cinema.").slice(0, 200));
+    const img = d.b ? "https://image.tmdb.org/t/p/w780" + d.b : d.p ? "https://image.tmdb.org/t/p/w500" + d.p : "";
+    let html = await res.text();
+    html = html.replace(/<title>[^<]*<\/title>/, "<title>" + title + "</title>")
+      .replace('<meta property="og:title" content="Boa Cinema">', '<meta property="og:title" content="' + title + '">')
+      .replace(/<meta property="og:description" content="[^"]*">/, '<meta property="og:description" content="' + desc + '">')
+      .replace('<meta name="twitter:card" content="summary">', '<meta name="twitter:card" content="' + (img ? "summary_large_image" : "summary") + '">' + (img ? '<meta property="og:image" content="' + esc(img) + '">' : ""));
+    return new Response(html, { headers: res.headers });
+  } catch (e) { return res; }
+}
 function appPage(env, url) {
   // The page always points stream relay / subtitle links at the Cloudflare Worker. On Cloudflare that is simply this request's address;
   // if the same code runs elsewhere (e.g. Render), set WORKER_URL there to your Worker address.
@@ -14177,7 +14678,7 @@ export default {
       { const pw = pwaResponse(url.pathname); if (pw) return pw; }
       if (url.pathname === "/privacy" || url.pathname === "/terms") return legalPage(url.pathname.slice(1));
       if (url.pathname === "/wall") return wallPage();
-      if (url.pathname === "/" || url.pathname === "/app") return appPage(env, url);
+      if (url.pathname === "/" || url.pathname === "/app") return sharePage(request, env, url);
       const asset = siteAsset(url.pathname);
       if (asset) return asset;
       if (url.pathname === "/trailer") {
