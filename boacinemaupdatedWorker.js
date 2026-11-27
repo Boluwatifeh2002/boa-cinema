@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-27.66";
+const APP_VERSION = "2026-11-27.67";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -4415,6 +4415,9 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 #player .pcc2{background:rgba(18,18,22,.72)!important;-webkit-backdrop-filter:blur(22px) saturate(1.4);backdrop-filter:blur(22px) saturate(1.4);border:1px solid rgba(255,255,255,.14)!important;border-radius:18px!important}
 #player .pcc2 .cctab{margin-top:8px;padding:10px;border-radius:14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}
 #player .pcc2 .cctab>b{padding:0 2px 8px}
+#player .dsbox .dsnote{margin:8px 2px 2px}
+#player .dsbox .dsact{padding:6px 0 2px}
+#player .pmenu.pcc2 .dsbox .dsact button.dslite{width:100%;display:block;padding:9px 12px}
 #player .pcc2 .cctr{display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid rgba(255,255,255,.08)}
 #player .pcc2 .cctl{flex:none;width:62px;font-size:12px;font-weight:800;color:#c9c9cf;letter-spacing:.03em}
 #player .pcc2 .cctg{display:flex;flex-wrap:wrap;gap:6px;flex:1}
@@ -7586,6 +7589,46 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     setTimeout(fin, 9000);
     document.head.appendChild(sc);
   }
+  // mpegts.js: second engine, only for MPEG-TS / M2TS streams (and links Shaka cannot read). Loaded on demand, no transcoding.
+  var MPEGTS_URL = "https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js";
+  function loadMpegts(cb) {
+    if (window.mpegts || window.__mtsTried === 2) { cb(); return; }
+    if (window.__mtsL) { window.__mtsL.push(cb); return; }
+    window.__mtsL = [cb]; window.__mtsTried = 1;
+    var done = false;
+    function fin() { if (done) return; done = true; window.__mtsTried = 2; var q = window.__mtsL || []; window.__mtsL = null; q.forEach(function (f) { try { f(); } catch (e) {} }); }
+    var sc = document.createElement("script");
+    sc.src = MPEGTS_URL; sc.onload = fin; sc.onerror = fin;
+    setTimeout(fin, 9000);
+    document.head.appendChild(sc);
+  }
+  // hls.js-shaped view of an mpegts.js player. destroy() stops the download, detaches the video and removes every listener.
+  function tsShim(pl, mp, onErr, onOk) {
+    var gone = false;
+    function ev(n) { return mp.Events && mp.Events[n]; }
+    try { if (ev("ERROR")) pl.on(ev("ERROR"), onErr); if (ev("MEDIA_INFO")) pl.on(ev("MEDIA_INFO"), onOk); } catch (e) {}
+    return {
+      _ts: pl, audioTracks: [], audioTrack: -1, subtitleTracks: [], subtitleTrack: -1, levels: [], startLoad: function () {},
+      destroy: function () {
+        if (gone) return; gone = true;
+        try { if (ev("ERROR")) pl.off(ev("ERROR"), onErr); if (ev("MEDIA_INFO")) pl.off(ev("MEDIA_INFO"), onOk); } catch (e) {}
+        try { pl.pause(); } catch (e) {}
+        try { pl.unload(); } catch (e) {}
+        try { pl.detachMediaElement(); } catch (e) {}
+        try { pl.destroy(); } catch (e) {}
+      }
+    };
+  }
+  // what this browser can really decode (checked once). HEVC / AC3 files are only called heavy when the device cannot play them.
+  var CAPV = null;
+  function capGet() {
+    if (CAPV) return CAPV;
+    var ms = window.MediaSource || window.ManagedMediaSource, vv = null;
+    try { vv = document.createElement("video"); } catch (e) {}
+    function ok(t) { try { if (ms && ms.isTypeSupported && ms.isTypeSupported(t)) return true; } catch (e) {} try { return !!(vv && vv.canPlayType && vv.canPlayType(t)); } catch (e) {} return false; }
+    CAPV = { mse: !!ms, h264: ok('video/mp4; codecs="avc1.640028,mp4a.40.2"'), hevc: ok('video/mp4; codecs="hvc1.1.6.L93.B0"'), ac3: ok('audio/mp4; codecs="ac-3"') || ok('audio/mp4; codecs="ec-3"') };
+    return CAPV;
+  }
   // hls.js-shaped view of a Shaka player, so the Audio menu, CC list and subtitle code keep working unchanged
   function shkShim(p) {
     var o = { _shk: p, destroy: function () { try { p.destroy(); } catch (e) {} }, startLoad: function () {} };
@@ -8285,7 +8328,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
       triedU[src0] = 1; dead = false;
       if (/^http:/i.test(src0) && location.protocol === "https:") { why = "This link is plain HTTP and browsers block it on a secure page."; src0 = src0.replace(/^http:/i, "https:"); }
-      var isHls = /\.m3u8(\?|$)/i.test(src0), netFail = false, noShk = false, relayFell = false;
+      var isHls = /\.m3u8(\?|$)/i.test(src0), netFail = false, noShk = false, relayFell = false, noTs = false, forceTs = false, triedTs = false;
+      QINFO.n = 0; QINFO.h = 0; QINFO.k = "";
       // HLS needs the stream proxy only when the plugin demands custom headers (Referer / User-Agent) or a direct load was blocked (CORS / 403)
       var hdrNeed = !!(curSt && curSt.headers && Object.keys(curSt.headers).length);
       var viaProxy = !RELAY_ON() && !!useRelay;      // direct playback is always tried first; the proxy is only a fallback
@@ -8294,6 +8338,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         if (closed || gen !== srcGen) return;
         if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
         if (dash) { try { dash.reset(); } catch (e) {} dash = null; }
+        v.onerror = null;                       // no listener of the previous engine can fire for the new stream
         msg.className = "pmsg";
         spin.className = "pspin on";
         var onFatal = function () {
@@ -8314,6 +8359,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           function fall(er) {
             if (p) { try { p.destroy(); } catch (e) {} }
             if (hls === sh) hls = null;
+            if ((er === 4000 || er === 4015) && !noTs) forceTs = true;           // not a manifest at all: maybe MPEG-TS, try the built-in TS player
             noShk = true; console.warn("[Boa] Shaka could not play this stream, using the fallback player", er);
             go(src);
           }
@@ -8370,6 +8416,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             streaming: { bufferingGoal: 40, rebufferingGoal: 1.5, jumpLargeGaps: true, retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 } },
             manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
           };
+          cfg.streaming.bufferingGoal = bufGoal();
+          if (qCap() && qCap() <= 480) cfg.abr = { enabled: true, defaultBandwidthEstimate: 700000 };      // Data Saver starts low instead of opening a heavy variant first
           if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
           var cueN = 0;
           if (tx) {
@@ -8409,21 +8457,56 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           p.addEventListener("error", function (ev) {
             var d = ev && ev.detail;
             if (!d) return;
+            if (d.code === 4012) {                    // the cap cannot be met by any variant: lift it and take the lowest one
+              try { p.configure({ abr: { restrictions: { maxHeight: Infinity, maxBandwidth: Infinity } } }); var vs0 = p.getVariantTracks() || []; vs0.sort(function (a, b) { return (a.height || 0) - (b.height || 0); }); if (vs0[0]) p.selectVariantTrack(vs0[0], true); } catch (e) {}
+              return;
+            }
             if (d.severity !== 2) { if (d.category === 2) subFail("The caption track couldn't be loaded."); return; }     // TEXT errors are recoverable: switch captions, keep the video
             bad(d);
           });
-          p.addEventListener("trackschanged", tracks);
+          p.addEventListener("trackschanged", function () { tracks(); try { shkQ(p, false); } catch (e) {} });
           Promise.resolve(p.attach ? p.attach(v) : null).then(function () {
             if (closed || gen !== srcGen) { try { p.destroy(); } catch (e) {} return null; }
             return p.load(src, null, isMpd ? "application/dash+xml" : "application/x-mpegurl").then(function () { return 1; });
           }).then(function (ok) {
             if (!ok || closed || gen !== srcGen) return;
             loaded = true; tracks();
+            try { shkQ(p, true); } catch (e) {}                 // enforce the chosen cap right away: pick the matching variant and drop the bigger buffer
             var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
           }).catch(function (er) {
             if (closed || gen !== srcGen || (er && er.code === 7001)) return;
             bad(er && er.category ? er : { category: 7, code: er && er.code });
           });
+        }
+        // ----- mpegts.js: MPEG-TS / M2TS streams (and links Shaka could not read) stay inside the app -----
+        function tsStart(mp, src) {
+          var pl = null, sh = null, loaded = false, done = false;
+          function failTs(w) {
+            if (done) return; done = true;
+            if (hls === sh) hls = null;
+            try { if (sh) sh.destroy(); } catch (e) {}
+            if (gen !== srcGen || closed) return;
+            if (!loaded && forceTs) { forceTs = false; noTs = true; go(src); return; }      // it was not TS after all: native / hls.js path
+            why = w; netFail = false; onFatal();
+          }
+          function onErr(t, d) { failTs("This TS stream couldn't be played (" + String(d || t || "error") + ")."); }
+          function onOk() { loaded = true; }
+          try {
+            pl = mp.createPlayer({ type: "mpegts", isLive: false, url: src, cors: true }, { enableWorker: true, enableStashBuffer: true, autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60, autoCleanupMinBackwardDuration: 30, lazyLoad: true, lazyLoadMaxDuration: bufGoal() * 3 });
+          } catch (e) { noTs = true; forceTs = false; go(src); return; }
+          sh = hls = tsShim(pl, mp, onErr, onOk);
+          QINFO.k = "ts";
+          try { pl.attachMediaElement(v); pl.load(); var pr = pl.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) { failTs("The TS player could not start."); }
+        }
+        var isTs0 = !isHls && /\.(ts|m2ts|mts)(\?|$)/i.test(src0);
+        if ((isTs0 || forceTs) && !noTs) {
+          loadMpegts(function () {
+            if (closed || gen !== srcGen) return;
+            var mp = window.mpegts;
+            if (!mp || !mp.isSupported || !mp.isSupported() || !mp.createPlayer) { noTs = true; forceTs = false; go(src); return; }
+            tsStart(mp, src);
+          });
+          return;
         }
         var isMpd0 = /\.mpd(\?|$)/i.test(src0);
         if ((isHls || isMpd0) && !noShk && shakaOn() && src.indexOf("/offline/") < 0 && !(isHls && isIOS() && v.canPlayType("application/vnd.apple.mpegurl"))) {
@@ -8445,7 +8528,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             dash.initialize(v, src, true);
           });
         } else if (isHls && window.Hls && window.Hls.isSupported() && !(isIOS() && v.canPlayType("application/vnd.apple.mpegurl"))) {
-          hls = new window.Hls({ maxBufferLength: 40, enableWorker: true, lowLatencyMode: false });
+          hls = new window.Hls({ maxBufferLength: bufGoal(), enableWorker: true, lowLatencyMode: false });
+          hls.on(window.Hls.Events.MANIFEST_PARSED, function () { capHls(hls); });
           hls.on(window.Hls.Events.ERROR, function (ev, d) {
             if (!d || !d.fatal) return;
             why = hlsWhy(d);
@@ -8491,7 +8575,10 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
         } else {
           v.src = src;
-          v.onerror = function () { why = mediaWhy(v.error); netFail = isHls && !!v.error && (v.error.code === 2 || v.error.code === 4); onFatal(); };
+          v.onerror = function () {
+            if (!noTs && !triedTs && !isHls && v.error && v.error.code === 4 && !/\.(mp4|m4v|webm|mov|mkv|avi|ogv)(\?|$)/i.test(src0)) { triedTs = true; forceTs = true; v.onerror = null; go(src); return; }
+            why = mediaWhy(v.error); netFail = isHls && !!v.error && (v.error.code === 2 || v.error.code === 4); onFatal();
+          };
           var p2 = v.play(); if (p2 && p2.catch) p2.catch(function () {});
         }
       }
@@ -9529,6 +9616,95 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     bEps.onclick = tog("eps", openEpisodes);
     // movie Settings: Quality and Size only. Picks the best matching stream and keeps your place in the film.
     var SETQ = "", SETG = lsGet("boa_setg", "any");
+    // ----- Quality / Data Saver: real Shaka / hls.js limits, kept on this device only (no server writes) -----
+    var DSV = lsGet("boa_ds", "0") === "1", QSEL = lsGet("boa_qsel", "auto"), QINFO = { n: 0, h: 0, k: "" };
+    if (["auto", "480", "720", "1080"].indexOf(QSEL) < 0) QSEL = "auto";
+    function qCap() { return QSEL === "480" ? 480 : QSEL === "720" ? 720 : QSEL === "1080" ? 0 : DSV ? 480 : 0; }
+    function bufGoal() { var c = qCap(); return DSV || (c && c <= 480) ? 12 : 40; }
+    function shkQ(p, pick) {
+      var cap = qCap(), tr = [], cur = null, hs = {}, n = 0;
+      try { tr = p.getVariantTracks() || []; } catch (e) {}
+      tr.forEach(function (t) { if (t.active) cur = t; if (t.height && !hs[t.height]) { hs[t.height] = 1; n++; } });
+      QINFO.n = n; QINFO.k = "shk"; if (cur && cur.height) QINFO.h = cur.height;
+      var multi = n > 1, rs = { maxHeight: Infinity, maxBandwidth: Infinity };
+      if (cap && multi) {
+        var fit = tr.filter(function (t) { return t.height && t.height <= cap; });
+        // a cap that no variant can meet is never sent to Shaka (it would stop the stream)
+        if (fit.length) { rs.maxHeight = cap; if (cap <= 480 && fit.some(function (t) { return t.bandwidth <= 900000; })) rs.maxBandwidth = 900000; }
+      }
+      try { p.configure({ abr: { enabled: true, restrictions: rs }, streaming: { bufferingGoal: bufGoal() } }); } catch (e) {}
+      if (!pick || !multi || !cur) return;
+      var sameA = tr.filter(function (t) { return (t.language || "") === (cur.language || "") && (t.label || "") === (cur.label || ""); });
+      var pl2 = sameA.length ? sameA : tr, tgt = null, lim = cap || (QSEL === "1080" ? 1080 : 0);
+      if (!lim) return;
+      var ok2 = pl2.filter(function (t) { return t.height && t.height <= lim && t.bandwidth <= rs.maxBandwidth; });
+      if (!ok2.length) ok2 = pl2.filter(function (t) { return t.height && t.height <= lim; });
+      if (ok2.length) tgt = ok2.reduce(function (a, b) { return b.height > a.height || (b.height === a.height && b.bandwidth > a.bandwidth) ? b : a; });
+      else tgt = pl2.reduce(function (a, b) { return b.height && (!a.height || b.height < a.height) ? b : a; });     // nothing fits: the lowest there is
+      if (tgt && cur && tgt.id !== cur.id) { try { p.selectVariantTrack(tgt, true); QINFO.h = tgt.height || QINFO.h; } catch (e) {} }
+    }
+    function capHls(H) {
+      try {
+        var L = H.levels || [], cap = qCap(), idx = -1, lo = -1, i;
+        QINFO.n = L.length; QINFO.k = "hls";
+        try { H.config.maxBufferLength = bufGoal(); } catch (e) {}
+        if (cap && L.length > 1) {
+          for (i = 0; i < L.length; i++) {
+            if (L[i].height && (lo < 0 || L[i].height < L[lo].height)) lo = i;
+            if (L[i].height && L[i].height <= cap && (idx < 0 || L[i].height >= L[idx].height)) idx = i;
+          }
+          if (idx < 0) idx = lo;
+          H.autoLevelCapping = idx;
+          if (idx > -1 && H.currentLevel > idx) H.nextLevel = idx;
+        } else H.autoLevelCapping = -1;
+      } catch (e) {}
+    }
+    function qReapply(pick) {
+      var e = hls;
+      if (!e) return;
+      if (e._shk) shkQ(e._shk, pick); else if (e.levels && e.levels.length) capHls(e);
+      try { if (!e._shk && !e._ts && e.config) e.config.maxBufferLength = bufGoal(); } catch (e2) {}
+    }
+    // what is really playing: adaptive (can change size) or a single fixed quality
+    function qStatus() {
+      var hg = QINFO.h || (v && v.videoHeight) || 0, c0 = curCand();
+      if (!hg && c0 && c0.q) hg = c0.q;
+      if (QINFO.n > 1) return { single: false, h: hg, txt: "Adaptive stream" + (hg ? " \u2022 now " + hg + "p" : "") + (qCap() ? " \u2022 capped at " + qCap() + "p" : "") };
+      return { single: true, h: hg, txt: (hg ? hg + "p" : "This stream") + " \u2022 Single Quality" };
+    }
+    function lighterPick() {
+      var cap = qCap() || 480, cur0 = curCand(), L2 = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor && !c.heavy && !failedU[c.st.url] && c.q && tierP(c.q) <= cap && c !== cur0; });
+      L2.sort(function (a, b) { return b.q - a.q || (a.gb || 99) - (b.gb || 99) || b.sc - a.sc; });
+      return L2[0] || null;
+    }
+    function dsBlock() {
+      var box = h("div", "dsbox"), note = h("div", "srnote dsnote"), act = h("div", "dsact");
+      function paintN() {
+        var st = qStatus(), cap = qCap();
+        note.textContent = st.txt + (QINFO.k === "ts" ? " \u2022 built-in TS player" : "");
+        act.textContent = "";
+        if (st.single && cap && (!st.h || st.h > cap)) {
+          note.textContent += " \u2022 Data Saver can't lower this stream";
+          var lb = h("button", "ccto dslite", "Switch to a lighter stream"); lb.type = "button";
+          lb.onclick = function (ev) { ev.stopPropagation(); var c = lighterPick(); if (!c) { toast("No lighter stream found for this title"); return; } playPick(c); };
+          act.appendChild(lb);
+        }
+      }
+      function build() {
+        box.textContent = "";
+        box.appendChild(ccTable("Data Saver", [
+          { label: "Stream", opts: [["auto", "Auto"], ["480", "Data Saver (480p)"], ["720", "720p"], ["1080", "1080p"]], get: function () { return QSEL; }, set: function (k) { QSEL = k; lsSet("boa_qsel", k); qReapply(true); build(); } },
+          { label: "Data Saver Mode", opts: [["0", "Off"], ["1", "On"]], get: function () { return DSV ? "1" : "0"; }, set: function (k) {
+            DSV = k === "1"; lsSet("boa_ds", k);
+            if (DSV && QSEL !== "auto") { QSEL = "auto"; lsSet("boa_qsel", "auto"); }
+            qReapply(true); build(); toast(DSV ? "Data Saver on \u2022 480p cap, small buffer" : "Data Saver off");
+          } }
+        ]));
+        box.appendChild(note); box.appendChild(act); paintN();
+      }
+      build();
+      return box;
+    }
     function tierP(q) { q = +q || 0; return !q ? 0 : q <= 400 ? 380 : q <= 576 ? 480 : q <= 900 ? 720 : q <= 1300 ? 1080 : q <= 2500 ? 2160 : 4320; }
     function tierLb(t) { return t === 380 ? "380p" : t === 480 ? "480p" : t === 720 ? "720p HD" : t === 1080 ? "1080p" : t === 2160 ? "4K" : t === 4320 ? "8K" : "Auto"; }
     function curCand() {
@@ -9598,6 +9774,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       var all = ((ctx && ctx.cands) || []).filter(function (c) { return !c.tor; });
       var m = h("div", "pmenu pcc2 pset2");
       m.appendChild(h("b", null, "Settings"));
+      m.appendChild(dsBlock());
       if (!all.length) { m.appendChild(h("div", "srnote", "Only this stream is available right now.")); root.appendChild(m); menuEl = m; clearTimeout(hideT); return; }
       var seen = {}, qs = [];
       all.forEach(function (c) { var t = tierP(c.q); if (t && !seen[t]) { seen[t] = 1; qs.push(t); } });
@@ -10906,7 +11083,10 @@ $("smclose").onclick = function () {
         }
         function scoreOf(x) {
           var f = fmtOf(x), t = String(x.title || "") + " " + String(x.name || ""), gb = sizeGB(x);
-          var heavy = f === "mkv" || f === "avi" || /hevc|x265|h\.?265|remux|dts|ac3|e-?ac-?3|dd\+?5|truehd|atmos|2160p|\b4k\b/i.test(t) || gb > 3;
+          var CP = capGet();
+          var heavy = f === "mkv" || f === "avi" || /remux|dts|truehd|atmos|2160p|\b4k\b/i.test(t) || gb > 3;
+          if (/hevc|x265|h\.?265/i.test(t) && !CP.hevc) heavy = true;                               // only heavy when this device cannot decode it
+          if (/ac3|e-?ac-?3|dd\+?5/i.test(t) && !CP.ac3) heavy = true;
           var qm = /(\d{3,4})p/i.exec(String(x.quality || "") + " " + t), q = qm ? +qm[1] : (/8k|4320/i.test(String(x.quality || "") + t) ? 4320 : (/4k|uhd/i.test(String(x.quality || "") + t) ? 2160 : 0));
           if (q >= 2160) heavy = true;
           if (x.cx || (f === "dash" && !shakaOn())) heavy = true;                                    // HEVC / AC3 / DTS / MKV / MPD: not browser-safe
@@ -10921,6 +11101,12 @@ $("smclose").onclick = function () {
           if (x.cx) sc -= 25;
           // file size: over 3 GB loses points, over 5 GB is rejected unless nothing smaller exists
           if (gb > 3) sc -= 20 + Math.round((gb - 3) * 10);
+          // Data Saver Mode: small, low-resolution and adaptive HLS streams go first (SERVER 1 / 2), heavy 1080p and big files go last
+          if (lsGet("boa_ds", "0") === "1" && f !== "embed") {
+            sc += q && q <= 480 ? 60 : q > 480 && q <= 900 ? 35 : q >= 1000 ? -30 : 0;
+            if (gb > 0 && gb < 0.5) sc += 40; else if (gb > 0.8) sc -= 40;
+            if (f === "hls") sc += 25;
+          }
           return { f: f, heavy: heavy, q: q, sc: sc, gb: gb, over: gb > 5 };
         }
         function tierOf(q) { return !q ? 0 : q <= 400 ? 380 : q <= 576 ? 480 : q <= 900 ? 720 : q <= 1300 ? 1080 : q <= 2500 ? 2160 : 4320; }
@@ -11155,7 +11341,7 @@ $("smclose").onclick = function () {
         var firstPlay = null, firstPlay0 = null;
         function fireAuto() {
           qdone();
-          var PQ = +lsGet("boa_pq", "720") || 720, best = null, bd = 1e9;
+          var PQ = lsGet("boa_ds", "0") === "1" && lsGet("boa_qsel", "auto") === "auto" ? 480 : (+lsGet("boa_pq", "720") || 720), best = null, bd = 1e9;
           if (CUR && CUR.mt === "movie") pool.forEach(function (e) {
             var s0 = e.sd;
             if (s0.tor || s0.dead || s0.heavy || s0.f === "embed") return;
