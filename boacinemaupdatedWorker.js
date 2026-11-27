@@ -6537,11 +6537,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   var SUBSEL = "", SUBUSER = false, SUBEN = false, SUBHKEY = "";
   var TIER = lsGet("boa_tier", "any"), MAXG = lsGet("boa_maxgb", "auto");   // stream picker: resolution tier + hard file-size ceiling (GB)
   var CCSIZE = lsGet("boa_ccsize", "m"), CCPOS = lsGet("boa_ccpos", "b"), CCHID = false;   // caption size (s/m/l) and position (b = bottom, m = lower-mid)
-// Data Saver / Quality Control (persisted in localStorage, no D1/KV writes)
-var DATA_SAVER = lsGet("boa_datasaver", "0") === "1";
-var DATA_SAVER_MODE = lsGet("boa_datasaver_mode", "0") === "1";
-var QUALITY_SELECTOR = lsGet("boa_quality_selector", "auto"); // "auto" | "datasaver" | "480" | "720" | "1080"
-function isEn(x) { return !!x && (x.lang === "eng" || x.lang === "en" || /english/i.test(x.label || x.name || "")); }
+  function isEn(x) { return !!x && (x.lang === "eng" || x.lang === "en" || /english/i.test(x.label || x.name || "")); }
   var LANGS = { eng: "English", spa: "Spanish", fre: "French", fra: "French", por: "Portuguese", ara: "Arabic", ger: "German", deu: "German", ita: "Italian", rus: "Russian", hin: "Hindi", tur: "Turkish", chi: "Chinese", zho: "Chinese", jpn: "Japanese", kor: "Korean", dut: "Dutch", pol: "Polish", ind: "Indonesian", swa: "Swahili", yor: "Yoruba" };
   var DM = { en: ["eng"], fr: ["fre", "fra"], es: ["spa"], pt: ["por"], ar: ["ara"], de: ["ger", "deu"], it: ["ita"], ru: ["rus"], hi: ["hin"], tr: ["tur"], zh: ["chi", "zho"], ja: ["jpn"], ko: ["kor"], nl: ["dut"], pl: ["pol"], id: ["ind"], sw: ["swa"] };
   // .srt text -> valid WEBVTT
@@ -7980,40 +7976,6 @@ function isEn(x) { return !!x && (x.lang === "eng" || x.lang === "en" || /englis
             streaming: { bufferingGoal: 40, rebufferingGoal: 1.5, jumpLargeGaps: true, retryParameters: { maxAttempts: 4, baseDelay: 700, backoffFactor: 1.6, timeout: 20000 } },
             manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
           };
-          // Data Saver / Quality enforcement
-          (function () {
-            var q = typeof QUALITY_SELECTOR !== "undefined" ? QUALITY_SELECTOR : "auto";
-            var ds = typeof DATA_SAVER_MODE !== "undefined" && DATA_SAVER_MODE === true;
-            if (q === "datasaver" || ds) {
-              cfg.abr = cfg.abr || { enabled: true };
-              cfg.abr.restrictions = cfg.abr.restrictions || {};
-              cfg.abr.restrictions.maxHeight = 480;
-              cfg.abr.restrictions.maxBandwidth = 900000;
-              cfg.streaming.bufferingGoal = 12;
-            } else if (q === "480") {
-              cfg.abr = cfg.abr || { enabled: true };
-              cfg.abr.restrictions = cfg.abr.restrictions || {};
-              cfg.abr.restrictions.maxHeight = 480;
-            } else if (q === "720") {
-              cfg.abr = cfg.abr || { enabled: true };
-              cfg.abr.restrictions = cfg.abr.restrictions || {};
-              cfg.abr.restrictions.maxHeight = 720;
-            } else if (q === "1080") {
-              cfg.abr = cfg.abr || { enabled: true };
-              cfg.abr.restrictions = cfg.abr.restrictions || {};
-              cfg.abr.restrictions.maxHeight = 1080;
-            } else if (q === "auto") {
-              if (ds) {
-                cfg.abr = cfg.abr || { enabled: true };
-                cfg.abr.restrictions = cfg.abr.restrictions || {};
-                cfg.abr.restrictions.maxHeight = 720;
-                cfg.streaming.bufferingGoal = 15;
-              }
-            }
-          })();
-          if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
-            manifest: { retryParameters: { maxAttempts: 3, baseDelay: 600, backoffFactor: 1.6, timeout: 15000 } }
-          };
           if (ctx && ctx.ol && /^[a-z]{2,3}$/i.test(String(ctx.ol))) cfg.preferredAudioLanguage = String(ctx.ol).toLowerCase();
           var cueN = 0;
           if (tx) {
@@ -8063,28 +8025,6 @@ function isEn(x) { return !!x && (x.lang === "eng" || x.lang === "en" || /englis
           }).then(function (ok) {
             if (!ok || closed || gen !== srcGen) return;
             loaded = true; tracks();
-            // Data Saver / Quality: immediately select the best matching variant track
-            (function () {
-              var q = typeof QUALITY_SELECTOR !== "undefined" ? QUALITY_SELECTOR : "auto";
-              var ds = typeof DATA_SAVER_MODE !== "undefined" && DATA_SAVER_MODE === true;
-              var targetHeight = 0;
-              if (q === "datasaver" || ds) targetHeight = 480;
-              else if (q === "480") targetHeight = 480;
-              else if (q === "720") targetHeight = 720;
-              else if (q === "1080") targetHeight = 1080;
-              if (targetHeight > 0) {
-                var variants = sh.getVariantTracks && sh.getVariantTracks() || [];
-                var best = null, bestH = -1;
-                variants.forEach(function (t) {
-                  var h = t.height || 0;
-                  if (h > 0 && h <= targetHeight && h > bestH) { bestH = h; best = t; }
-                });
-                if (best) {
-                  sh.selectVariantTrack(best, true);
-                }
-                }
-              }
-            })();
             var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
           }).catch(function (er) {
             if (closed || gen !== srcGen || (er && er.code === 7001)) return;
@@ -10479,48 +10419,6 @@ $("smclose").onclick = function () {
           box.appendChild(head); box.appendChild(lst); syncs.push(paint); paint();
           return box;
         }
-        // Data Saver toggle
-        var dsBox = h("div", "gdrop");
-        var dsHead = h("button", "gdhead");
-        dsHead.type = "button";
-        dsHead.appendChild(h("span", "gdt", "Data Saver"));
-        var dsVal = h("span", "gdv", DATA_SAVER_MODE ? "ON" : "OFF");
-        dsHead.appendChild(dsVal);
-        dsHead.appendChild(h("i", "gdc"));
-        var dsList = h("div", "gdlist");
-        var dsOff = h("button", "gdo", "OFF");
-        dsOff.type = "button";
-        dsOff.onclick = function () { DATA_SAVER_MODE = false; lsSet("boa_datasaver_mode", "0"); paintDS(); renderServers(); };
-        dsList.appendChild(dsOff);
-        var dsOn = h("button", "gdo", "ON");
-        dsOn.type = "button";
-        dsOn.onclick = function () { DATA_SAVER_MODE = true; lsSet("boa_datasaver_mode", "1"); paintDS(); renderServers(); };
-        dsList.appendChild(dsOn);
-        function paintDS() { dsVal.textContent = DATA_SAVER_MODE ? "ON" : "OFF"; Array.prototype.forEach.call(dsList.querySelectorAll(".gdo"), function (x, i) { x.className = "gdo" + ((i === (DATA_SAVER_MODE ? 1 : 0)) ? " on" : ""); }); };
-        dsHead.onclick = function () { var was = dsBox.classList.contains("open"); Array.prototype.forEach.call(bar.parentNode ? bar.parentNode.querySelectorAll(".gdrop.open") : [], function (x) { x.classList.remove("open"); }); if (!was) dsBox.classList.add("open"); };
-        dsBox.appendChild(dsHead); dsBox.appendChild(dsList);
-        bar.appendChild(dsBox);
-
-        // Quality selector dropdown
-        var qsBox = h("div", "gdrop");
-        var qsHead = h("button", "gdhead");
-        qsHead.type = "button";
-        qsHead.appendChild(h("span", "gdt", "Quality"));
-        var qsVal = h("span", "gdv");
-        qsHead.appendChild(qsVal);
-        qsHead.appendChild(h("i", "gdc"));
-        var qsList = h("div", "gdlist");
-        var qsOpts = [["auto", "Auto"], ["datasaver", "Data Saver (480p)"], ["480", "480p"], ["720", "720p HD"], ["1080", "1080p Full HD"]];
-        qsOpts.forEach(function (o) {
-          var b = h("button", "gdo", o[1]); b.type = "button";
-          b.onclick = function () { QUALITY_SELECTOR = o[0]; lsSet("boa_quality_selector", o[0]); paintQS(); renderServers(); };
-          qsList.appendChild(b);
-        });
-        function paintQS() { qsVal.textContent = qsOpts.find(function (o) { return o[0] === QUALITY_SELECTOR; })[1]; Array.prototype.forEach.call(qsList.querySelectorAll(".gdo"), function (x, i) { x.className = "gdo" + (qsOpts[i][0] === QUALITY_SELECTOR ? " on" : ""); }); };
-        qsHead.onclick = function () { var was = qsBox.classList.contains("open"); Array.prototype.forEach.call(bar.parentNode ? bar.parentNode.querySelectorAll(".gdrop.open") : [], function (x) { x.classList.remove("open"); }); if (!was) qsBox.classList.add("open"); };
-        qsBox.appendChild(qsHead); qsBox.appendChild(qsList);
-        bar.appendChild(qsBox);
-
         bar.appendChild(dropRow("Max file size", [["auto", "Auto (up to 5 GB)"], ["1", "Up to 1 GB"], ["2", "Up to 2 GB"], ["5", "Up to 5 GB"], ["10", "Up to 10 GB"], ["inf", "Any size (10 GB+)"]], function () { return MAXG; }, function (v) { MAXG = v; lsSet("boa_maxgb", v); }));
         bar.appendChild(dropRow("Max quality", [["any", "Any quality"], ["380", "380p"], ["480", "480p"], ["720", "720p HD"], ["1080", "1080p Full HD"], ["2160", "4K Ultra HD"], ["4320", "8K"]], function () { return TIER; }, function (v) { TIER = v; lsSet("boa_tier", v); }));
         var torBox = h("div", "gdrop gtor");
@@ -10573,17 +10471,6 @@ $("smclose").onclick = function () {
           // language: original audio first, English second, mismatched foreign dubs last (never removed)
           if (typeof x.lr === "number") sc += x.lr <= 0 ? 60 : x.lr < 1.5 ? 20 : x.lr < 2 ? 0 : -30;
           if (x.cx) sc -= 25;
-          // Data Saver preference: prioritize low-bitrate/adaptive streams, penalize heavy ones
-          if (DATA_SAVER_MODE) {
-            if (q <= 480) sc += 40;                      // strong preference for <=480p
-            else if (q === 720) sc += 15;                // moderate preference for 720p
-            else if (q >= 1080) sc -= 60;                // strong penalty for 1080p+
-            if (gb > 0.5 && gb <= 1) sc -= 10;           // mild penalty for 0.5-1 GB
-            else if (gb > 1 && gb <= 2) sc -= 25;        // moderate penalty for 1-2 GB
-            else if (gb > 2) sc -= 60;                   // strong penalty for >2 GB
-            if (f === "hls") sc += 15;                   // prefer HLS (adaptive, can downshift)
-            if (f === "embed") sc -= 20;                 // penalize embeds
-          }
           // file size: over 3 GB loses points, over 5 GB is rejected unless nothing smaller exists
           if (gb > 3) sc -= 20 + Math.round((gb - 3) * 10);
           return { f: f, heavy: heavy, q: q, sc: sc, gb: gb, over: gb > 5 };
