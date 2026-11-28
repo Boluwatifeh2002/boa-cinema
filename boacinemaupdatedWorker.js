@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-28.76";
+const APP_VERSION = "2026-11-28.79";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1813,7 +1813,7 @@ async function roomProxy(request, url, env) {
   if (request.method !== "GET" && request.method !== "POST") return J({ error: "Not found" }, 404);
   try {
     const init = { method: request.method, headers: { authorization: request.headers.get("authorization") || "", "content-type": "application/json" }, signal: AbortSignal.timeout(32000) };
-    if (request.method === "POST") init.body = (await request.text()).slice(0, 8000);
+    if (request.method === "POST") init.body = (await request.text()).slice(0, 20000);
     const rr = await fetch(env.STREAM_BACKEND.replace(/\/+$/, "") + url.pathname + url.search, init);
     return new Response(await rr.text(), { status: rr.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
   } catch (e) { return J({ error: "Live room unreachable." }, 502); }
@@ -3489,7 +3489,7 @@ async function runScrapers(job, env, tmdbId, mediaType, season, episode) {
 }
 async function runFast(job, env, tmdbId, mediaType, season, episode) {
   const tasks = [
-    withTimeout(Promise.resolve(globalThis.__fastStreams(env, tmdbId, mediaType, season, episode)), Number(env.FAST_TIMEOUT_MS) || 15000, "fast")
+    withTimeout(Promise.resolve(globalThis.__fastStreams(env, tmdbId, mediaType, season, episode, { fresh: !!job.fresh })), Number(env.FAST_TIMEOUT_MS) || 15000, "fast")
       .then((l) => { jobPush(job, Array.isArray(l) ? l : [], true); }).catch(() => {}),
   ];
   const repos = (await getPluginRepos(env)).filter((r) => r.enabled !== false && r.kind === "stremio" && !(r.disabled || []).includes("stremio"));
@@ -3500,16 +3500,16 @@ async function runFast(job, env, tmdbId, mediaType, season, episode) {
 async function runBackend(job, env, tmdbId, mediaType, season, episode) {
   try {
     const r = await fetch(
-      env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) + "&id=" + encodeURIComponent(tmdbId) + "&s=" + season + "&e=" + episode,
+      env.STREAM_BACKEND.replace(/\/+$/, "") + "/api/plugin-streams?type=" + encodeURIComponent(mediaType) + "&id=" + encodeURIComponent(tmdbId) + "&s=" + season + "&e=" + episode + (job.fresh ? "&r=1" : ""),
       { headers: { "x-stream-key": env.STREAM_KEY || "" }, signal: AbortSignal.timeout(Number(env.BACKEND_TIMEOUT_MS) || 45000) }
     );
     const list = r.ok ? await r.json() : [];
     if (Array.isArray(list)) jobPush(job, list, false);
   } catch (err) {}
 }
-function startJob(env, ctx, key, tmdbId, mediaType, season, episode, follow) {
+function startJob(env, ctx, key, tmdbId, mediaType, season, episode, follow, fresh) {
   const job = newJob();
-  job.env = env;
+  job.env = env; job.fresh = !!fresh;
   STREAM_JOBS.set(key, job);
   const run = env.STREAM_BACKEND ? runBackend : globalThis.__fastStreams ? runFast : runScrapers;
   const go = async () => {
@@ -3551,7 +3551,7 @@ async function streamsFor(env, ctx, tmdbId, mediaType, season, episode, fresh, j
   // Already running in this isolate: join it. Otherwise, if another isolate in this data center is already asking the backend, follow it.
   if (STREAM_JOBS.get(key)) return STREAM_JOBS.get(key);
   const follow = !!env.STREAM_BACKEND && !fresh && (await lockPresent(key));
-  return STREAM_JOBS.get(key) || startJob(env, ctx, key, tmdbId, mediaType, s, e, follow);
+  return STREAM_JOBS.get(key) || startJob(env, ctx, key, tmdbId, mediaType, s, e, follow, fresh);
 }
 async function fetchPluginStreams(env, tmdbId, mediaType, season = 1, episode = 1, fresh = false, ctx) {
   const job = await streamsFor(env, ctx, tmdbId, mediaType, season, episode, fresh);
@@ -3693,7 +3693,8 @@ async function handleApi(url, env, request, ctx) {
         url.searchParams.get("id") || "",
         url.searchParams.get("type") || "movie",
         Number(url.searchParams.get("s")) || 1,
-        Number(url.searchParams.get("e")) || 1
+        Number(url.searchParams.get("e")) || 1,
+        !!(url.searchParams.get("r") && url.searchParams.get("r") !== "0")
       );
       return send(out, 200, "no-store");
     }
@@ -5796,6 +5797,22 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (cb) cb(r.ok, r.status);
     }, function () { if (cb) cb(false, 0); });
   }
+  function liveSig(to, d) {
+    var L = LIVE; if (!L) return;
+    (L.sq || (L.sq = [])).push({ to: to, d: d, n: 0 });
+    if (!L.sb) liveSigPump(L);
+  }
+  function liveSigPump(L) {
+    var it = L.sq && L.sq.shift();
+    if (!it || LIVE !== L || !AT) { L.sb = false; return; }
+    L.sb = true;
+    function again(ms) { if (it.n < 4) { it.n++; L.sq.unshift(it); } setTimeout(function () { liveSigPump(L); }, ms); }
+    fetch("/api/room/send", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + AT }, body: JSON.stringify({ code: L.code, t: "sig", to: it.to, d: it.d }) }).then(function (r) {
+      if (r.ok) setTimeout(function () { liveSigPump(L); }, 25);
+      else if (r.status === 429 || r.status === 400 || r.status >= 500) again(120 * (it.n + 1) * (it.n + 1));      // 400 = the other phone has not joined the room channel yet
+      else liveSigPump(L);
+    }, function () { again(300 * (it.n + 1)); });
+  }
   function liveGot(L, j) {
     if (j.you) L.you = String(j.you);
     if (j.mem) L.mem = j.mem;
@@ -5868,6 +5885,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     ui.mic.oncontextmenu = function (ev) { ev.preventDefault(); };
     ui.mic.onpointerdown = function (ev) {
       ev.stopPropagation(); ev.preventDefault(); down = Date.now();
+      rtcMicPrep(L);
       clearTimeout(R.hold);
       R.hold = setTimeout(function () { R.hold = 0; R.ptt = true; rtcMicStart(L); }, 320);
     };
@@ -5942,6 +5960,9 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     ui.mic.setAttribute("aria-pressed", tx ? "true" : "false");
     ui.rv.innerHTML = R.mute ? LV_SVG.spkx : LV_SVG.spk; ui.rv.className = "plib" + (R.mute ? " off" : "");
     ui.mic.style.display = ui.rv.style.display = ui.hint.style.display = rtcOk() ? "" : "none";
+    var ps = Object.keys(R.peers), up = 0, bd2 = 0;
+    ps.forEach(function (k) { var cs = R.peers[k].pc.connectionState; if (cs === "connected") up++; else if (cs === "failed") bd2++; });
+    ui.hint.textContent = ps.length ? "Voice: " + up + " connected" + (bd2 ? ", " + bd2 + " can't connect" : up < ps.length ? ", connecting\u2026" : "") : "Tap mic = open mic \u2022 hold = talk";
     ui.bub.className = "plbub" + (tx ? " mic" : "") + (anySpk ? " spk" : "");
     ui.bn.textContent = L.unread > 0 ? String(Math.min(L.unread, 9)) : "";
     ui.bn.style.display = L.unread > 0 ? "flex" : "none";
@@ -5954,7 +5975,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     if (p) return p;
     var pc = new RTCPeerConnection({ iceServers: L.ice || RTC_ICE });
     p = R.peers[uid] = { pc: pc, aud: null, polite: String(L.you) < String(uid), making: false, ignore: false, sent: false, senders: [], failed: 0, q: [], rst: 0, up: 0 };
-    pc.onicecandidate = function (e) { if (e.candidate) liveSend("sig", { to: uid, d: { c: e.candidate } }); };
+    pc.onicecandidate = function (e) { if (e.candidate) liveSig(uid, { c: e.candidate }); };
     pc.ontrack = function (e) {
       if (!p.aud) { p.aud = new Audio(); p.aud.autoplay = true; p.aud.playsInline = true; p.aud.setAttribute("playsinline", ""); }
       p.aud.srcObject = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([e.track]);
@@ -5968,11 +5989,12 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     };
     pc.onnegotiationneeded = function () {
       p.making = true;
-      pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).then(function () { liveSend("sig", { to: uid, d: { s: pc.localDescription } }); }).catch(function () {}).then(function () { p.making = false; });
+      pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).then(function () { liveSig(uid, { s: pc.localDescription }); }).catch(function () {}).then(function () { p.making = false; });
     };
     pc.onconnectionstatechange = function () {
       var cs = pc.connectionState;
-      if (cs === "connected" && !p.up) { p.up = 1; toast("Voice connected"); }
+      if (cs === "connected" && !p.up) { p.up = 1; toast(R.tip ? "Voice connected" : "Voice connected. Phones in the same room? Use headphones to stop echo."); R.tip = 1; }
+      liveUiPaint();
       if (cs === "failed") {
         if (!p.rst) { p.rst = 1; try { pc.restartIce(); } catch (e) {} return; }        // one quiet retry before telling anyone
         if (!R.warned[uid]) { R.warned[uid] = 1; toast(L.turn ? "Voice couldn't connect with someone." : "Voice couldn't connect: a network blocks direct voice. The owner can fix this with a TURN relay."); }
@@ -5989,7 +6011,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       if (p.ignore) return;
       pc.setRemoteDescription(d.s).then(function () {
         while (p.q.length) { pc.addIceCandidate(p.q.shift()).catch(function () {}); }        // candidates that arrived before the offer was applied
-        if (off) return pc.createAnswer().then(function (a) { return pc.setLocalDescription(a); }).then(function () { liveSend("sig", { to: e.u, d: { s: pc.localDescription } }); });
+        if (off) return pc.createAnswer().then(function (a) { return pc.setLocalDescription(a); }).then(function () { liveSig(e.u, { s: pc.localDescription }); });
       }).catch(function () {});
     } else if (d.c) {
       if (p.ignore) return;
@@ -6014,22 +6036,40 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     if (R.stream && (R.open || R.ptt)) rtcAttach(L);
   }
   function rtcMuteAll(L) { var R = L.rtc; Object.keys(R.peers).forEach(function (u) { if (R.peers[u].aud) R.peers[u].aud.muted = !!R.mute; }); }
+  function rtcMicGet(L, done) {
+    var R = L.rtc;
+    if (R.stream) { if (done) done(); return; }
+    if (!R.pend) {
+      R.pend = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false }).then(function (st) {
+        R.pend = null;
+        if (LIVE !== L) { st.getTracks().forEach(function (t) { t.stop(); }); return false; }
+        st.getAudioTracks().forEach(function (t) { t.enabled = false; });          // open only when the viewer really turns the mic on
+        R.stream = st; rtcMeter(L); return true;
+      }, function () { R.pend = null; R.open = false; R.ptt = false; liveUiPaint(); toast("Microphone is blocked. Allow mic access for this site and try again."); return false; });
+    }
+    R.pend.then(function (ok) { if (ok && done) done(); });
+  }
+  function rtcMicPrep(L) {
+    var R = L.rtc;
+    if (!rtcOk() || R.stream || R.pend) return;
+    try { var AC = window.AudioContext || window.webkitAudioContext; if (!R.actx && AC) R.actx = new AC(); if (R.actx && R.actx.resume) R.actx.resume(); } catch (e) {}      // audio meter is unlocked inside the tap too
+    rtcMicGet(L, null);
+  }
   function rtcMicStart(L) {
     var R = L.rtc;
     if (!rtcOk()) { toast("Voice isn't supported in this browser"); R.open = false; R.ptt = false; return; }
     if ((L.mem || []).length > 5) { toast("Voice chat is limited to 5 people in a room"); R.open = false; R.ptt = false; liveUiPaint(); return; }
     clearTimeout(R.idleT);
-    if (R.stream) { rtcMicSync(L); return; }
-    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false }).then(function (st) {
-      if (LIVE !== L) { st.getTracks().forEach(function (t) { t.stop(); }); return; }
-      R.stream = st; rtcMeter(L); rtcMicSync(L);
-      toast((L.mem || []).length > 1 ? "Mic on. Others can hear you." : "Mic on. Waiting for others to join.");
-    }, function () { R.open = false; R.ptt = false; liveUiPaint(); toast("Microphone is blocked. Allow mic access for this site and try again."); });
+    var first = !R.stream;
+    rtcMicGet(L, function () {
+      rtcMicSync(L);
+      if (first && R.open) toast((L.mem || []).length > 1 ? "Mic on. Others can hear you." : "Mic on. Waiting for others to join.");
+    });
   }
   function rtcMicSync(L) {
     var R = L.rtc, tx = !!(R.open || R.ptt);
     if (R.stream) {
-      R.stream.getAudioTracks().forEach(function (t) { t.enabled = tx; });
+      R.stream.getAudioTracks().forEach(function (t) { t.enabled = tx && (R.ptt || !R.hd); });
       if (tx) rtcAttach(L);
     }
     if (R.sm !== tx) { R.sm = tx; liveSend("mic", { on: tx }); }
@@ -6062,7 +6102,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     var R = L.rtc;
     try {
       var AC = window.AudioContext || window.webkitAudioContext;
-      R.actx = new AC(); var src = R.actx.createMediaStreamSource(R.stream); R.an = R.actx.createAnalyser(); R.an.fftSize = 512; src.connect(R.an);
+      if (!R.actx) R.actx = new AC(); var src = R.actx.createMediaStreamSource(R.stream); R.an = R.actx.createAnalyser(); R.an.fftSize = 512; src.connect(R.an);
     } catch (e) { R.an = null; return; }
     var buf = new Uint8Array(R.an.fftSize), last = 0;
     clearInterval(R.lvT);
@@ -6085,8 +6125,18 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     var from = v.volume, n = 0;
     R.rampT = setInterval(function () { n++; var x = from + (to - from) * Math.min(1, n / 6); try { v.volume = Math.max(0, Math.min(1, x)); } catch (e) {} R.dv = v.volume; if (n >= 6) clearInterval(R.rampT); }, 45);
   }
+  function rtcTrackSync(L) {
+    var R = L.rtc;
+    if (R.stream) R.stream.getAudioTracks().forEach(function (t) { t.enabled = !!(R.open || R.ptt) && (R.ptt || !R.hd); });
+  }
   function rtcDuck(L) {
     var R = L.rtc, v = PTYCTL && PTYCTL.v;
+    var rt = (L.mem || []).some(function (m) { return m.u !== L.you && m.s; });
+    if (R.open && !R.ptt && rt && !R.hd) {
+      R.hd = true; clearTimeout(R.hdT); R.hdT = 0; rtcTrackSync(L);
+      if (!R.hdTip) { R.hdTip = 1; toast("Your mic pauses while someone else speaks. Hold the mic to talk over them."); }
+    } else if (R.hd && rt) { clearTimeout(R.hdT); R.hdT = 0; }
+    else if (R.hd && !rt && !R.hdT) { R.hdT = setTimeout(function () { R.hdT = 0; R.hd = false; rtcTrackSync(L); }, 600); }
     if (!v) return;
     var talk = !R.mute && (L.mem || []).some(function (m) { return m.u !== L.you && m.s; });
     if (talk) {
@@ -7487,11 +7537,42 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       try {
         if (/\.m3u8($|\?)/i.test(u)) {
           ac = window.AbortController ? new AbortController() : null;
-          fetch(u, { cache: "no-store", signal: ac ? ac.signal : undefined }).then(function (r) {
-            if (r.status === 403 || r.status === 404 || r.status === 410) return fin(false);
-            if (!r.ok) return fin(null);
-            return r.text().then(function (t) { fin(/#EXTM3U/.test(String(t).slice(0, 400)) ? true : false); });
-          }).catch(function () { fin(null); });
+          // a playlist that loads proves nothing: the first video part must load too (CORS blocks and expired tokens usually hit the parts, not the playlist)
+          var sg = ac ? ac.signal : undefined;
+          function getTxt(x) {
+            return fetch(x, { cache: "no-store", signal: sg }).then(function (r) {
+              if (r.status === 403 || r.status === 404 || r.status === 410) return { bad: 1 };
+              if (!r.ok) return { unk: 1 };
+              return r.text().then(function (t) { return { t: String(t), u: r.url || x }; });
+            });
+          }
+          function firstUri(t, base, afterInf) {
+            var L = t.split(/\r?\n/), i, seen = !afterInf;
+            for (i = 0; i < L.length; i++) {
+              var ln = L[i].trim();
+              if (!ln) continue;
+              if (ln.charAt(0) === "#") { if (afterInf && ln.indexOf("#EXT-X-STREAM-INF") === 0) seen = true; continue; }
+              if (seen) { try { return new URL(ln, base).href; } catch (e) { return ""; } }
+            }
+            return "";
+          }
+          getTxt(u).then(function (m) {
+            if (m.bad) return fin(false);
+            if (m.unk) return fin(null);
+            if (!/#EXTM3U/.test(m.t.slice(0, 400))) return fin(false);
+            var master = m.t.indexOf("#EXT-X-STREAM-INF") > -1;
+            return (master ? (function () { var vu = firstUri(m.t, m.u, true); return vu ? getTxt(vu) : Promise.resolve({ unk: 1 }); })() : Promise.resolve(m)).then(function (pl) {
+              if (pl.bad) return fin(false);
+              if (pl.unk || !pl.t) return fin(null);
+              var su = firstUri(pl.t, pl.u, false);
+              if (!su) return fin(null);
+              return fetch(su, { cache: "no-store", signal: sg }).then(function (sr) {
+                try { if (ac) ac.abort(); } catch (e) {}                     // only the first bytes are needed
+                if (sr.status === 403 || sr.status === 404 || sr.status === 410) return fin(false);
+                fin(sr.ok ? true : null);
+              });
+            });
+          }).catch(function () { fin(null); });                                  // CORS / network error on a part: not proven, never "tested"
         } else if (/\.(mp4|m4v|mov|webm)($|\?)/i.test(u)) {
           v = document.createElement("video"); v.muted = true; v.preload = "metadata"; v.setAttribute("playsinline", "");
           v.onloadedmetadata = function () { fin(v && v.videoWidth > 0 || (v && v.duration > 0) ? true : null); };
