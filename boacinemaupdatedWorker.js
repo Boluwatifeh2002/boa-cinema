@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-28.70";
+const APP_VERSION = "2026-11-28.71";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -6751,7 +6751,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     if (/\/embed\/|\.html?($|\?)/i.test(u)) return { ok: false, kind: "embed", reason: "Embedded player page, not a video file." };
     if (/\.mpd(\?|$)/i.test(u)) return { ok: false, kind: "dash", reason: "DASH (.mpd) streams can't be saved yet." };
     if (/\.m3u8(\?|$)/i.test(u) || /\/api\/proxy\/hls/.test(u)) return { ok: true, kind: "hls", label: "HLS playlist (.m3u8)" };
-    if (/\.mkv(\?|$)/i.test(u)) return { ok: true, kind: "file", label: "MKV file", warn: "MKV may not play on iPhone Safari." };
+    if (/\.mkv(\?|$)/i.test(u)) return { ok: true, kind: "file", label: "MKV file", warn: "MKV may not play on iPhone Safari." };      // dlCantPlay decides per device
     if (/\.(mp4|m4v|webm|mov)(\?|$)/i.test(u)) return { ok: true, kind: "file", label: "Direct video file" };
     if (/\/api\/relay\b/.test(u)) return { ok: true, kind: "file", label: "Worker-relayed stream" };
     return { ok: true, kind: "file", label: "Direct link (type checked on save)", maybe: true };
@@ -6815,9 +6815,24 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     }).catch(function () { return ""; });
   }
   // ---- add ----
+  // a saved file that the phone's own player cannot decode is a dead download: say so before saving, not after
+  function dlCantPlay(st, ct) {
+    var u = String((st && st.url) || ""), t = String((st && st.title) || "") + " " + String((st && st.name) || ""), CP = capGet(), vv = null, mk = "";
+    try { vv = document.createElement("video"); } catch (e) {}
+    if (/hevc|x265|h\.?265/i.test(t) && !CP.hevc) return "This file uses HEVC (H.265), which this phone can't play even after saving. Pick an MP4 / H.264 server, or use Open in VLC.";
+    if (/dts|truehd|atmos/i.test(t) || (/e-?ac-?3|ac-?3|dd\+?5/i.test(t) && !CP.ac3)) return "This file has DTS / AC3 audio, which this phone can't play even after saving. Pick an MP4 (AAC) server, or use Open in VLC.";
+    if (/\.avi(\?|$)/i.test(u) || /x-msvideo/i.test(ct || "")) return "AVI files can't play in a phone browser. Pick an MP4 or HLS server, or use Open in VLC.";
+    if (/\.mkv(\?|$)/i.test(u) || /matroska/i.test(ct || "")) {
+      try { mk = vv && vv.canPlayType ? vv.canPlayType("video/x-matroska") : ""; } catch (e) { mk = ""; }
+      if (!mk) return "MKV files can't play on this phone's browser even after saving. Pick an MP4 or HLS server, or use Open in VLC.";
+    }
+    return "";
+  }
   function dlAdd(st, sd, c) {
     var el = dlEligible(st);
     if (!el.ok) { toast(el.reason); return; }
+    var cp0 = dlCantPlay(st, "");
+    if (cp0) { toast(cp0); return; }
     if (!window.indexedDB) { toast("This browser can't store offline files."); return; }
     dlEnsure().then(function () {
       var key = c.mt + "_" + c.id + "_" + c.s + "_" + c.e, dup = null;
@@ -6839,13 +6854,15 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         var kind = el.kind;
         if (kind === "file" && pr.type && /mpegurl/i.test(pr.type)) kind = "hls";
         if (kind === "file" && pr.type && /text\/html/i.test(pr.type)) { toast("That link is a web page, not a video file."); return; }
+        var cp1 = kind === "file" ? dlCantPlay(st, pr.type) : "";
+        if (cp1) { toast(cp1); return; }
         var est = navigator.storage && navigator.storage.estimate ? navigator.storage.estimate() : Promise.resolve({});
         est.then(function (e) {
           var room = e && e.quota ? e.quota - (e.usage || 0) : 0;
           if (pr.total && room && pr.total > room * 0.95) { toast("Not enough space: needs " + fmtB(pr.total) + ", about " + fmtB(room) + " free."); return; }
           if (dlIsIOS() && !dlStandalone() && pr.total > 7e8) { toast("Large file on iPhone Safari: add Boa Cinema to your Home Screen first (Share, then Add to Home Screen)."); return; }
           var it = { id: "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), key: key, owner: dlWho(), mt: c.mt, tid: c.id, s: c.s, e: c.e, title: c.title, base: c.base,
-            url: st.url, hdr: st.headers || null, kind: kind, via: pr.via, q: sd && sd.q ? sd.q : 0, prov: st.provider || "", mime: dlMime({ url: st.url }, pr.type), ch: DLCH,
+            url: st.url, hdr: st.headers || null, kind: kind, via: pr.via, q: sd && sd.q ? sd.q : 0, prov: st.provider || "", ft: String(st.title || "").slice(0, 160), mime: dlMime({ url: st.url }, pr.type), ch: DLCH,
             pimg: "", sub: null, status: "queued", bytes: 0, n: 0, total: pr.total || 0, cur: 0, created: Date.now(), err: "" };
           if (kind === "hls") { try { caches.open("boa-lib").then(function (ca) { return ca.add(HLS_URL); }).catch(function () {}); } catch (x) {} }
           Promise.all([dlPoster(c.meta && c.meta.p), dlSub()]).then(function (r) {
@@ -7038,6 +7055,10 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   function dlPlay(it) {
     if (it.status !== "done") { toast("Not finished yet."); return false; }
     if (!(navigator.serviceWorker && navigator.serviceWorker.controller)) { toast("Offline player isn't ready. Reload the app once while online, then try again."); return false; }
+    if (it.kind !== "hls") {
+      var bad = dlCantPlay({ url: it.url, title: it.ft || "" }, it.mime);
+      if (bad) { toast("This saved file can't play on this phone. Delete it and save an MP4 or HLS stream instead."); return false; }
+    }
     var u = location.origin + "/offline/" + it.id + (it.kind === "hls" ? "/index.m3u8" : ".mp4");
     SUBS = []; SUBA = []; SUBT = []; SUBU = []; SUBSEL = ""; SUBUSER = false; SUBEN = false; SUBHKEY = ""; LSTOK++;
     if (it.sub && it.sub.vtt) {
@@ -8836,7 +8857,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           if (!pool.length && curSt) pool.push({ st: curSt, i: curSrv });
           for (var pz = 0; pz < pool.length && !rc; pz++) {
             var pu = String((pool[pz].st && pool[pz].st.url) || "");
-            if (!pu || relayTried[pu] || /\/embed\/|\.html?($|\?)|\.(mkv|avi|mpd)(\?|$)|^magnet:/i.test(pu)) continue;
+            if (!pu || relayTried[pu] || /\/offline\//.test(pu) || /\/embed\/|\.html?($|\?)|\.(mkv|avi|mpd)(\?|$)|^magnet:/i.test(pu)) continue;
             rc = pool[pz];
           }
           if (rc) {
@@ -11698,8 +11719,8 @@ $("smclose").onclick = function () {
         function tierOf(q) { return !q ? 0 : q <= 400 ? 380 : q <= 576 ? 480 : q <= 900 ? 720 : q <= 1300 ? 1080 : q <= 2500 ? 2160 : 4320; }
         // hard filter: a stream outside the chosen tier or above the chosen size ceiling is never shown, routed or auto-played
         function pickOk(sd) {
-          if (TIER !== "any" && tierOf(sd.q) !== +TIER) return false;
-          if (MAXG !== "auto" && MAXG !== "inf" && sd.gb > +MAXG) return false;
+          if (TIER !== "any" && sd.q && tierOf(sd.q) > +TIER) return false;                 // quality is a ceiling; unknown resolution stays
+          if (MAXG !== "auto" && MAXG !== "inf" && sd.gb > 0 && sd.gb > +MAXG) return false;   // unknown size stays
           return true;
         }
         var pool = [], seenU = {}, total = 0, cands = [], seenC = {};
@@ -11787,6 +11808,10 @@ $("smclose").onclick = function () {
             if (own) { var om = own.main; om._used = false; own.main = lpe; lpe._used = true; own.tier = lpe.sd.heavy ? "r" : own.tier === "r" ? "y" : own.tier; }
           }
         }
+        if (CUR.all && !APP) {                  // Show all streams: no 7-server / one-per-provider cap, every matching stream is a row of its own
+          servers = []; PROV = {};
+          light.concat(heavyL, deadL).slice(0, 80).forEach(function (e) { e._used = true; servers.push({ main: e, alts: [], tier: e.sd.heavy || e.sd.dead ? "r" : "y" }); });
+        }
         // heavy / VLC servers always sit last (stable), the top web-ready one is the green server
         servers = servers.filter(function (x) { return x.tier !== "r"; }).concat(servers.filter(function (x) { return x.tier === "r"; }));
         // Server 1 is always the strongest (and, once checked, fastest reachable) instantly playable direct HTTP/HLS stream when one exists
@@ -11822,18 +11847,19 @@ $("smclose").onclick = function () {
           qdone();
           var nm = h("div", "note center", total && (TIER !== "any" || MAXG !== "auto") ? "No streams match this quality / size selection." : "No playable stream found yet. Try again in a moment, or install a plugin in Add-ons.");
           if (total && (TIER !== "any" || MAXG !== "auto")) {
-            var rs = h("button", "retry", "Show all streams");
-            rs.onclick = function () { TIER = "any"; MAXG = "auto"; lsSet("boa_tier", "any"); lsSet("boa_maxgb", "auto"); if (bar._sync) bar._sync(); Array.prototype.forEach.call(bar.querySelectorAll(".tierrow"), function (r) { Array.prototype.forEach.call(r.querySelectorAll(".tierchip"), function (x, i) { x.className = "tierchip" + (i === 0 ? " on" : ""); }); }); renderServers(); };
+            var rs = h("button", "retry", "Reset filters");
+            rs.onclick = function () { TIER = "any"; MAXG = "auto"; lsSet("boa_tier", "any"); lsSet("boa_maxgb", "auto"); if (bar._sync) bar._sync(); renderServers(); };      // the expanded view stays as it is
             nm.appendChild(h("br")); nm.appendChild(rs);
           }
           host.appendChild(nm);
           return;
         }
-        if (!APP && (TIER !== "any" || MAXG !== "auto")) {
-          var fn0 = h("div", "note fnote", "Showing " + pool.length + " of " + total + " streams for this selection.");
-          if (pool.length < total) {
-            var sa = h("button", "retry", "Show all streams");
-            sa.onclick = function () { TIER = "any"; MAXG = "auto"; lsSet("boa_tier", "any"); lsSet("boa_maxgb", "auto"); if (bar._sync) bar._sync(); Array.prototype.forEach.call(bar.querySelectorAll(".tierrow"), function (r) { Array.prototype.forEach.call(r.querySelectorAll(".tierchip"), function (x, i) { x.className = "tierchip" + (i === 0 ? " on" : ""); }); }); renderServers(); };
+        var matchN = pool.filter(function (e) { return !e.sd.tor; }).length;
+        if (!APP && (CUR.all || matchN > servers.length || TIER !== "any" || MAXG !== "auto")) {
+          var fn0 = h("div", "note fnote", CUR.all ? "Showing all " + matchN + " streams for this selection" : "Showing " + servers.length + " of " + matchN + " streams for this selection");
+          if (CUR.all || matchN > servers.length) {
+            var sa = h("button", "retry", CUR.all ? "Show fewer" : "Show all streams");
+            sa.onclick = function () { CUR.all = !CUR.all; renderServers(); };
             fn0.appendChild(sa);
           }
           host.appendChild(fn0);
