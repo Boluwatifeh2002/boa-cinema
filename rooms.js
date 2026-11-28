@@ -76,7 +76,7 @@ export async function roomHandle(req, res, u, body, workerBase) {
       push(r, { t: 'react', u: me.uid, n: m.n, x });
     } else if (t === 'sig') {
       const to = String(b.to || ''), d = b.d && typeof b.d === 'object' ? b.d : null, raw = d ? JSON.stringify(d) : '';
-      if (!d || raw.length > 6000 || !r.mem.has(to) || to === me.uid) return J(res, 400, { error: 'Bad signal' });
+      if (!d || raw.length > 16000 || !r.mem.has(to) || to === me.uid) return J(res, 400, { error: 'Bad signal' });
       if (!bucket(m, 'sig', 15)) return J(res, 429, { error: 'Slow down.' });
       push(r, { t: 'sig', u: me.uid, to, d });
     } else if (t === 'spk') {

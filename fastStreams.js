@@ -20,6 +20,8 @@ const RESULT_TTL = 10 * 60 * 1000;
 const EMPTY_TTL = 30 * 1000;
 const CODE_TTL = 30 * 60 * 1000;
 const MANIFEST_TTL = 10 * 60 * 1000;
+const PER_PROVIDER = Number(process.env.PER_PROVIDER_MAX) || 6;   // one provider can never fill the whole list
+const COOL_MS = 20 * 60 * 1000;                                    // a provider that keeps erroring rests this long
 
 // A scraper that fails later on its own must never crash the server.
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', (e && e.message) || e));
@@ -200,43 +202,100 @@ function onlyList(env) {
     .filter(Boolean);
 }
 
-async function search(env, id, type, season, episode, only, key) {
+// What each provider has done lately. With hundreds of providers only the first few used to finish before the deadline,
+// so the same ones showed up on every refresh. Now the run order is rotated, providers that keep failing rest for a while,
+// and a Refresh continues with the providers that have not been asked yet for this title.
+const stats = new Map();
+function statOf(n) {
+  let s = stats.get(n);
+  if (!s) { s = { ok: 0, empty: 0, fail: 0, streak: 0, last: 0 }; stats.set(n, s); }
+  return s;
+}
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+function order(list, skip) {
+  const now = Date.now(), good = [], fresh = [], meh = [];
+  for (const e of list) {
+    const n = String(e.name || e.id);
+    if (skip && skip.has(n)) continue;
+    const s = stats.get(n);
+    if (!s) { fresh.push(e); continue; }
+    if (s.streak >= 3 && now - s.last < COOL_MS) continue;
+    (s.ok > 0 ? good : meh).push(e);
+  }
+  shuffle(good); shuffle(fresh); shuffle(meh);
+  const out = [];
+  let g = 0, f = 0, m = 0;
+  while (g < good.length || f < fresh.length || m < meh.length) {
+    for (let k = 0; k < 2 && g < good.length; k++) out.push(good[g++]);
+    for (let k = 0; k < 2 && f < fresh.length; k++) out.push(fresh[f++]);
+    if (m < meh.length) out.push(meh[m++]);
+  }
+  return out;
+}
+
+async function search(env, id, type, season, episode, only, key, more) {
   let list = (await loadScrapers(env)).filter((e) => supports(e, type));
   if (only.length) {
     list = list.filter((e) => only.some((o) => String(e.name || e.id).toLowerCase().includes(o)));
   }
-  const all = [];
+  const prev = more ? resultCache.get(key) : null;
+  const tried = prev && prev.tried ? prev.tried : new Set();
+  let ord = order(list, more ? tried : null);
+  if (more && !ord.length) { tried.clear(); ord = order(list, null); }      // everything has been asked: start the rotation again
+  const all = prev ? prev.list : [];
+  const seen = new Set(all.map((s) => s.url));
   let done = 0;
-  const entry = { t: Date.now(), list: all };
+  const entry = prev || { t: Date.now(), list: all };
+  entry.tried = tried;
   resultCache.set(key, entry);
 
-  const finished = pool(list, CONCURRENCY, async (e) => {
+  const finished = pool(ord, CONCURRENCY, async (e) => {
+    const n = String(e.name || e.id);
+    if (tried.has(n)) return;                    // another run of this title (still going after its deadline) already asked this provider
+    tried.add(n);
     const r = await runScraper(e, id, type, season, episode);
     done++;
+    const s = statOf(n);
+    s.last = Date.now();
+    if (!r.ok) { s.fail++; s.streak++; }
+    else if (r.streams.length) { s.ok++; s.streak = 0; }
+    else { s.empty++; s.streak = 0; }
     if (r.ok && r.streams.length) {
-      all.push(...r.streams);
-      console.log('[fast] ' + e.name + ': ' + r.streams.length + ' streams in ' + r.ms + 'ms');
+      const add = [];
+      for (const x of r.streams) {
+        if (add.length >= PER_PROVIDER) break;
+        if (x.url && seen.has(x.url)) continue;
+        if (x.url) seen.add(x.url);
+        add.push(x);
+      }
+      all.push(...add);
+      console.log('[fast] ' + e.name + ': ' + add.length + ' streams in ' + r.ms + 'ms');
     }
   }).then(() => {
     entry.t = Date.now();
   });
 
   await Promise.race([finished, new Promise((resolve) => setTimeout(resolve, DEADLINE))]);
-  console.log('[fast] ' + type + ' ' + id + ': ' + all.length + ' streams, ' + done + '/' + list.length + ' scrapers finished');
+  console.log('[fast] ' + type + ' ' + id + (more ? ' (more)' : '') + ': ' + all.length + ' streams, ' + done + '/' + ord.length + ' scrapers finished');
   return all;
 }
 
-export async function fastStreams(env, tmdbId, mediaType, season = 1, episode = 1) {
+export async function fastStreams(env, tmdbId, mediaType, season = 1, episode = 1, opts) {
   const type = mediaType === 'series' ? 'tv' : mediaType || 'movie';
   const only = onlyList(env);
   const key = [type, tmdbId, season, episode, only.join(',')].join('|');
 
+  const more = !!(opts && opts.fresh);          // a Refresh: carry on with the providers not asked yet, keep what was already found
   const hit = resultCache.get(key);
-  if (hit && Date.now() - hit.t < (hit.list.length ? RESULT_TTL : EMPTY_TTL)) return hit.list.slice();
+  if (!more && hit && Date.now() - hit.t < (hit.list.length ? RESULT_TTL : EMPTY_TTL)) return hit.list.slice();
 
-  if (inflight.has(key)) return (await inflight.get(key)).slice();
-  const p = search(env, tmdbId, type, season, episode, only, key).finally(() => inflight.delete(key));
-  inflight.set(key, p);
+  const ik = more ? key + '|more' : key;
+  if (inflight.has(ik)) return (await inflight.get(ik)).slice();
+  const p = search(env, tmdbId, type, season, episode, only, key, more && !!hit).finally(() => inflight.delete(ik));
+  inflight.set(ik, p);
   return (await p).slice();
 }
 
