@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-27.68";
+const APP_VERSION = "2026-11-28.70";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -1806,6 +1806,18 @@ async function authSetup(env) {
   ]);
   authReady = true;
 }
+// Cinema Lounge live channel lives in Render's memory (text only: chat, reactions, voice signaling). From a Worker-hosted page it is only forwarded; nothing is stored here.
+async function roomProxy(request, url, env) {
+  const J = (o, st) => new Response(JSON.stringify(o), { status: st, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+  if (!env.STREAM_BACKEND) return J({ error: "Live room isn't available on this server." }, 503);
+  if (request.method !== "GET" && request.method !== "POST") return J({ error: "Not found" }, 404);
+  try {
+    const init = { method: request.method, headers: { authorization: request.headers.get("authorization") || "", "content-type": "application/json" }, signal: AbortSignal.timeout(32000) };
+    if (request.method === "POST") init.body = (await request.text()).slice(0, 8000);
+    const rr = await fetch(env.STREAM_BACKEND.replace(/\/+$/, "") + url.pathname + url.search, init);
+    return new Response(await rr.text(), { status: rr.status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+  } catch (e) { return J({ error: "Live room unreachable." }, 502); }
+}
 async function authHandle(request, url, env) {
   if (!env.DB || !env.AUTH_SECRET || String(env.AUTH_SECRET).length < 32) return authJson({ error: "Accounts are not switched on yet." }, 503);
   const path = url.pathname;
@@ -2030,6 +2042,14 @@ async function authHandle(request, url, env) {
           env.DB.prepare("INSERT OR REPLACE INTO party_members (code, uid, name, joined, seen) VALUES (?, ?, ?, ?, ?)").bind(code, uid, pm.name, now, now),
         ]);
         return authJson(await view(await getParty(code), uid));
+      }
+      if (path === "/api/acct/party/live") {
+        // read-only: tells the live room (Render) who this is and whether they are in this party. No D1 write.
+        const lc = cleanCode(body.code), lp = lc.length === 6 ? await getParty(lc) : null;
+        if (!lp || lp.ended === 1) return authJson({ ok: false });
+        const lr = await roster(lc);
+        if (!lr.some((r) => r.uid === uid)) return authJson({ ok: false });
+        return authJson({ ok: true, uid: String(uid), name: pm.name, host: lp.host === uid });
       }
       if (path === "/api/acct/party/join") {
         const code = cleanCode(body.code);
@@ -3810,6 +3830,7 @@ const APP_HTML = String.raw`<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="1b41a7e31a565725c622166c6dbd75c59cb3bdf2" content="1b41a7e31a565725c622166c6dbd75c59cb3bdf2" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#0a0a0a">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon-192.png">
@@ -4431,6 +4452,50 @@ body.amoled{--bg:#000;--card:#09090a;--card2:#111113;--line:#18181a}
 .lchip.lcp.r{color:#f87171;border-color:rgba(248,113,113,.45);background:rgba(239,68,68,.14)}
 .srvalt .splaybtn.dlb{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.18)}
 #player .srdl{margin-left:6px}
+#player .plcol{position:absolute;left:calc(env(safe-area-inset-left,0px) + 12px);bottom:calc(env(safe-area-inset-bottom,0px) + 140px);display:flex;flex-direction:column;align-items:flex-start;gap:8px;max-width:min(320px,calc(100% - 90px));z-index:6}
+@media (orientation:portrait){#player .plcol{bottom:calc(env(safe-area-inset-bottom,0px) + 196px)}}
+#player .plcol.off .plrb{display:none}
+#player .plwh{display:flex;flex-direction:column;gap:4px;pointer-events:none}
+#player .plw{background:rgba(18,18,22,.42);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);color:#fff;font-size:13px;line-height:1.25;padding:5px 10px;border-radius:12px;max-width:100%;overflow-wrap:anywhere;animation:plfade 5s ease forwards;text-shadow:0 1px 2px #000}
+#player .plw b{color:#fda4af;font-weight:800}
+@keyframes plfade{0%{opacity:0;transform:translateY(6px)}8%{opacity:1;transform:none}70%{opacity:1}100%{opacity:0}}
+#player .plpill,#player .plrb,#player .pldr{background:rgba(18,18,22,.5);border:1px solid rgba(255,255,255,.16);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);border-radius:999px;transition:opacity .2s}
+#player .plpill{display:flex;align-items:center;gap:8px;padding:5px 8px 5px 6px;color:#fff;flex-wrap:wrap}
+#player .plrb{display:flex;gap:2px;padding:3px 6px}
+#player .plrbb{font-size:18px;padding:3px 6px;border-radius:999px;background:transparent;border:0;line-height:1}
+#player .plrbb:active{transform:scale(1.25)}
+#player.hide .plpill,#player.hide .plrb{opacity:.28;pointer-events:none}
+#player .plav{display:flex}
+#player .plavt{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;margin-left:-6px;border:2px solid rgba(18,18,22,.9);box-sizing:border-box;position:relative}
+#player .plavt:first-child{margin-left:0}
+#player .plavt.spk{box-shadow:0 0 0 2px #22c55e,0 0 10px 2px rgba(34,197,94,.7);animation:plring 1s ease-in-out infinite}
+@keyframes plring{50%{box-shadow:0 0 0 3px #22c55e,0 0 14px 4px rgba(34,197,94,.5)}}
+#player .plavt.hst::after{content:"";position:absolute;right:-3px;top:-3px;width:9px;height:9px;border-radius:50%;background:#facc15;border:1.5px solid #111}
+#player .plcnt{font-size:12px;font-weight:800}
+#player .plbd{font-size:11px;font-weight:800;border-radius:999px;padding:2px 8px;display:inline-flex;align-items:center;gap:4px}
+#player .plbd:empty{display:none}
+#player .plbd.host{background:#facc15;color:#1a1500}
+#player .plbd.lock{background:rgba(255,255,255,.12);color:#e4e4e7}
+#player .plib{position:relative;width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);color:#fff;-webkit-user-select:none;user-select:none;touch-action:manipulation;-webkit-touch-callout:none}
+#player .plib.on{background:#e50914;border-color:#e50914}
+#player .plib.spk{box-shadow:0 0 0 3px rgba(34,197,94,.7)}
+#player .plib.off{color:#a1a1aa}
+#player .pldot{position:absolute;top:3px;right:3px;width:8px;height:8px;border-radius:50%;background:#e50914;display:none}
+#player .pldr{flex-direction:column;width:min(300px,calc(100vw - 100px));border-radius:18px;padding:8px;gap:6px}
+#player .pldh{display:flex;justify-content:space-between;align-items:center;color:#fff;font-size:13px;padding:0 4px}
+#player .pldx{background:transparent;border:0;color:#fff;font-size:22px;line-height:1;padding:0 6px}
+#player .pld{max-height:120px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;color:#fff;font-size:13px;-webkit-overflow-scrolling:touch}
+#player .pldm{overflow-wrap:anywhere}
+#player .pldm b{color:#fda4af}
+#player .pldm.me b{color:#86efac}
+#player .pldempty{opacity:.6;font-size:12px;padding:6px 2px}
+#player .pldr2{display:flex;gap:6px}
+#player .pldi{flex:1;min-width:0;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);color:#fff;border-radius:999px;padding:7px 12px;font-size:14px}
+#player .pldb{background:#e50914;color:#fff;border:0;border-radius:999px;padding:0 14px;font-weight:800;font-size:13px}
+#player .plfl{position:absolute;left:calc(env(safe-area-inset-left,0px) + 12px);bottom:calc(env(safe-area-inset-bottom,0px) + 190px);width:120px;height:0;pointer-events:none;z-index:7}
+@media (orientation:portrait){#player .plfl{bottom:calc(env(safe-area-inset-bottom,0px) + 250px)}}
+#player .plfe{position:absolute;bottom:0;font-size:26px;animation:plrise 2.2s ease-out forwards;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6))}
+@keyframes plrise{0%{opacity:0;transform:translateY(0) scale(.6)}15%{opacity:1}100%{opacity:0;transform:translateY(-150px) scale(1.15)}}
 #player .srmode{display:flex;gap:6px;margin:0 0 10px}
 #player .srmb{flex:1;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#fff;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:800}
 #player .srmb.on{background:#e50914;border-color:#e50914}
@@ -5638,6 +5703,352 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   }
   // ---- v2.0 watch party: invite code, "N watching", host-driven sync (no video goes through the server) ----
   var PTY = null, PTYT = 0, PTYCTL = null, PTYSH = null;
+  // ================= Cinema Lounge: live chat, reactions and peer-to-peer voice =================
+  // Chat, reactions and voice signaling go through a tiny in-memory room on the Render server (last 50 messages, purged when the room empties).
+  // Voice audio itself is WebRTC between the phones. Nothing here is ever written to D1, KV or disk.
+  var LIVE = null;
+  var LV_EMO = ["🔥", "😂", "😱", "😭", "👏"];
+  var RTC_ICE = [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }];
+  var LV_SVG = {
+    mic: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+    spk: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></svg>',
+    spkx: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 9l5 6M22 9l-5 6"/></svg>',
+    chat: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>'
+  };
+  function liveHue(str) { var x = 0, i; str = String(str || ""); for (i = 0; i < str.length; i++) x = (x * 31 + str.charCodeAt(i)) % 360; return x; }
+  function liveIni(n) { var p = String(n || "?").trim().split(/\s+/); return ((p[0] || "?").charAt(0) + (p.length > 1 ? p[p.length - 1].charAt(0) : "")).toUpperCase(); }
+  function liveStart(code) {
+    liveStop();
+    if (!ACC || !AT || !code) return;
+    LIVE = { code: code, after: 0, run: true, off: false, fails: 0, you: "", mem: [], chat: [], unread: 0, ac: null, ui: null, open: false,
+      rtc: { stream: null, peers: {}, open: false, ptt: false, mute: false, sm: false, actx: null, an: null, lvT: 0, idleT: 0, spk: false, hold: 0, duck: false, base: 1, dv: 1, quietT: 0, warned: {} } };
+    liveUiMake();
+    livePoll(LIVE);
+  }
+  function liveStop() {
+    var L = LIVE; LIVE = null;
+    if (!L) return;
+    L.run = false;
+    try { if (L.ac) L.ac.abort(); } catch (e) {}
+    rtcShutdown(L);
+    liveUiDrop(L);
+  }
+  function livePoll(L) {
+    if (!L.run || LIVE !== L) return;
+    var ac = window.AbortController ? new AbortController() : null, o = { headers: { authorization: "Bearer " + AT }, cache: "no-store" };
+    L.ac = ac; if (ac) o.signal = ac.signal;
+    fetch("/api/room/poll?code=" + L.code + "&after=" + L.after, o).then(function (r) {
+      return r.json().then(function (j) { return { s: r.status, j: j || {} }; }, function () { return { s: r.status, j: {} }; });
+    }).then(function (x) {
+      if (!L.run || LIVE !== L) return;
+      if (x.s === 200) { L.fails = 0; if (L.off) { L.off = false; } liveGot(L, x.j); setTimeout(function () { livePoll(L); }, 60); return; }
+      if (x.s === 403) { L.run = false; return; }
+      throw 0;
+    }).catch(function () {
+      if (!L.run || LIVE !== L) return;
+      L.fails++;
+      if (L.fails === 3) { L.off = true; liveUiPaint(); }
+      setTimeout(function () { livePoll(L); }, Math.min(15000, 1500 * L.fails));
+    });
+  }
+  function liveSend(t, o, cb) {
+    var L = LIVE;
+    if (!L || L.off || !AT) { if (cb) cb(false); return; }
+    var b = { code: L.code, t: t }, k;
+    for (k in o) b[k] = o[k];
+    fetch("/api/room/send", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + AT }, body: JSON.stringify(b) }).then(function (r) {
+      if (cb) cb(r.ok, r.status);
+    }, function () { if (cb) cb(false, 0); });
+  }
+  function liveGot(L, j) {
+    if (j.you) L.you = String(j.you);
+    if (j.mem) L.mem = j.mem;
+    if (j.chat) L.chat = j.chat.slice(-50);
+    if (typeof j.seq === "number") L.after = j.seq;
+    (j.ev || []).forEach(function (e) {
+      if (e.t === "chat") {
+        L.chat.push({ u: e.u, n: e.n, x: e.x, at: e.at }); if (L.chat.length > 50) L.chat.shift();
+        if (L.open) liveListPaint(); else { L.unread++; liveWhisper(e.n, e.x); }
+      } else if (e.t === "react") liveFloat(e.x);
+      else if (e.t === "sig") rtcSignal(L, e);
+    });
+    liveUiPaint();
+    rtcPeersSync(L);
+    rtcDuck(L);
+  }
+  // ---- Cinema HUD (frosted glass, dims with the player controls, hidden under Screen Lock) ----
+  function liveUiMake() {
+    var L = LIVE, C = PTYCTL;
+    if (!L || !C || !C.root || L.ui) return;
+    var ui = { root: C.root }, R = L.rtc;
+    ui.col = h("div", "plcol");
+    ui.whi = h("div", "plwh"); ui.whi.setAttribute("aria-live", "polite");
+    ui.dr = h("div", "pldr"); ui.dr.style.display = "none";
+    ui.rb = h("div", "plrb");
+    LV_EMO.forEach(function (em) {
+      var b = h("button", "plrbb", em); b.type = "button"; b.setAttribute("aria-label", "React " + em);
+      b.onclick = function (ev) { ev.stopPropagation(); liveFloat(em); liveSend("react", { x: em }, function (ok, st) { if (st === 429) toast("Slow down a little"); }); };
+      ui.rb.appendChild(b);
+    });
+    ui.pill = h("div", "plpill");
+    ui.av = h("div", "plav"); ui.cnt = h("span", "plcnt"); ui.bd = h("span", "plbd");
+    ui.mic = h("button", "plib plmic"); ui.mic.type = "button"; ui.mic.setAttribute("aria-label", "Microphone: tap to open mic, hold to talk");
+    ui.rv = h("button", "plib"); ui.rv.type = "button"; ui.rv.setAttribute("aria-label", "Mute room voice");
+    ui.ch = h("button", "plib"); ui.ch.type = "button"; ui.ch.setAttribute("aria-label", "Cinema chat");
+    ui.mic.innerHTML = LV_SVG.mic; ui.rv.innerHTML = LV_SVG.spk; ui.ch.innerHTML = LV_SVG.chat;
+    ui.dot = h("i", "pldot"); ui.ch.appendChild(ui.dot);
+    ui.pill.appendChild(ui.av); ui.pill.appendChild(ui.cnt); ui.pill.appendChild(ui.bd);
+    ui.pill.appendChild(ui.mic); ui.pill.appendChild(ui.rv); ui.pill.appendChild(ui.ch);
+    ui.fl = h("div", "plfl");
+    // drawer
+    var hd = h("div", "pldh"); hd.appendChild(h("b", null, "Cinema Chat"));
+    var x = h("button", "pldx", "×"); x.type = "button"; x.setAttribute("aria-label", "Close chat"); x.onclick = function (ev) { ev.stopPropagation(); liveDrawer(false); };
+    hd.appendChild(x);
+    ui.list = h("div", "pld");
+    var row = h("div", "pldr2"), inp = h("input", "pldi");
+    inp.type = "text"; inp.maxLength = 200; inp.placeholder = "Say something…"; inp.setAttribute("aria-label", "Chat message"); inp.autocomplete = "off";
+    var sb = h("button", "pldb", "Send"); sb.type = "button";
+    function send() {
+      var t = String(inp.value || "").trim();
+      if (!t) return;
+      var L2 = LIVE; if (!L2) return;
+      inp.value = "";
+      L2.chat.push({ u: L2.you, n: "You", x: t, at: Date.now(), me: 1 }); if (L2.chat.length > 50) L2.chat.shift();
+      liveListPaint();
+      liveSend("chat", { x: t }, function (ok, st) { if (!ok) toast(st === 429 ? "Slow down a little" : "Message not sent"); });
+    }
+    sb.onclick = function (ev) { ev.stopPropagation(); send(); };
+    inp.onkeydown = function (ev) { ev.stopPropagation(); if (ev.key === "Enter") { ev.preventDefault(); send(); } };
+    inp.onkeyup = function (ev) { ev.stopPropagation(); };
+    row.appendChild(inp); row.appendChild(sb);
+    ui.dr.appendChild(hd); ui.dr.appendChild(ui.list); ui.dr.appendChild(row);
+    ui.col.appendChild(ui.whi); ui.col.appendChild(ui.dr); ui.col.appendChild(ui.rb); ui.col.appendChild(ui.pill);
+    ui.root.appendChild(ui.fl); ui.root.appendChild(ui.col);
+    ui.ch.onclick = function (ev) { ev.stopPropagation(); liveDrawer(!L.open); };
+    ui.rv.onclick = function (ev) { ev.stopPropagation(); R.mute = !R.mute; rtcMuteAll(L); rtcDuck(L); liveUiPaint(); toast(R.mute ? "Room voice muted" : "Room voice on"); };
+    // mic: tap = open mic on / off, hold = push to talk
+    var down = 0;
+    ui.mic.oncontextmenu = function (ev) { ev.preventDefault(); };
+    ui.mic.onpointerdown = function (ev) {
+      ev.stopPropagation(); ev.preventDefault(); down = Date.now();
+      clearTimeout(R.hold);
+      R.hold = setTimeout(function () { R.hold = 0; R.ptt = true; rtcMicStart(L); }, 320);
+    };
+    function up(ev) {
+      if (ev) ev.stopPropagation();
+      if (!down) return; down = 0;
+      if (R.hold) { clearTimeout(R.hold); R.hold = 0; R.open = !R.open; if (R.open) rtcMicStart(L); else rtcMicSync(L); }
+      else if (R.ptt) { R.ptt = false; rtcMicSync(L); }
+    }
+    ui.mic.onpointerup = up; ui.mic.onpointercancel = up; ui.mic.onpointerleave = function () { if (down && R.ptt) up(); };
+    L.ui = ui;
+    liveUiPaint();
+  }
+  function liveUiDrop(L) {
+    var ui = L && L.ui;
+    if (!ui) return;
+    [ui.col, ui.fl].forEach(function (e) { if (e && e.parentNode) e.parentNode.removeChild(e); });
+    L.ui = null;
+  }
+  function liveDrawer(on) {
+    var L = LIVE; if (!L || !L.ui) return;
+    L.open = !!on; L.ui.dr.style.display = on ? "flex" : "none"; L.ui.rb.style.display = on ? "none" : "flex"; L.ui.whi.style.display = on ? "none" : "";
+    if (on) { L.unread = 0; liveListPaint(); liveUiPaint(); }
+  }
+  function liveListPaint() {
+    var L = LIVE; if (!L || !L.ui) return;
+    var ls = L.ui.list; ls.textContent = "";
+    if (!L.chat.length) ls.appendChild(h("div", "pldempty", "No messages yet. Say hi!"));
+    L.chat.forEach(function (m) {
+      var r = h("div", "pldm" + (m.me || m.u === L.you ? " me" : ""));
+      r.appendChild(h("b", null, m.me || m.u === L.you ? "You" : m.n)); r.appendChild(document.createTextNode(" " + m.x));
+      ls.appendChild(r);
+    });
+    ls.scrollTop = ls.scrollHeight;
+  }
+  function liveWhisper(n, x) {
+    var L = LIVE; if (!L || !L.ui || L.open) return;
+    var w = h("div", "plw"); w.appendChild(h("b", null, n)); w.appendChild(document.createTextNode(" " + x));
+    L.ui.whi.appendChild(w);
+    while (L.ui.whi.childNodes.length > 3) L.ui.whi.removeChild(L.ui.whi.firstChild);
+    setTimeout(function () { if (w.parentNode) w.parentNode.removeChild(w); }, 5200);      // 5 second fade
+  }
+  function liveFloat(em) {
+    var L = LIVE; if (!L || !L.ui) return;
+    if (L.ui.fl.childNodes.length > 12) return;
+    var e = h("span", "plfe", em);
+    e.style.left = (10 + Math.floor(Math.random() * 70)) + "px";
+    e.style.animationDuration = (1.8 + Math.random() * 0.8) + "s";
+    L.ui.fl.appendChild(e);
+    setTimeout(function () { if (e.parentNode) e.parentNode.removeChild(e); }, 2800);
+  }
+  function liveUiPaint() {
+    var L = LIVE, ui = L && L.ui;
+    if (!ui) return;
+    var R = L.rtc, P = PTY, mem = L.mem && L.mem.length ? L.mem : ((P && P.members) || []).map(function (m, i) { return { u: "x" + i, n: m.name, h: m.host ? 1 : 0, s: 0 }; });
+    ui.av.textContent = "";
+    mem.slice(0, 5).forEach(function (m) {
+      var a = h("span", "plavt" + (m.s ? " spk" : "") + (m.h ? " hst" : ""), liveIni(m.n));
+      a.style.background = "hsl(" + liveHue(m.n) + ",50%,38%)"; a.title = m.n + (m.h ? " (host)" : "");
+      ui.av.appendChild(a);
+    });
+    if (mem.length > 5) ui.av.appendChild(h("span", "plavt more", "+" + (mem.length - 5)));
+    ui.cnt.textContent = "• " + (mem.length || (P ? P.count : 1)) + " watching";
+    ui.bd.textContent = ""; ui.bd.className = "plbd";
+    if (P && P.host) { ui.bd.className = "plbd host"; ui.bd.textContent = "Host"; }
+    else if (P) { ui.bd.className = "plbd lock"; ui.bd.innerHTML = LV_SVG.lock; ui.bd.appendChild(document.createTextNode(" Host controls playback")); }
+    var tx = R.open || R.ptt;
+    ui.mic.className = "plib plmic" + (tx ? " on" : "") + (R.spk ? " spk" : "");
+    ui.mic.setAttribute("aria-pressed", tx ? "true" : "false");
+    ui.rv.innerHTML = R.mute ? LV_SVG.spkx : LV_SVG.spk; ui.rv.className = "plib" + (R.mute ? " off" : "");
+    ui.dot.style.display = L.unread > 0 ? "block" : "none";
+    ui.col.className = "plcol" + (L.off ? " off" : "");
+    ui.mic.style.display = ui.rv.style.display = rtcOk() && !L.off ? "" : "none";
+    ui.ch.style.display = ui.rb.style.display === "none" && L.open ? "" : "";
+    if (L.off) ui.cnt.textContent += " • chat offline";
+  }
+  // ---- voice: WebRTC mesh, signaling through the room, audio never touches a server ----
+  function rtcOk() { return !!(window.RTCPeerConnection && navigator.mediaDevices && navigator.mediaDevices.getUserMedia); }
+  function rtcPeer(L, uid) {
+    var R = L.rtc, p = R.peers[uid];
+    if (p) return p;
+    var pc = new RTCPeerConnection({ iceServers: RTC_ICE });
+    p = R.peers[uid] = { pc: pc, aud: null, polite: String(L.you) < String(uid), making: false, ignore: false, sent: false, senders: [], failed: 0 };
+    pc.onicecandidate = function (e) { if (e.candidate) liveSend("sig", { to: uid, d: { c: e.candidate } }); };
+    pc.ontrack = function (e) {
+      if (!p.aud) { p.aud = new Audio(); p.aud.autoplay = true; p.aud.playsInline = true; p.aud.setAttribute("playsinline", ""); }
+      p.aud.srcObject = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([e.track]);
+      p.aud.muted = !!R.mute;
+      var pr = p.aud.play(); if (pr && pr.catch) pr.catch(function () {});
+    };
+    pc.onnegotiationneeded = function () {
+      p.making = true;
+      pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).then(function () { liveSend("sig", { to: uid, d: { s: pc.localDescription } }); }).catch(function () {}).then(function () { p.making = false; });
+    };
+    pc.onconnectionstatechange = function () {
+      if (pc.connectionState === "failed" && !R.warned[uid]) { R.warned[uid] = 1; toast("Voice couldn't connect with someone (their network blocks direct voice)"); }
+    };
+    return p;
+  }
+  function rtcSignal(L, e) {
+    if (!rtcOk() || !e || !e.d) return;
+    var p = rtcPeer(L, e.u), pc = p.pc, d = e.d;
+    if (d.s) {
+      var off = d.s.type === "offer", coll = off && (p.making || pc.signalingState !== "stable");
+      p.ignore = !p.polite && coll;
+      if (p.ignore) return;
+      pc.setRemoteDescription(d.s).then(function () {
+        if (off) return pc.createAnswer().then(function (a) { return pc.setLocalDescription(a); }).then(function () { liveSend("sig", { to: e.u, d: { s: pc.localDescription } }); });
+      }).catch(function () {});
+    } else if (d.c) {
+      pc.addIceCandidate(d.c).catch(function () {});
+    }
+  }
+  function rtcAttach(L) {
+    var R = L.rtc;
+    if (!R.stream) return;
+    (L.mem || []).forEach(function (m) {
+      if (m.u === L.you) return;
+      var p = rtcPeer(L, m.u);
+      if (!p.sent) { p.sent = true; R.stream.getAudioTracks().forEach(function (t) { try { p.senders.push(p.pc.addTrack(t, R.stream)); } catch (e) {} }); }
+    });
+  }
+  function rtcPeersSync(L) {
+    var R = L.rtc, ids = {};
+    (L.mem || []).forEach(function (m) { ids[m.u] = 1; });
+    Object.keys(R.peers).forEach(function (u) {
+      if (!ids[u]) { var p = R.peers[u]; try { p.pc.close(); } catch (e) {} if (p.aud) { try { p.aud.srcObject = null; } catch (e2) {} } delete R.peers[u]; }
+    });
+    if (R.stream && (R.open || R.ptt)) rtcAttach(L);
+  }
+  function rtcMuteAll(L) { var R = L.rtc; Object.keys(R.peers).forEach(function (u) { if (R.peers[u].aud) R.peers[u].aud.muted = !!R.mute; }); }
+  function rtcMicStart(L) {
+    var R = L.rtc;
+    if (!rtcOk()) { toast("Voice isn't supported in this browser"); R.open = false; R.ptt = false; return; }
+    if ((L.mem || []).length > 5) { toast("Voice chat is limited to 5 people in a room"); R.open = false; R.ptt = false; liveUiPaint(); return; }
+    clearTimeout(R.idleT);
+    if (R.stream) { rtcMicSync(L); return; }
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false }).then(function (st) {
+      if (LIVE !== L) { st.getTracks().forEach(function (t) { t.stop(); }); return; }
+      R.stream = st; rtcMeter(L); rtcMicSync(L);
+    }, function () { R.open = false; R.ptt = false; liveUiPaint(); toast("Microphone is blocked. Allow mic access for this site and try again."); });
+  }
+  function rtcMicSync(L) {
+    var R = L.rtc, tx = !!(R.open || R.ptt);
+    if (R.stream) {
+      R.stream.getAudioTracks().forEach(function (t) { t.enabled = tx; });
+      if (tx) rtcAttach(L);
+    }
+    if (R.sm !== tx) { R.sm = tx; liveSend("mic", { on: tx }); }
+    clearTimeout(R.idleT);
+    // the mic is handed back to the phone as soon as it is switched off (push-to-talk keeps it a few seconds for the next press)
+    if (!tx && R.stream) R.idleT = setTimeout(function () { rtcRelease(L); }, R.open === false && !R.ptt ? 6000 : 60000);
+    liveUiPaint();
+  }
+  function rtcRelease(L) {
+    var R = L.rtc;
+    clearTimeout(R.idleT); clearInterval(R.lvT); R.lvT = 0;
+    Object.keys(R.peers).forEach(function (u) { var p = R.peers[u]; p.senders.forEach(function (sn) { try { p.pc.removeTrack(sn); } catch (e) {} }); p.senders = []; p.sent = false; });
+    if (R.stream) { R.stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); R.stream = null; }
+    if (R.actx) { try { R.actx.close(); } catch (e) {} R.actx = null; R.an = null; }
+    if (R.spk) { R.spk = false; liveSend("spk", { on: false }); }
+    if (R.sm) { R.sm = false; liveSend("mic", { on: false }); }
+    liveUiPaint();
+  }
+  function rtcShutdown(L) {
+    var R = L.rtc;
+    clearTimeout(R.hold); clearTimeout(R.quietT);
+    R.open = false; R.ptt = false;
+    rtcRelease(L);
+    Object.keys(R.peers).forEach(function (u) { var p = R.peers[u]; try { p.pc.close(); } catch (e) {} if (p.aud) { try { p.aud.srcObject = null; } catch (e2) {} } });
+    R.peers = {};
+    rtcVol(L, 1, true);
+  }
+  // speaking ring: measured on this phone only, sent as a tiny on / off packet
+  function rtcMeter(L) {
+    var R = L.rtc;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      R.actx = new AC(); var src = R.actx.createMediaStreamSource(R.stream); R.an = R.actx.createAnalyser(); R.an.fftSize = 512; src.connect(R.an);
+    } catch (e) { R.an = null; return; }
+    var buf = new Uint8Array(R.an.fftSize), last = 0;
+    clearInterval(R.lvT);
+    R.lvT = setInterval(function () {
+      if (!R.an || !(R.open || R.ptt)) { if (R.spk) { R.spk = false; liveSend("spk", { on: false }); liveUiPaint(); } return; }
+      R.an.getByteTimeDomainData(buf);
+      var sum = 0, i; for (i = 0; i < buf.length; i++) { var d = (buf[i] - 128) / 128; sum += d * d; }
+      var on = Math.sqrt(sum / buf.length) > 0.03;
+      if (on) last = Date.now();
+      var now = on || Date.now() - last < 450;
+      if (now !== R.spk) { R.spk = now; liveSend("spk", { on: now }); liveUiPaint(); }
+    }, 140);
+  }
+  // cinema audio ducking: the movie drops ~30% while someone else speaks, then comes back smoothly
+  function rtcVol(L, to, snap) {
+    var R = L.rtc, v = PTYCTL && PTYCTL.v;
+    if (!v) return;
+    clearInterval(R.rampT);
+    if (snap) { if (R.duck && Math.abs(v.volume - R.dv) < 0.03) { try { v.volume = R.base; } catch (e) {} } R.duck = false; return; }
+    var from = v.volume, n = 0;
+    R.rampT = setInterval(function () { n++; var x = from + (to - from) * Math.min(1, n / 6); try { v.volume = Math.max(0, Math.min(1, x)); } catch (e) {} R.dv = v.volume; if (n >= 6) clearInterval(R.rampT); }, 45);
+  }
+  function rtcDuck(L) {
+    var R = L.rtc, v = PTYCTL && PTYCTL.v;
+    if (!v) return;
+    var talk = !R.mute && (L.mem || []).some(function (m) { return m.u !== L.you && m.s; });
+    if (talk) {
+      clearTimeout(R.quietT); R.quietT = 0;
+      if (!R.duck) { R.duck = true; R.base = v.volume; rtcVol(L, Math.max(0, R.base * 0.7)); R.dv = R.base * 0.7; }
+    } else if (R.duck && !R.quietT) {
+      R.quietT = setTimeout(function () {
+        R.quietT = 0;
+        if (Math.abs(v.volume - R.dv) < 0.03) rtcVol(L, R.base); else clearInterval(R.rampT);     // the viewer touched the volume: leave it alone
+        R.duck = false;
+      }, 700);
+    }
+  }
+  function partyLiveT() { var P = PTY; if (!P || !P.live) return 0; return P.live.pos + (P.live.playing ? (Date.now() - P.live.at) / 1000 : 0); }
   function partyKey(m) { return m ? m.mt + ":" + m.id + ":" + (m.mt === "tv" ? m.s + "x" + m.e : "") : ""; }
   function partyWord(n) { return n >= 2 ? n + " watching" : "Waiting for guests"; }
   function partyClean(c) { return String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6); }
@@ -5656,8 +6067,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       b.setAttribute("aria-label", "Watch together");
     }
   }
-  function partyAttach(tr, v, ctx, adFn) {
-    PTYCTL = { v: v, ad: adFn, ctx: ctx, btn: null, evT: 0 };
+  function partyAttach(tr, v, ctx, adFn, root) {
+    PTYCTL = { v: v, ad: adFn, ctx: ctx, btn: null, evT: 0, root: root || null };
     if (PTY) { PTY.gone = 0; PTY.pend = 0; PTY.last = null; }
     if (!(ctx && ctx.live) && canWatch() && ACC) {
       var b = h("button", "ptxt ppty", "Party"); b.type = "button";
@@ -5669,8 +6080,22 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     var me = PTYCTL;
     var ping = function () { if (PTY && PTY.host && PTYCTL === me) { clearTimeout(me.evT); me.evT = setTimeout(partyTick, 350); } };
     v.addEventListener("pause", ping); v.addEventListener("play", ping); v.addEventListener("seeked", ping);
+    // only the host drives play / pause / seek: a guest who touches the player is put back on the host's live time
+    function guard(kind) {
+      var P = PTY;
+      if (!P || P.host || PTYCTL !== me || (me.ad && me.ad()) || !P.live || Date.now() - P.corr < 900) return;
+      var tgt = partyLiveT();
+      if (kind === "pause" && P.live.playing && !v.ended) { P.corr = Date.now(); toast("Host controls playback"); var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); }
+      else if (kind === "play" && !P.live.playing) { P.corr = Date.now(); toast("Host controls playback"); v.pause(); }
+      else if (kind === "seeked" && Math.abs(v.currentTime - tgt) > 4) { P.corr = Date.now(); toast("Host controls playback"); try { v.currentTime = tgt; } catch (e) {} }
+    }
+    v.addEventListener("pause", function () { setTimeout(function () { if (v.paused) guard("pause"); }, 250); });
+    v.addEventListener("play", function () { guard("play"); });
+    v.addEventListener("seeked", function () { guard("seeked"); });
+    if (PTY && root) { PTYCTL.root = root; liveStart(PTY.code); }
   }
   function partyDetach() {
+    liveStop();                                 // leaving the player gives the microphone back at once
     if (PTYCTL) clearTimeout(PTYCTL.evT);
     PTYCTL = null;
     if (PTY) PTY.gone = Date.now();
@@ -5689,12 +6114,14 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     clearInterval(PTYT);
     var nm = {};
     (j.members || []).forEach(function (m) { if (!m.you) nm[m.name] = 1; });
-    PTY = { code: j.code, host: !!j.host, count: j.count, members: j.members || [], media: j.media, names: nm, gone: 0, pend: 0, last: null, busy: false, busyAt: 0, fail: 0, sw: 0 };
+    PTY = { code: j.code, host: !!j.host, count: j.count, members: j.members || [], media: j.media, names: nm, gone: 0, pend: 0, last: null, busy: false, busyAt: 0, fail: 0, sw: 0, live: null, corr: 0, fo: 0 };
     PTYT = setInterval(partyLoop, 6000);
+    if (PTYCTL && PTYCTL.root) liveStart(j.code);
     partyChipPaint();
     if (tab === "me") renderMe();
   }
   function partyStop() {
+    liveStop();
     clearInterval(PTYT); PTYT = 0; PTY = null;
     partyChipPaint();
     partySheetClose();
@@ -5752,6 +6179,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     partyChipPaint();
     partySheetPaint();
     var c = PTYCTL;
+    P.live = { pos: Number((j.state || {}).pos) || 0, playing: !!(j.state || {}).playing, at: Date.now() };
     if (P.host || !c || (c.ad && c.ad())) return;
     var st = j.state || {};
     if (j.media && partyKey(j.media) !== partyKey(c.ctx)) {
@@ -6303,6 +6731,11 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
   var DLBLK = {}, DLHOOK = null;
   try { DLBLK = JSON.parse(sessionStorage.getItem("boa_dlblk") || "{}") || {}; } catch (e) { DLBLK = {}; }
   function dlKey(u) { var hs = ""; try { hs = new URL(String(u), location.href).host; } catch (e) { hs = String(u || "").slice(0, 80); } return hs === location.host ? String(u) : hs; }
+  // hosts whose links keep failing in this session sink in the ranking (memory + sessionStorage only)
+  var HOSTF = {};
+  try { HOSTF = JSON.parse(sessionStorage.getItem("boa_hostf") || "{}") || {}; } catch (e) { HOSTF = {}; }
+  function hostFail(u) { var k = dlKey(u); if (/^https?:/i.test(k)) return; HOSTF[k] = (HOSTF[k] || 0) + 1; try { sessionStorage.setItem("boa_hostf", JSON.stringify(HOSTF)); } catch (e) {} }
+  function hostPen(u) { var k = dlKey(u); return /^https?:/i.test(k) ? 0 : Math.min(2, HOSTF[k] || 0); }
   function dlBlocked(u) { return !!DLBLK[dlKey(u)]; }
   function dlMarkBlk(u) { DLBLK[dlKey(u)] = 1; try { sessionStorage.setItem("boa_dlblk", JSON.stringify(DLBLK)); } catch (e) {} }
   // a stream the browser can save: a real file / playlist, not heavy (MKV, big remux), not torrent, not a host that already refused
@@ -8046,7 +8479,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     if (root.parentNode !== document.body) document.body.appendChild(root);
     window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
     window.__closePlayer = function () { try { closeP(); } catch (e) {} };
-    var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null, failedU = {}, dead = false, hadFail = {}, upd = {}, chkAt = {};
+    var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null, failedU = {}, dead = false, hadFail = {}, upd = {}, chkAt = {}, rescueN = 0, relayTried = {}, hfd = {};
     var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
     (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
     var dash = null, menuEl = null, seekAfter = 0, BRI = 1, gestEnd = 0, rate = 1, fitI = 0, mqL = null;
@@ -8110,7 +8543,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       tr.appendChild(bOnl);
     }
     tr.appendChild(bAmb); tr.appendChild(bFs); tr.appendChild(bX);
-    try { partyAttach(tr, v, ctx, function () { return adActive; }); } catch (e) {}
+    try { partyAttach(tr, v, ctx, function () { return adActive; }, root); } catch (e) {}
     top.appendChild(tr);
     root.appendChild(top);
 
@@ -8346,7 +8779,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     function stepOrFail() {
       var L = (ctx && ctx.servers) || [];
       failedU[url] = 1;
-      var tp0 = curPos(); if (tp0 > 1 && !isLive) seekAfter = tp0;     // every link / server switch resumes from the same second
+      if (!hfd[url]) { hfd[url] = 1; hostFail(url); }
+      var tp0 = resumeT(); if (tp0 > 1 && !isLive) seekAfter = tp0;     // every link / server switch resumes from the same second
       if (curSrv > -1) { bad[curSrv] = 1; hadFail[curSrv] = 1; upd[curSrv] = 0; paintDots(); }
       console.warn("[Boa] playback failed on", url, why);
       if (autoN++ < 24) {
@@ -8394,8 +8828,34 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           switchTo(j, true);
           return;
         }
+        // 4) last resort before any error screen: the same links once more through the stream relay. It sends the host's own Referer / Origin,
+        //    which is what gets past hot-link 403s (links that only worked in VLC). At most 2 tries per title; nothing is shown to the viewer but the pill.
+        if (rescueN < 2 && !isLive) {
+          var rc = null, pool = [];
+          L.forEach(function (sv, ix) { if (!sv.tor) { pool.push({ st: sv.st, i: ix }); (sv.alts || []).forEach(function (a) { if (!a.tor) pool.push({ st: a.st, i: ix }); }); } });
+          if (!pool.length && curSt) pool.push({ st: curSt, i: curSrv });
+          for (var pz = 0; pz < pool.length && !rc; pz++) {
+            var pu = String((pool[pz].st && pool[pz].st.url) || "");
+            if (!pu || relayTried[pu] || /\/embed\/|\.html?($|\?)|\.(mkv|avi|mpd)(\?|$)|^magnet:/i.test(pu)) continue;
+            rc = pool[pz];
+          }
+          if (rc) {
+            rescueN++; relayTried[rc.st.url] = 1;
+            curSt = rc.st; url = rc.st.url; relayed = false; retried = true; why = "";
+            if (rc.i > -1) { curSrv = rc.i; tried[rc.i] = 1; bad[rc.i] = 0; paintDots(); }
+            msg.className = "pmsg"; msg.textContent = "";
+            tryEl.textContent = "Trying a protected route\u2026"; tryEl.className = "ptry on";
+            startSource(url, true);
+            return;
+          }
+        }
       }
       fail();
+    }
+    function resumeT() {
+      var t = curPos();
+      if (PTY && !PTY.host) { var lt = partyLiveT(); if (lt > 1) t = lt; if (!PTY.fo) { PTY.fo = 1; toast("Finding a stream your phone can play\u2026"); } }
+      return t;
     }
     function startSource(src0, useRelay) {
       var gen = ++srcGen;                       // any older pending start / relay retry is cancelled by this
@@ -8417,7 +8877,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
         var onFatal = function () {
           clearTimeout(stallT);
           if (gen !== srcGen) return;
-          var tpf = curPos(); if (tpf > 1 && !isLive) seekAfter = tpf;
+          var tpf = resumeT(); if (tpf > 1 && !isLive) seekAfter = tpf;
           // the toggle is read live: a relay retry only happens while it is ON, and never when it is OFF
           if (RELAY_ON() && !relayed && !retried) { retried = true; toast("Retrying through the privacy relay"); startSource(src0, true); return; }
           // privacy relay OFF: a blocked HLS playlist (CORS / 403 / network) gets one retry through the stream proxy, with its own message
@@ -11227,6 +11687,12 @@ $("smclose").onclick = function () {
             if (gb > 0 && gb < 0.5) sc += 40; else if (gb > 0.8) sc -= 40;
             if (f === "hls") sc += 25;
           }
+          if (PTY) {                                    // watch party: universal H.264 + AAC first (HLS / MP4) so every guest phone can follow the host
+            if (f === "hls" || f === "file") sc += 30;
+            if (heavy) sc -= 40;
+            if (/hevc|x265|h\.?265|av1|vp9|10.?bit|hdr|dolby|\bdv\b/i.test(t) || /\.webm(\?|$)/i.test(String(x.url || ""))) sc -= 40;
+          }
+          sc -= 25 * hostPen(x.url);                    // a host that already failed in this session goes down the list
           return { f: f, heavy: heavy, q: q, sc: sc, gb: gb, over: gb > 5 };
         }
         function tierOf(q) { return !q ? 0 : q <= 400 ? 380 : q <= 576 ? 480 : q <= 900 ? 720 : q <= 1300 ? 1080 : q <= 2500 ? 2160 : 4320; }
@@ -14960,6 +15426,7 @@ export default {
     if (url.pathname === "/api/probe") return probeHandle(url, env);
     if (url.pathname === "/api/ping") return pingHandle(url, env);
     if (url.pathname === "/api/size") return sizeHandle(url, env);
+    if (url.pathname.startsWith("/api/room/")) return roomProxy(request, url, env);
     if (url.pathname.startsWith("/api/auth/") || url.pathname.startsWith("/api/acct/")) return authHandle(request, url, env);
     env = kvEnv(env, url.pathname.startsWith("/api/admin/"));
     // The Mini App and trailer player must open from this Worker's own https address
