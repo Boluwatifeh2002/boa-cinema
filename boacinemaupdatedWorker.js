@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-28.75";
+const APP_VERSION = "2026-11-28.76";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -8257,6 +8257,36 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       });
       return out;
     }
+    function sameA(x, t) { return (x.language || "") === t.lang && (x.label || "") === t.name; }
+    function activeV() { var c = null; (p.getVariantTracks() || []).forEach(function (x) { if (x.active) c = x; }); return c; }
+    // 1) ask Shaka for the language, 2) if that did not move the playing audio (same language code on several tracks, or a locked default),
+    // pick the matching variant itself and switch adaptive switching off so it cannot fall back to the default audio
+    function applyAud(t) {
+      try { p.selectAudioLanguage(t.lang, t._r); } catch (e) {}
+      setTimeout(function () {
+        try {
+          var vs = p.getVariantTracks() || [], cur = activeV();
+          if (cur && sameA(cur, t)) return;
+          var cands = vs.filter(function (x) { return sameA(x, t); });
+          if (!cands.length) return;
+          var h0 = cur ? cur.height || 0 : 0, cap = o._cap ? o._cap() : 0, best = null, bd = 1e9, aim = cap && h0 > cap ? cap : h0;
+          cands.forEach(function (x) {
+            var hh = x.height || 0;
+            if (cap && hh > cap && cands.some(function (y) { return (y.height || 0) <= cap; })) return;
+            var d = Math.abs(hh - aim); if (d < bd) { bd = d; best = x; }
+          });
+          p.configure({ abr: { enabled: false } });
+          p.selectVariantTrack(best || cands[0], true);
+        } catch (e) {}
+      }, 600);
+    }
+    try {
+      p.addEventListener("variantchanged", function () {
+        if (!o._want || o._lockN >= 2) return;
+        var cur = activeV();
+        if (cur && !sameA(cur, o._want)) { o._lockN++; applyAud(o._want); }
+      });
+    } catch (e) {}
     Object.defineProperty(o, "audioTracks", { get: function () { try { return auds(); } catch (e) { return []; } } });
     Object.defineProperty(o, "audioTrack", {
       get: function () {
@@ -8270,17 +8300,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       set: function (i) {
         var a = auds(), t = a[i];
         if (!t) return;
-        try { p.selectAudioLanguage(t.lang, t._r); } catch (e) {}
-        setTimeout(function () {
-          try {
-            var vs = p.getVariantTracks() || [], cur = null;
-            vs.forEach(function (x) { if (x.active) cur = x; });
-            if (cur && ((cur.language || "") !== t.lang || (cur.label || "") !== t.name)) {
-              var vt = vs.filter(function (x) { return (x.language || "") === t.lang && (x.label || "") === t.name; })[0];
-              if (vt) p.selectVariantTrack(vt, true);
-            }
-          } catch (e) {}
-        }, 700);
+        o._want = t; o._lockN = 0;
+        applyAud(t);
       }
     });
     function txts() { return (p.getTextTracks() || []).map(function (t) { return { lang: t.language || "", name: t.label || "", _t: t }; }); }
@@ -8592,6 +8613,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     // declared up here on purpose: a saved (offline) video starts the player at once, before the settings menu code further down has run
     var DSV = lsGet("boa_ds", "0") === "1", QSEL = lsGet("boa_qsel", "auto"), QINFO = { n: 0, h: 0, k: "" };
     if (["auto", "480", "720", "1080"].indexOf(QSEL) < 0) QSEL = "auto";
+    var AUDUSER = false, AUDPREF = null;
+    try { AUDPREF = JSON.parse(sessionStorage.getItem("boa_audpref") || "null"); } catch (e) { AUDPREF = null; }      // the language the viewer picked stays for this session
     var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null, failedU = {}, dead = false, hadFail = {}, upd = {}, chkAt = {}, rescueN = 0, relayTried = {}, hfd = {};
     var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
     (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
@@ -9022,9 +9045,8 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             try {
               var at = sh.audioTracks || [];
               if (at.length > 1 && AUDPREF) {
-                var pi = -1;
-                at.forEach(function (t2, q) { if (pi < 0 && String(t2.lang || "") === AUDPREF.lang && (!AUDPREF.name || String(t2.name || "") === AUDPREF.name)) pi = q; });
-                if (pi > -1 && pi !== sh.audioTrack) sh.audioTrack = pi;      // the user's pick stays locked on every new link
+                var pi = audIdx(at, AUDPREF);
+                if (pi > -1 && pi !== sh.audioTrack && !sh._want) sh.audioTrack = pi;      // the user's pick is applied on every new link
                 sh._aud = 1;
               } else if (at.length > 1 && !AUDUSER && !sh._aud && ctx && ctx.ol) {
                 sh._aud = 1;
@@ -9053,7 +9075,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           }
           try { if (sk.polyfill && !sk.__boaPoly) { sk.polyfill.installAll(); sk.__boaPoly = 1; } } catch (e) {}
           try { p = new sk.Player(); } catch (e) { noShk = true; go(src); return; }
-          sh = hls = shkShim(p);
+          sh = hls = shkShim(p); sh._cap = function () { return qCap(); };
           var tx = null;
           try {
             if (sk.text && sk.text.UITextDisplayer) { tx = root.querySelector(".shk-tx"); if (!tx) { tx = h("div", "shk-tx"); root.appendChild(tx); } tx.textContent = ""; }
@@ -9187,6 +9209,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             try {
               var at = hls.audioTracks || [];
               if (at.length && hls.audioTrack < 0) hls.audioTrack = 0;
+              if (at.length > 1 && AUDPREF) { var pj = audIdx(at, AUDPREF); if (pj > -1 && pj !== hls.audioTrack) hls.audioTrack = pj; }
               // several languages in the stream: start on the title's original language (Korean film -> Korean), never auto-switch after the viewer picks one
               if (at.length > 1 && !AUDUSER && !AUDPREF && ctx && ctx.ol) {
                 var want = langName(ctx.ol).toLowerCase(), pick = -1;
@@ -9196,6 +9219,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
             } catch (e) {}
             paintAud();
           });
+          try { hls.on(window.Hls.Events.AUDIO_TRACK_SWITCHED, function (ev, d) { hls._audSw = d && typeof d.id === "number" ? d.id : hls.audioTrack; }); } catch (e) {}
           hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, function () {
             try {
               var tr = hls.subtitleTracks || [], i;
@@ -9893,7 +9917,39 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       return x.split(".")[0].toUpperCase();
     }
     function chName(n) { n = +n; return n === 1 ? "Mono" : n === 2 ? "Stereo" : n === 6 ? "5.1" : n === 8 ? "7.1" : n > 0 ? n + "ch" : ""; }
-    var AUDUSER = false, AUDPREF = null;
+    function audIdx(at, P) {
+      var i, ln = P ? langName(P.lang || P.name || "").toLowerCase() : "";
+      if (!P) return -1;
+      for (i = 0; i < at.length; i++) if (String(at[i].lang || "") === P.lang && (!P.name || String(at[i].name || "") === P.name)) return i;
+      for (i = 0; i < at.length; i++) if (ln && (langName(at[i].lang || "").toLowerCase() === ln || String(at[i].name || "").toLowerCase().indexOf(ln) > -1)) return i;
+      return -1;
+    }
+    function audSave() { try { if (AUDPREF) sessionStorage.setItem("boa_audpref", JSON.stringify(AUDPREF)); } catch (e) {} }
+    var AUDFAIL = null;
+    // after a switch: did the playing audio really change? if the server keeps its default, say so in the drawer and offer the way out
+    function audVerify(r, tries) {
+      if (r.idx == null) return;
+      setTimeout(function () {
+        var cur = -2;
+        try { cur = hls ? (typeof hls._audSw === "number" ? hls._audSw : hls.audioTrack) : -2; } catch (e) {}
+        if (cur === r.idx) { AUDFAIL = null; paintAud(); return; }
+        if (cur === -1 || cur === -2) return;                         // cannot tell: no claim either way
+        if (!tries) { audVerify(r, 1); return; }
+        var now = "";
+        try { (hls.audioTracks || []).forEach(function (t2, q) { if (q === cur) now = langName(t2.lang) || String(t2.name || ""); }); } catch (e) {}
+        AUDFAIL = { want: r.label, now: now, url: String((curSt && curSt.url) || url || "") };
+        try { openAudio(); } catch (e) {}
+      }, tries ? 2000 : 1500);
+    }
+    function audHand(m) {
+      var hr = h("div", "ahrow"); hr.style.cssText = "display:flex;gap:8px;margin-top:8px";
+      [["Servers", function () { openServers(); }], ["VLC", function () { bVlc.onclick(); }], ["Odyssey", function () { bOdy.onclick(); }]].forEach(function (x) {
+        var bb = h("button", "arow ahand", x[0]); bb.type = "button"; bb.style.cssText = "flex:1;justify-content:center;font-weight:700;margin:0;padding:11px 6px";
+        bb.onclick = function () { closeMenu(); try { x[1](); } catch (e) {} };
+        hr.appendChild(bb);
+      });
+      m.appendChild(hr);
+    }
     function audioModel() {
       var rows = [], src = "", s0 = curSt || st || {};
       var meta = audioMeta([s0.title, s0.name, s0.description, s0.quality, s0.provider].filter(Boolean).join(" "));
@@ -9902,7 +9958,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
           src = "HLS";
           hls.audioTracks.forEach(function (tr, i) {
             var ln = langName(tr.lang) || "", nm = tr.name && String(tr.name) !== String(tr.lang) ? String(tr.name) : "";
-            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; hls.audioTrack = i; }, lang: ln });
+            rows.push({ label: nm || ln || "Track " + (i + 1), sub: [ln && nm && nm.toLowerCase() !== ln.toLowerCase() ? ln : "", codecName(tr.audioCodec), chName(tr.channels), tr.default ? "default" : "", hls._shk ? "Shaka" : "HLS"], on: hls.audioTrack === i, fn: function () { AUDPREF = { lang: String(tr.lang || ""), name: String(tr.name || "") }; audSave(); hls.audioTrack = i; }, idx: i, lang: ln });
           });
         } else if (dash && dash.getTracksFor) {
           var dt = dash.getTracksFor("audio") || [], dc = dash.getCurrentTrackFor ? dash.getCurrentTrackFor("audio") : null;
@@ -9969,12 +10025,16 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
       var rt = h("span", null, M.count + (M.count === 1 ? " track" : " tracks")); hd.appendChild(rt);
       var cx = h("button", "ax", "\u00D7"); cx.type = "button"; cx.setAttribute("aria-label", "Close audio tracks"); cx.onclick = closeMenu; hd.appendChild(cx);
       m.appendChild(hd);
+      if (AUDFAIL && AUDFAIL.url === String((curSt && curSt.url) || url || "")) {
+        m.appendChild(h("div", "awhy", "Couldn't switch to " + AUDFAIL.want + ". This server locked its default audio" + (AUDFAIL.now ? " (" + AUDFAIL.now + ")" : "") + ". Try another server, or open it in VLC / Odyssey."));
+        audHand(m);
+      }
       M.rows.forEach(function (r) {
         var b = h("button", "arow" + (r.on ? " on" : "") + (r.info ? " info" : "")); b.type = "button";
         b.appendChild(h("span", null, r.label));
         if (r.sub.length) b.appendChild(h("i", null, r.sub.join(" \u2022 ")));
         if (r.on) b.appendChild(h("span", "ck", "\u2713"));
-        if (r.fn) b.onclick = function () { AUDUSER = true; closeMenu(); try { r.fn(); } catch (e) {} toast("Audio: " + r.label); setTimeout(paintAud, 200); };
+        if (r.fn) b.onclick = function () { AUDUSER = true; AUDFAIL = null; closeMenu(); try { r.fn(); } catch (e) {} toast("Audio: " + r.label); setTimeout(paintAud, 200); audVerify(r, 0); };
         else { b.setAttribute("aria-disabled", "true"); b.onclick = function () { if (r.on) { toast("This is the audio playing now"); return; } offerLang(r); }; }
         m.appendChild(b);
       });
