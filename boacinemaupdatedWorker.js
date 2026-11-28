@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-28.74";
+const APP_VERSION = "2026-11-28.75";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -8589,6 +8589,9 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     if (root.parentNode !== document.body) document.body.appendChild(root);
     window.__vPlaying = function () { return !closed && !adActive && !v.paused && !v.ended; };
     window.__closePlayer = function () { try { closeP(); } catch (e) {} };
+    // declared up here on purpose: a saved (offline) video starts the player at once, before the settings menu code further down has run
+    var DSV = lsGet("boa_ds", "0") === "1", QSEL = lsGet("boa_qsel", "auto"), QINFO = { n: 0, h: 0, k: "" };
+    if (["auto", "480", "720", "1080"].indexOf(QSEL) < 0) QSEL = "auto";
     var srcGen = 0, triedU = {}, autoN = 0, curSt = st, probed = {}, whyEl = null, failedU = {}, dead = false, hadFail = {}, upd = {}, chkAt = {}, rescueN = 0, relayTried = {}, hfd = {};
     var tried = {}, bad = {}, curSrv = -1, why = "", stallT = null, nextInfo = null, nextShown = false, nextDismissed = false, nextT = null, nextEl = null, wasPlaying = false;
     (function () { var L0 = (ctx && ctx.servers) || []; for (var i0 = 0; i0 < L0.length; i0++) if (L0[i0].urls.indexOf(url) > -1) { curSrv = i0; tried[i0] = 1; } })();
@@ -10307,8 +10310,6 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     // movie Settings: Quality and Size only. Picks the best matching stream and keeps your place in the film.
     var SETQ = "", SETG = lsGet("boa_setg", "any");
     // ----- Quality / Data Saver: real Shaka / hls.js limits, kept on this device only (no server writes) -----
-    var DSV = lsGet("boa_ds", "0") === "1", QSEL = lsGet("boa_qsel", "auto"), QINFO = { n: 0, h: 0, k: "" };
-    if (["auto", "480", "720", "1080"].indexOf(QSEL) < 0) QSEL = "auto";
     function qCap() { return QSEL === "480" ? 480 : QSEL === "720" ? 720 : QSEL === "1080" ? 0 : DSV ? 480 : 0; }
     function bufGoal() { var c = qCap(); return DSV || (c && c <= 480) ? 12 : 40; }
     function shkQ(p, pick) {
