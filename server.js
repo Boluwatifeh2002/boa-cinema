@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { createServer } from 'node:http';
+import { roomHandle } from './rooms.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -375,6 +376,8 @@ if (!onRender) {
 
     // Stream backend route: runs before the worker so nothing can intercept it
     const reqUrl = new URL(url);
+    // Cinema Lounge live channel (chat, reactions, voice signaling): in-memory only, text only, answered here and never forwarded
+    if (reqUrl.pathname.startsWith('/api/room/')) { await roomHandle(req, res, reqUrl, body, WORKER_BASE); return; }
     if (reqUrl.pathname === '/api/plugin-streams') {
       const isPublic = !!process.env.RENDER || process.env.NODE_ENV === 'production';
       const key = process.env.STREAM_KEY || '';
