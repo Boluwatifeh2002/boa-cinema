@@ -1183,7 +1183,7 @@ function srtToVtt(t) {
 }
 
 // Bump this string on every release. It versions the app, the service worker and the caches.
-const APP_VERSION = "2026-11-28.79";
+const APP_VERSION = "2026-11-28.80";
 const SW_JS = String.raw`// @@VER@@
 var V="boa-@@VER@@";
 self.addEventListener("install",function(e){self.skipWaiting();});
@@ -7342,6 +7342,7 @@ body:has(#suspg.open) #nav,body:has(#modpg.open) #nav,body:has(#warnpg.open) #na
     var inn = h("div", "in");
     inn.appendChild(h("b", null, it.title || "Video"));
     inn.appendChild(h("div", "mt", dlStatusLine(it)));
+    if (it.prov) inn.appendChild(h("div", "mt", "From " + String(it.prov).slice(0, 40) + (it.q ? " \u2022 " + it.q + "p" : "")));       // which provider this copy came from
     if (it.status === "active" || it.status === "paused") {
       var pct = it.kind === "hls" && it.nseg ? 100 * it.n / it.nseg : it.total ? 100 * (it.cur || it.bytes) / it.total : 0;
       var bar = h("div", "dlbar"), fi = h("i"); fi.style.width = Math.min(100, pct) + "%"; bar.appendChild(fi); inn.appendChild(bar);
